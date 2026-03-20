@@ -1,0 +1,1940 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Zaro HR — Performance Management</title>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
+<style>
+/* ── RESET & BASE ─────────────────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+:root {
+  --white:       #ffffff;
+  --bg:          #ffffff;
+  --bg-subtle:   #F1F3F5;
+  --border:      #e9edf2;
+  --border-mid:  #CDD2D8;
+
+  --ink:         #0D1117;
+  --ink-2:       #3D4550;
+  --ink-3:       #6B7280; 
+  --ink-4:       #9CA3AF;
+
+  --blue:        #2563EB;
+  --blue-light:  #EFF4FF;
+  --blue-mid:    #BFCFFE;
+
+  --green:       #16A34A;
+  --green-light: #F0FDF4;
+  --amber:       #D97706;
+  --amber-light: #FFFBEB;
+  --red:         #DC2626;
+  --red-light:   #FEF2F2;
+
+  --radius-sm: 6px;
+  --radius:    10px;
+  --radius-lg: 14px;
+  --radius-xl: 20px;
+
+  --shadow-xs: 0 1px 2px rgba(13,17,23,.05);
+  --shadow-sm: 0 1px 4px rgba(13,17,23,.07), 0 2px 8px rgba(13,17,23,.04);
+  --shadow-md: 0 4px 16px rgba(13,17,23,.09), 0 1px 4px rgba(13,17,23,.05);
+  --shadow-lg: 0 12px 40px rgba(13,17,23,.12), 0 2px 8px rgba(13,17,23,.06);
+  --shadow-blue: 0 4px 14px rgba(37,99,235,.22);
+}
+html, body { height: 100%; font-family: 'Geist', 'Segoe UI', 'Inter', Arial, sans-serif; background: var(--bg); color: var(--ink); font-size: 14px; line-height: 1.5; -webkit-font-smoothing: antialiased; }
+
+/* ── UTILITIES ────────────────────────────────────────────────────────────── */
+.hidden { display: none !important; }
+.flex { display: flex; }
+.flex-col { display: flex; flex-direction: column; }
+.items-center { align-items: center; }
+.justify-between { justify-content: space-between; }
+.justify-center { justify-content: center; }
+.gap-4  { gap: 4px; }
+.gap-8  { gap: 8px; }
+.gap-12 { gap: 12px; }
+.gap-16 { gap: 16px; }
+.gap-20 { gap: 20px; }
+.gap-24 { gap: 24px; }
+.w-full { width: 100%; }
+.mt-4  { margin-top: 4px; }
+.mt-8  { margin-top: 8px; }
+.mt-12 { margin-top: 12px; }
+.mt-16 { margin-top: 16px; }
+.mt-20 { margin-top: 20px; }
+.mt-24 { margin-top: 24px; }
+.mt-32 { margin-top: 32px; }
+.mb-4  { margin-bottom: 4px; }
+.mb-8  { margin-bottom: 8px; }
+.mb-12 { margin-bottom: 12px; }
+.mb-16 { margin-bottom: 16px; }
+.mb-20 { margin-bottom: 20px; }
+.mb-24 { margin-bottom: 24px; }
+.mb-32 { margin-bottom: 32px; }
+.text-xs  { font-size: 11.5px; }
+.text-sm  { font-size: 12.5px; }
+.text-base { font-size: 14px; }
+.text-lg  { font-size: 16px; }
+.text-muted { color: var(--ink-3); }
+.text-blue  { color: var(--blue); }
+.fw-400 { font-weight: 400; }
+.fw-500 { font-weight: 500; }
+.fw-600 { font-weight: 600; }
+.fw-700 { font-weight: 700; }
+.serif  { font-family: 'Geist', 'Segoe UI', 'Inter', Arial, sans-serif; }
+.grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px; }
+
+/* ── ANIMATIONS ───────────────────────────────────────────────────────────── */
+@keyframes fadeUp   { from { opacity:0; transform:translateY(16px); } to { opacity:1; transform:translateY(0); } }
+@keyframes fadeIn   { from { opacity:0; } to { opacity:1; } }
+@keyframes slideIn  { from { opacity:0; transform:translateX(-12px); } to { opacity:1; transform:translateX(0); } }
+@keyframes spin     { to { transform: rotate(360deg); } }
+.anim-fadeup  { animation: fadeUp  .38s cubic-bezier(.22,.68,0,1.2) both; }
+.anim-fadein  { animation: fadeIn  .28s ease both; }
+.anim-slidein { animation: slideIn .32s ease both; }
+.delay-1 { animation-delay: .06s; }
+.delay-2 { animation-delay: .12s; }
+.delay-3 { animation-delay: .18s; }
+.delay-4 { animation-delay: .24s; }
+
+/* ── BUTTONS ──────────────────────────────────────────────────────────────── */
+.btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 7px;
+  padding: 9px 18px; border-radius: var(--radius); border: none; cursor: pointer;
+  font-family: 'Geist', 'Segoe UI', 'Inter', Arial, sans-serif; font-size: 13.5px; font-weight: 500;
+  transition: all .16s ease; text-decoration: none; white-space: nowrap; user-select: none;
+}
+.btn:active { transform: scale(.98); }
+.btn-primary { background:#2563EB; color:#fff; box-shadow:0 6px 16px rgba(37,99,235,0.25); }
+.btn-primary:hover {
+  background:#1d4ed8;
+  box-shadow:0 10px 22px rgba(37,99,235,.35);
+  transform:translateY(-2px);
+}
+.btn-secondary { background: var(--white); color: var(--ink-2); border: 1.5px solid var(--border); box-shadow: var(--shadow-xs); }
+.btn-secondary:hover { border-color: var(--border-mid); background: var(--bg); }
+.btn-ghost { background: transparent; color: var(--ink-3); padding: 8px 12px; }
+.btn-ghost:hover { background: var(--bg-subtle); color: var(--ink); }
+.btn-danger { background: var(--red-light); color: var(--red); border: 1px solid #fecaca; }
+.btn-danger:hover { background: #fee2e2; }
+.btn-sm  { padding: 6px 13px; font-size: 12.5px; border-radius: var(--radius-sm); }
+.btn-lg  { padding: 12px 28px; font-size: 15px; border-radius: var(--radius); }
+.btn-xl  { padding: 14px 32px; font-size: 15.5px; border-radius: var(--radius); font-weight: 600; letter-spacing: .01em; }
+.btn-icon { padding: 8px; border-radius: var(--radius-sm); width: 34px; height: 34px; }
+
+/* ── FORMS ────────────────────────────────────────────────────────────────── */
+.form-group { display: flex; flex-direction: column; gap: 5px; }
+label.lbl { font-size: 12.5px; font-weight: 500; color: var(--ink-2); }
+label.lbl .req { color: var(--red); margin-left: 2px; }
+input[type=text], input[type=email], input[type=password], input[type=url], input[type=number], select, textarea {
+  background: var(--white); border: 1.5px solid var(--border);
+  border-radius: var(--radius); padding: 9px 13px;
+  font-family: 'Geist', 'Segoe UI', 'Inter', Arial, sans-serif; font-size: 13.5px; color: var(--ink);
+  transition: border-color .16s, box-shadow .16s; outline: none; width: 100%;
+}
+input:focus, select:focus, textarea:focus {
+  border-color: var(--blue); box-shadow: 0 0 0 3px rgba(37,99,235,.1);
+}
+input::placeholder, textarea::placeholder { color: var(--ink-4); }
+textarea { resize: vertical; min-height: 88px; line-height: 1.55; }
+select { cursor: pointer; appearance: none; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%236B7280' d='M6 8L1 3h10z'/%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: right 12px center; padding-right: 34px; }
+.input-hint { font-size: 11.5px; color: var(--ink-4); }
+.input-prefix-wrap { position: relative; }
+.input-prefix { position: absolute; left: 0; top: 0; bottom: 0; display: flex; align-items: center; padding: 0 12px; color: var(--ink-4); font-size: 13px; border-right: 1.5px solid var(--border); background: var(--bg-subtle); border-radius: var(--radius) 0 0 var(--radius); white-space: nowrap; }
+.input-prefix + input { padding-left: 130px; }
+
+/* ── CARDS ────────────────────────────────────────────────────────────────── */
+.card { background: var(--white); border: 1.5px solid var(--border); border-radius: var(--radius-lg); box-shadow: var(--shadow-xs); }
+.card-p  { padding: 20px 22px; }
+.card-pl { padding: 24px 28px; }
+.card:hover { box-shadow: var(--shadow-sm); }
+.card-accent-top { border-top: 3px solid var(--blue); }
+.stat-card { padding: 20px 22px; border-radius: var(--radius-lg); border: 1.5px solid var(--border); background: var(--white); position: relative; overflow: hidden; }
+.stat-card::after { content:''; position:absolute; right:-20px; top:-20px; width:80px; height:80px; border-radius:50%; background: rgba(37,99,235,.04); }
+.stat-card .stat-num { font-family: 'Geist', 'Segoe UI', 'Inter', Arial, sans-serif; font-size: 36px; line-height: 1; color: var(--ink); }
+.stat-card .stat-lbl { font-size: 11.5px; font-weight: 600; letter-spacing: .7px; text-transform: uppercase; color: var(--ink-4); margin-bottom: 6px; }
+.stat-card .stat-sub { font-size: 12px; color: var(--ink-4); margin-top: 6px; }
+
+/* ── BADGES ───────────────────────────────────────────────────────────────── */
+.badge { display: inline-flex; align-items: center; gap: 4px; padding: 3px 9px; border-radius: 20px; font-size: 11.5px; font-weight: 500; }
+.badge-blue   { background: var(--blue-light); color: var(--blue); }
+.badge-green  { background: var(--green-light); color: var(--green); }
+.badge-amber  { background: var(--amber-light); color: var(--amber); }
+.badge-red    { background: var(--red-light); color: var(--red); }
+.badge-gray   { background: var(--bg-subtle); color: var(--ink-3); }
+
+/* ── TABS ─────────────────────────────────────────────────────────────────── */
+.tabs { display: flex; gap: 2px; border-bottom: 1.5px solid var(--border); margin-bottom: 24px; }
+.tab-item { padding: 9px 16px; font-size: 13.5px; font-weight: 500; color: var(--ink-3); cursor: pointer; border-bottom: 2px solid transparent; margin-bottom: -1.5px; transition: all .16s; white-space: nowrap; }
+.tab-item:hover { color: var(--ink); }
+.tab-item.active { color: var(--blue); border-bottom-color: var(--blue); }
+
+/* ── BANNERS ──────────────────────────────────────────────────────────────── */
+.banner { display: flex; gap: 10px; padding: 12px 15px; border-radius: var(--radius); font-size: 13px; line-height: 1.5; margin-bottom: 20px; }
+.banner-blue   { background: var(--blue-light); border: 1.5px solid var(--blue-mid); color: #1e40af; }
+.banner-amber  { background: var(--amber-light); border: 1.5px solid #fde68a; color: #92400e; }
+.banner-green  { background: var(--green-light); border: 1.5px solid #bbf7d0; color: #14532d; }
+
+/* ── DIVIDER ──────────────────────────────────────────────────────────────── */
+.divider { height: 1px; background: var(--border); margin: 20px 0; }
+
+/* ── EMPTY STATE ──────────────────────────────────────────────────────────── */
+.empty { display: flex; flex-direction: column; align-items: center; padding: 48px 24px; text-align: center; }
+.empty-icon { width: 64px; height: 64px; border-radius: 16px; background: var(--bg-subtle); display: flex; align-items: center; justify-content: center; font-size: 26px; margin-bottom: 16px; }
+.empty-title { font-family: 'Geist', 'Segoe UI', 'Inter', Arial, sans-serif; font-size: 19px; color: var(--ink); margin-bottom: 6px; }
+.empty-desc { font-size: 13px; color: var(--ink-3); max-width: 300px; line-height: 1.6; margin-bottom: 20px; }
+
+/* ────────────────────────────────────────────────────────────────────────── */
+/*  LOGIN PAGE                                                                 */
+/* ────────────────────────────────────────────────────────────────────────── */
+#page-login {
+  min-height: 100vh;
+  display: flex;
+  background: #f6f8fc;
+}
+.login-left {
+  width: 460px;
+  min-width: 460px;
+  background: var(--white);
+  border-right: 1px solid #e7ecf3;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  padding: 72px 64px;
+  position: relative;
+}
+.login-right {
+  flex:1;
+  background:linear-gradient(120deg,#f1f5ff,#e7ecff,#f8fafc);
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  text-align: center;
+  position: relative; overflow: hidden; padding: 48px;
+}
+.login-right-grid {
+  position: absolute; inset: 0;
+  background-image:
+    linear-gradient(rgba(255,255,255,.04) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255,255,255,.04) 1px, transparent 1px);
+  background-size: 40px 40px;
+}
+.login-right-glow {
+  position:absolute;
+  width:420px;
+  height:420px;
+  border-radius:50%;
+  background:radial-gradient(circle,rgba(37,99,235,.12) 0%,transparent 70%);
+  top:50%;
+  left:50%;
+  transform:translate(-50%,-50%);
+}
+.login-brand {
+  position: absolute;
+  top: 24px;
+  right: 24px;
+  margin: 0;
+  z-index: 2;
+}
+.logo-wrap{
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border-radius: 0;
+  background: transparent;
+  border: none;
+  box-shadow: none;
+}
+.login-logo-icon {
+  height: 28px;
+  width: auto;
+}
+.brand-mark {
+  width: 38px; height: 38px; border-radius: 10px;
+  background: var(--blue); display: flex; align-items: center; justify-content: center;
+  color: white; font-weight: 700; font-size: 18px; letter-spacing: -1px;
+}
+.brand-logo {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  border-radius: inherit;
+}
+.brand-name { font-family: 'Geist', 'Segoe UI', 'Inter', Arial, sans-serif; font-size: 22px; color: var(--ink); }
+.brand-tag { font-size: 11px; color: var(--ink-4); margin-top: 1px; letter-spacing: .5px; }
+.brand-zaro { color: #0f172a; font-weight: 700; }
+.brand-hr { color: #f2b325; font-weight: 700; }
+
+.login-heading {
+  font-family: 'Geist', 'Segoe UI', 'Inter', Arial, sans-serif;
+  font-size: 42px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: #0f172a;
+  margin-bottom: 10px;
+  line-height: 1.1;
+}
+.login-sub {
+  font-size: 16px;
+  color: #5b6577;
+  line-height: 1.6;
+  margin-bottom: 34px;
+}
+
+.role-selector { display: flex; gap: 8px; margin-bottom: 28px; }
+.role-pill {
+  flex: 1; padding: 9px 14px; border-radius: 8px; border: 1.5px solid var(--border);
+  text-align: center; font-size: 12.5px; font-weight: 500; color: var(--ink-3);
+  cursor: pointer; transition: all .16s; background: var(--white);
+}
+.role-pill:hover { border-color: var(--blue); color: var(--blue); }
+.role-pill.active { border-color: var(--blue); background: var(--blue-light); color: var(--blue); }
+
+.login-form { display: flex; flex-direction: column; gap: 18px; }
+.login-form .form-group { gap: 5px; }
+.pwd-wrap { position: relative; }
+.pwd-wrap input { padding-right: 44px; }
+.pwd-toggle {
+  position: absolute;
+  right: 12px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  background: transparent;
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+  color: var(--ink-4);
+  font-size: 14px;
+  line-height: 1;
+}
+.pwd-toggle:hover { color: var(--ink-2); background: #f1f5f9; }
+.pwd-toggle:focus,
+.pwd-toggle:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px rgba(37,99,235,0.25);
+}
+
+.login-left .lbl {
+  font-size: 13px;
+  font-weight: 600;
+  color: #334155;
+  margin-bottom: 2px;
+}
+.login-left input[type="email"],
+.login-left input[type="password"] {
+  border: 1.5px solid #e4eaf3;
+  border-radius: 14px;
+  height: 56px;
+  padding: 0 16px;
+  font-size: 17px;
+  color: #0f172a;
+  background: #ffffff;
+  box-shadow: 0 1px 3px rgba(15,23,42,0.04);
+  transition: border-color .25s ease, box-shadow .25s ease, transform .25s ease;
+}
+.login-left input[type="email"]:hover,
+.login-left input[type="password"]:hover {
+  border-color: #d4deeb;
+  box-shadow: 0 2px 8px rgba(15,23,42,0.06);
+}
+.login-left input[type="email"]:focus,
+.login-left input[type="password"]:focus {
+  border-color: #2563eb;
+  box-shadow: 0 0 0 4px rgba(37,99,235,0.12), 0 6px 14px rgba(37,99,235,0.12);
+}
+.login-meta-row {
+  margin-top: 2px;
+}
+.login-forgot {
+  font-size: 13px;
+  color: #2563eb;
+  text-decoration: none;
+}
+.login-forgot:hover {
+  color: #1d4ed8;
+  text-decoration: underline;
+}
+.login-form .btn-primary {
+  height: 56px;
+  border-radius: 14px;
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  background: linear-gradient(180deg, #2f6df2 0%, #2563eb 100%);
+  box-shadow: 0 8px 20px rgba(37,99,235,0.25);
+  transition: transform .25s ease, box-shadow .25s ease, background .25s ease;
+}
+.login-form .btn-primary:hover {
+  transform: translateY(-2px);
+  background: linear-gradient(180deg, #2a63dc 0%, #1f55ca 100%);
+  box-shadow: 0 14px 26px rgba(37,99,235,0.32);
+}
+.login-divider {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  color: #94a3b8;
+  font-size: 12px;
+  margin: 8px 0 2px;
+}
+.login-divider::before, .login-divider::after {
+  content:'';
+  flex:1;
+  height:1px;
+  background: #e9eef6;
+}
+.login-form .btn-secondary {
+  height: 48px;
+  border-radius: 12px;
+  border: 1px solid #e2e8f0;
+  background: #f8fafc;
+  color: #334155;
+  box-shadow: 0 1px 3px rgba(15,23,42,0.05);
+  transition: all .25s ease;
+}
+.login-form .btn-secondary:hover {
+  background: #f1f5f9;
+  border-color: #d6dfeb;
+  box-shadow: 0 4px 10px rgba(15,23,42,0.08);
+}
+.login-help {
+  margin-top: 24px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: #94a3b8;
+}
+.login-help a {
+  color: #64748b;
+  text-decoration: none;
+}
+.login-help a:hover {
+  color: #334155;
+  text-decoration: underline;
+}
+
+.login-right-content { position: relative; z-index: 2; text-align: center; max-width: 400px; }
+.login-right-badge { display: inline-flex; align-items: center; gap: 7px; padding: 7px 16px; background: rgba(255,255,255,.18); border: 1px solid rgba(148,163,184,.35); border-radius: 24px; font-size: 14px; color: #334155; margin-bottom: 28px; }
+.login-right-title { font-family: 'Geist', 'Segoe UI', 'Inter', Arial, sans-serif; font-size: 44px; color: #0f172a; line-height: 1.2; margin-bottom: 18px; }
+.login-right-title em { font-style: italic; color: #93c5fd; }
+.login-right-sub { font-size: 19px; color: #334155; line-height: 1.75; margin-bottom: 36px; }
+.login-features { display: flex; flex-direction: column; gap: 10px; text-align: left; }
+.login-feature { display: flex; align-items: flex-start; gap: 10px; padding: 12px 16px; background: rgba(255,255,255,.05); border: 1px solid rgba(255,255,255,.08); border-radius: 10px; }
+.login-feature-icon { width: 32px; height: 32px; border-radius: 8px; background: rgba(37,99,235,.3); display: flex; align-items: center; justify-content: center; font-size: 15px; flex-shrink: 0; }
+.login-feature-text { font-size: 13px; color: rgba(255,255,255,.75); line-height: 1.5; }
+.login-feature-text strong { color: white; display: block; margin-bottom: 1px; }
+
+/* ────────────────────────────────────────────────────────────────────────── */
+/*  APP SHELL (sidebar + topbar)                                              */
+/* ────────────────────────────────────────────────────────────────────────── */
+#page-app { display:flex; min-height:100vh; background:#F5F6FA; }
+.sidebar {
+  width:250px; min-width:250px; background:#fff; color:var(--ink-2); border-right:1px solid var(--border);
+  display:flex; flex-direction:column; height:100vh; overflow-y:auto; position:sticky; top:0;
+}
+.sidebar-logo { padding:18px; border-bottom:1px solid var(--border); display:flex; align-items:center; gap:8px; }
+.sidebar-logo .brand-mark { width:36px; height:36px; overflow:hidden; }
+.sidebar-logo .brand-mark { background:transparent; border-radius:0; display:flex; align-items:center; justify-content:center; }
+.sidebar-brand-icon { width:100%; height:100%; object-fit:cover; transform:scale(1.16); }
+.sidebar-brand-text { line-height:1.1; }
+.sidebar-logo .brand-name { font-size:18px; font-weight:700; color:var(--ink); margin-bottom:3px; }
+.sidebar-logo .brand-tag { font-size:10px; color:var(--ink-4); letter-spacing:.8px; text-transform:uppercase; }
+.nav-section-label { padding:16px 14px 6px; font-size:10px; color:var(--ink-4); letter-spacing:1px; text-transform:uppercase; font-weight:700; }
+.sb-item {
+  margin:2px 8px; padding:9px 12px; border-radius:8px; color:var(--ink-3); display:flex; align-items:center; gap:9px;
+  cursor:pointer; transition:all .15s; font-size:13px;
+}
+.sb-item:hover { background:var(--bg-subtle); color:var(--ink); }
+.sb-item.active { background:#EEF3FE; color:var(--blue); }
+.sb-item-icon { width:22px; text-align:center; font-size:14px; }
+.sb-badge { margin-left:auto; padding:2px 7px; border-radius:999px; font-size:10px; font-weight:700; background:#3B6FF0; color:#fff; }
+.sb-badge-alert { background:#D97706; }
+.sidebar-footer { margin-top:auto; border-top:1px solid var(--border); padding:14px; }
+.sidebar-user { display:flex; align-items:center; gap:10px; }
+.user-avatar {
+  width:32px; height:32px; border-radius:999px; color:#fff; background:linear-gradient(135deg,#3B6FF0,#7C3AED);
+  display:flex; align-items:center; justify-content:center; font-size:12px; font-weight:700;
+}
+.user-name { font-size:12.5px; font-weight:600; color:var(--ink); }
+.user-role { font-size:11px; color:var(--ink-4); }
+.logout-btn {
+  margin-left:auto; border:none; background:transparent; color:var(--ink-4); font-size:14px; cursor:pointer; border-radius:6px; padding:4px 6px;
+}
+.logout-btn:hover { color:#F87171; background:rgba(248,113,113,.12); }
+
+.main-content { flex:1; display:flex; flex-direction:column; min-width:0; }
+.topbar {
+  position:sticky; top:0; z-index:20; height:58px; background:#fff; border-bottom:1px solid var(--border);
+  display:flex; align-items:center; justify-content:space-between; padding:0 24px;
+}
+.topbar-left { display:flex; align-items:center; gap:12px; }
+.topbar-right { display:flex; align-items:center; gap:10px; }
+.topbar-title { font-size:15px; font-weight:600; color:var(--ink); font-family:'Geist','Segoe UI','Inter',Arial,sans-serif; }
+.status-pill {
+  border:1px solid #86efac; background:#f0fdf4; color:#15803d; border-radius:999px;
+  padding:4px 10px; font-size:11.5px; font-weight:500; display:flex; align-items:center; gap:6px;
+}
+.status-dot { width:7px; height:7px; border-radius:999px; background:#22c55e; }
+.notif-btn {
+  width:34px; height:34px; border-radius:8px; border:1px solid var(--border); background:#fff;
+  display:flex; align-items:center; justify-content:center; position:relative; cursor:pointer;
+}
+.notif-dot { position:absolute; width:7px; height:7px; border-radius:999px; background:#ef4444; top:8px; right:8px; }
+
+.page-body { flex:1; overflow-y:auto; padding:24px; }
+.view { animation:fadeUp .24s ease both; }
+.view.hidden { display:none; }
+.kpi-strip { display:grid; grid-template-columns:repeat(5, minmax(0,1fr)); gap:12px; margin-bottom:16px; }
+.kpi-card { border:1px solid var(--border); border-radius:12px; background:#fff; padding:14px 16px; }
+.kpi-label { font-size:11px; color:var(--ink-4); text-transform:uppercase; letter-spacing:.7px; margin-bottom:8px; }
+.kpi-value { font-size:26px; font-weight:600; color:var(--ink); font-family:'Geist','Segoe UI','Inter',Arial,sans-serif; line-height:1; }
+.kpi-sub { margin-top:5px; font-size:11.5px; color:var(--ink-3); }
+
+.dash-grid { display:grid; grid-template-columns:minmax(0,1fr) 340px; gap:16px; }
+.dash-left,.dash-right { display:flex; flex-direction:column; gap:16px; }
+.card { background:#fff; border:1px solid var(--border); border-radius:12px; overflow:hidden; }
+.card {
+  transition:
+    transform .2s ease,
+    box-shadow .2s ease;
+}
+.card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 16px 40px rgba(0,0,0,.08);
+}
+.card-head { display:flex; align-items:center; justify-content:space-between; padding:14px 16px; border-bottom:1px solid var(--border); }
+.card-p { padding:12px 16px; }
+
+.org-table { width:100%; border-collapse:collapse; }
+.org-table th,.org-table td { padding:10px 14px; border-bottom:1px solid var(--border); text-align:left; }
+.org-table th { font-size:11px; color:var(--ink-4); text-transform:uppercase; letter-spacing:.6px; background:#f8fafc; }
+.org-table td { font-size:13px; color:var(--ink-2); }
+.org-table tr:last-child td { border-bottom:none; }
+.org-info { display:flex; align-items:center; gap:10px; }
+.org-logo {
+  width:30px; height:30px; border-radius:8px; background:linear-gradient(135deg,#3B6FF0,#6366f1); color:#fff;
+  display:flex; align-items:center; justify-content:center; font-size:12px; font-weight:700;
+}
+.org-name { font-size:13px; font-weight:600; color:var(--ink); }
+.org-meta { font-size:11px; color:var(--ink-4); }
+
+.mini-progress { width:80px; height:6px; border-radius:999px; background:var(--bg-subtle); overflow:hidden; display:inline-flex; }
+.mini-progress-fill { height:100%; width:0; background:#16A34A; }
+.compact-list { display:flex; flex-direction:column; gap:8px; }
+.list-row { display:flex; justify-content:space-between; align-items:center; padding:8px 0; border-bottom:1px solid var(--border); font-size:12.5px; color:var(--ink-2); }
+.list-row:last-child { border-bottom:none; }
+.health-row { display:flex; justify-content:space-between; align-items:center; gap:8px; padding:6px 0; border-bottom:1px solid var(--border); font-size:12.5px; color:var(--ink-2); }
+.health-row:last-child { border-bottom:none; }
+.health-row > div { display:flex; align-items:center; gap:8px; }
+
+.banner { display:flex; align-items:flex-start; gap:8px; padding:11px 12px; border-radius:10px; margin-bottom:14px; }
+.banner-amber { background:#FFFBEB; border:1px solid #FDE68A; color:#92400E; }
+.alert-close { margin-left:auto; border:none; background:none; color:inherit; cursor:pointer; opacity:.7; font-size:16px; }
+.org-page-head { display:flex; align-items:flex-start; justify-content:space-between; gap:16px; margin-bottom:14px; }
+.org-page-title { font-size:34px; line-height:1.1; margin:0 0 6px; font-family:'Geist','Segoe UI','Inter',Arial,sans-serif; color:var(--ink); }
+.org-page-sub { margin:0; color:var(--ink-3); font-size:14px; max-width:620px; line-height:1.6; }
+.org-page-stats { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:12px; margin-bottom:14px; }
+.create-org-shell { max-width:900px; margin:36px auto 96px; }
+.create-org-title { font-family:'Geist','Segoe UI','Inter',Arial,sans-serif; font-size:34px; line-height:1.1; color:var(--ink); margin:0 0 8px; }
+.create-org-sub { margin:0 0 24px; color:var(--ink-3); font-size:14px; line-height:1.6; }
+.create-org-steps { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:10px; margin-bottom:18px; }
+.create-org-step {
+  border:1px solid var(--border); background:#fff; border-radius:10px; padding:10px 12px; font-size:12.5px;
+  color:var(--ink-3); font-weight:500; display:flex; align-items:center; gap:8px;
+}
+.create-org-step .num {
+  width:22px; height:22px; border-radius:50%; background:#E5E7EB; color:#6B7280; font-size:11px; font-weight:700;
+  display:flex; align-items:center; justify-content:center; flex-shrink:0;
+}
+.create-org-step.active { border-color:#BFDBFE; background:#EFF6FF; color:var(--blue); }
+.create-org-step.active .num { background:var(--blue); color:#fff; }
+.create-org-step.done { border-color:#BBF7D0; background:#F0FDF4; color:#15803D; }
+.create-org-step.done .num { background:#16A34A; color:#fff; }
+.create-org-card { border-radius:14px; }
+.create-org-body { min-height:360px; padding:22px; }
+.create-org-actions {
+  display:flex; align-items:center; justify-content:space-between; padding:14px 22px;
+  border-top:1px solid var(--border); background:#fff;
+}
+.ws-card { border:1px solid var(--border); border-radius:12px; background:#fff; padding:14px; margin-bottom:12px; }
+.ws-card-title { font-size:13px; font-weight:600; color:var(--ink); margin-bottom:10px; }
+.hint-ok { color:#15803d; }
+.hint-err { color:#B91C1C; }
+.hint-note { color:var(--ink-4); }
+.hint-warn { color:#B45309; }
+.selected-countries { display:flex; flex-wrap:wrap; gap:6px; margin-top:8px; }
+.country-pill {
+  display:inline-flex; align-items:center; gap:6px;
+  border:1px solid #BFDBFE; background:#EFF6FF; color:#1D4ED8;
+  border-radius:999px; padding:4px 9px; font-size:11.5px; font-weight:500;
+}
+.country-pill button {
+  border:none; background:transparent; color:inherit; cursor:pointer; font-size:12px; line-height:1;
+}
+.upload-zone {
+  border:2px dashed #D5DCE7;
+  border-radius:12px;
+  background:#FCFDFF;
+  padding:18px;
+  text-align:center;
+  cursor:pointer;
+  transition:border-color .18s ease, background .18s ease;
+}
+.upload-zone:hover { border-color:#93C5FD; background:#F8FBFF; }
+.upload-zone.dragover { border-color:#2563EB; background:#EFF6FF; }
+.create-mod-grid { display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-bottom:16px; }
+.create-mod-card {
+  border:1.5px solid var(--border); border-radius:10px; background:#fff; padding:12px;
+  cursor:pointer; transition:all .16s; display:flex; align-items:flex-start; gap:10px;
+}
+.create-mod-card:hover { border-color:#BFDBFE; box-shadow:var(--sh-xs); }
+.create-mod-card.sel { border-color:var(--blue); background:#EEF3FE; }
+.create-mod-card.locked { border-color:#BBF7D0; background:#F0FDF4; cursor:default; }
+.create-mod-check {
+  width:18px; height:18px; border-radius:5px; border:1.5px solid var(--border-mid);
+  display:flex; align-items:center; justify-content:center; font-size:10px; color:#fff; flex-shrink:0; margin-top:1px;
+}
+.create-mod-card.sel .create-mod-check, .create-mod-card.locked .create-mod-check { background:var(--blue); border-color:var(--blue); }
+.create-mod-card.locked .create-mod-check { background:#16A34A; border-color:#16A34A; }
+.create-mod-name { font-size:13px; font-weight:600; color:var(--ink); margin-bottom:2px; }
+.create-mod-desc { font-size:11.5px; color:var(--ink-4); line-height:1.45; }
+.wiz-grid { display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-bottom:12px; }
+.wiz-full { margin-bottom:12px; }
+.hidden { display:none !important; }
+
+/* ── RESPONSIVE ───────────────────────────────────────────────────────────── */
+@media (max-width: 900px) {
+  .login-right { display: none; }
+  .login-left { width: 100%; min-width: unset; padding: 48px 28px; }
+  .login-heading { font-size: 34px; }
+  .sidebar { width: 86px; min-width: 86px; }
+  .sidebar-brand-text, .nav-section-label, .sb-item span:not(.sb-item-icon):not(.sb-badge) { display: none; }
+  .sb-item { justify-content:center; }
+  .kpi-strip { grid-template-columns: repeat(2, minmax(0,1fr)); }
+  .dash-grid { grid-template-columns: 1fr; }
+  .org-page-stats { grid-template-columns:1fr; }
+  .org-page-head { flex-direction:column; }
+  .create-org-steps { grid-template-columns:1fr; }
+  .create-mod-grid { grid-template-columns:1fr; }
+  .wiz-grid { grid-template-columns: 1fr; }
+}
+</style>
+</head>
+<body>
+
+<!-- ══════════════════════════════════════════════════════════════════════════
+  LOGIN PAGE
+═══════════════════════════════════════════════════════════════════════════ -->
+<div id="page-login">
+  <!-- LEFT PANEL -->
+  <div class="login-left">
+    <div class="login-brand anim-fadeup">
+      <div class="logo-wrap">
+        <img src="images/final zaro logo.png" alt="Zaro HR logo" class="login-logo-icon">
+      </div>
+    </div>
+
+    <div class="anim-fadeup delay-1">
+      <h1 class="login-heading">Welcome back</h1>
+      <p class="login-sub">Sign in to your workspace to continue.</p>
+    </div>
+
+    <form class="login-form anim-fadeup delay-3" onsubmit="handleLogin(event)">
+      <div class="form-group">
+        <label class="lbl">Email Address</label>
+        <input type="email" placeholder="you@company.com" id="inp-email" autocomplete="off" />
+      </div>
+      <div class="form-group">
+        <label class="lbl">Password</label>
+        <div class="pwd-wrap">
+          <input type="password" placeholder="Enter password" id="inp-pwd" autocomplete="off" />
+          <button type="button" class="pwd-toggle" onclick="togglePwd()">👁</button>
+        </div>
+      </div>
+
+      <div class="flex justify-between items-center login-meta-row">
+        <label class="flex items-center gap-8" style="cursor:pointer; font-size:12.5px; color:var(--ink-3);">
+          <input type="checkbox" checked style="width:auto;" /> Remember me
+        </label>
+        <a href="#" class="login-forgot">Forgot password?</a>
+      </div>
+
+      <button type="submit" class="btn btn-primary btn-xl w-full mt-8">Sign In →</button>
+
+      <div class="login-divider">or</div>
+      <button type="button" class="btn btn-secondary w-full" style="gap:8px;">
+        <span>🔑</span> Sign in with SSO
+      </button>
+    </form>
+
+    <p class="login-help anim-fadeup delay-4">
+      Need access? Contact your HR Admin or
+      <a href="#">request an invite</a>.
+    </p>
+  </div>
+
+  <!-- RIGHT PANEL -->
+  <div class="login-right">
+    <div class="login-right-grid"></div>
+    <div class="login-right-glow"></div>
+    <div class="login-right-content anim-fadein">
+      <div class="login-right-badge">✦ Built for growing teams</div>
+      <h2 class="login-right-title">Performance<br/>management, <em>finally clear.</em></h2>
+      <p class="login-right-sub">
+        Run performance cycles with clarity, structure, and confidence.
+      </p>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════════════════════
+  APP SHELL (hidden until login)
+═══════════════════════════════════════════════════════════════════════════ -->
+<div id="page-app" class="hidden">
+  <aside class="sidebar">
+    <div class="sidebar-logo">
+      <div class="brand-mark"><img class="sidebar-brand-icon" src="images/final zaro logo.png" alt="Zaro HR logo" /></div>
+      <div class="sidebar-brand-text">
+        <div class="brand-name"><span class="brand-zaro">Zaro</span><span class="brand-hr">HR</span></div>
+        <div class="brand-tag">PMS Suite</div>
+      </div>
+    </div>
+
+    <div class="nav-section-label">Main</div>
+    <div class="sb-item active" onclick="setNav(this,'Dashboard','dashboard')"><span class="sb-item-icon">📊</span><span>Dashboard</span></div>
+    <div class="sb-item" onclick="setNav(this,'Organizations','organizations')"><span class="sb-item-icon">🏢</span><span>Organizations</span></div>
+    <div class="sb-item" onclick="setNav(this,'User Management','dashboard')"><span class="sb-item-icon">👥</span><span>User Management</span></div>
+    <div class="sb-item" onclick="setNav(this,'Module Control','dashboard')"><span class="sb-item-icon">🧩</span><span>Module Control</span></div>
+
+    <div class="nav-section-label">Finance & Ops</div>
+    <div class="sb-item" onclick="setNav(this,'Billing & Licenses','dashboard')"><span class="sb-item-icon">💳</span><span>Billing & Licenses</span><span class="sb-badge sb-badge-alert" id="overage-badge">!</span></div>
+    <div class="sb-item" onclick="setNav(this,'Audit Logs','dashboard')"><span class="sb-item-icon">📋</span><span>Audit Logs</span></div>
+    <div class="sb-item" onclick="setNav(this,'Integrations','dashboard')"><span class="sb-item-icon">🔗</span><span>Integrations</span></div>
+
+    <div class="nav-section-label">System</div>
+    <div class="sb-item" onclick="setNav(this,'Platform Settings','dashboard')"><span class="sb-item-icon">⚙️</span><span>Platform Settings</span></div>
+    <div class="sb-item" onclick="setNav(this,'Support & Docs','dashboard')"><span class="sb-item-icon">🛟</span><span>Support & Docs</span></div>
+
+    <div class="sidebar-footer">
+      <div class="sidebar-user">
+        <div class="user-avatar" id="sb-avatar">SA</div>
+        <div>
+          <div class="user-name" id="sb-name">Super Admin</div>
+          <div class="user-role" id="sb-role">Platform Owner</div>
+        </div>
+        <button class="logout-btn" onclick="logout()" title="Sign out">⏻</button>
+      </div>
+    </div>
+  </aside>
+
+  <div class="main-content">
+    <div class="topbar">
+      <div class="topbar-left">
+        <div class="topbar-title" id="topbar-title">Dashboard</div>
+        <div class="status-pill"><span class="status-dot"></span>All Systems Operational</div>
+      </div>
+      <div class="topbar-right">
+        <button class="notif-btn" title="Notifications">🔔<span class="notif-dot"></span></button>
+      </div>
+    </div>
+
+    <div class="page-body">
+      <div id="dashboard-view" class="view">
+      <div class="banner banner-amber" id="license-alert">
+        <span>⚠️</span>
+        <span><strong>Acme Technologies</strong> has exceeded their licensed seat count by 12 users. Review license usage and adjust billing.</span>
+        <button class="alert-close" onclick="dismissAlert()">✕</button>
+      </div>
+
+      <div class="kpi-strip">
+        <div class="kpi-card">
+          <div class="kpi-label">Organizations</div>
+          <div class="kpi-value" id="kpi-org-count">3</div>
+          <div class="kpi-sub">+1 this month</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-label">Total Employees</div>
+          <div class="kpi-value">847</div>
+          <div class="kpi-sub">Across all orgs</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-label">Active Review Cycles</div>
+          <div class="kpi-value">2</div>
+          <div class="kpi-sub">Running now</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-label">Licensed Seats</div>
+          <div class="kpi-value">1,200</div>
+          <div class="kpi-sub">70.6% used</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-label">HR Admins</div>
+          <div class="kpi-value">6</div>
+          <div class="kpi-sub">Platform-wide</div>
+        </div>
+      </div>
+
+      <div class="dash-grid">
+        <div class="dash-left">
+          <div class="card" id="dashboard-org-card">
+            <div class="card-head">
+              <div>
+                <div class="fw-600">Organizations</div>
+                <div class="text-sm text-muted mt-4">All tenants on this platform</div>
+              </div>
+            </div>
+            <table class="org-table">
+              <thead>
+                <tr><th>Organization</th><th>Industry</th><th>Employees</th><th>Setup</th><th>Status</th><th>Action</th></tr>
+              </thead>
+              <tbody id="dashboard-org-tbody"></tbody>
+            </table>
+          </div>
+
+          <div class="card">
+            <div class="card-head">
+              <div>
+                <div class="fw-600">Recent Activity</div>
+                <div class="text-sm text-muted mt-4">Platform event stream</div>
+              </div>
+            </div>
+            <div class="card-p" id="feed-list"></div>
+          </div>
+        </div>
+
+        <div class="dash-right">
+          <div class="card">
+            <div class="card-head"><div class="fw-600">Pending Actions</div><span class="badge badge-red">4</span></div>
+            <div class="card-p compact-list">
+              <div class="list-row"><span>License overage - Acme</span><span>›</span></div>
+              <div class="list-row"><span>HR invite pending - Zenith</span><span>›</span></div>
+              <div class="list-row"><span>Failed import - Nova</span><span>›</span></div>
+              <div class="list-row"><span>Approve module request</span><span>›</span></div>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="card-head"><div class="fw-600">System Health</div><span class="badge badge-green">Healthy</span></div>
+            <div class="card-p compact-list">
+              <div class="health-row"><span>API Uptime</span><div><span>99%</span><div class="mini-progress"><div class="mini-progress-fill" style="width:99%"></div></div></div></div>
+              <div class="health-row"><span>DB Response</span><div><span>94%</span><div class="mini-progress"><div class="mini-progress-fill" style="width:94%"></div></div></div></div>
+              <div class="health-row"><span>Email Delivery</span><div><span>98%</span><div class="mini-progress"><div class="mini-progress-fill" style="width:98%"></div></div></div></div>
+              <div class="health-row"><span>Storage Usage</span><div><span>67%</span><div class="mini-progress"><div class="mini-progress-fill" style="width:67%;background:#D97706"></div></div></div></div>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="card-head"><div class="fw-600">Module Usage</div></div>
+            <div class="card-p compact-list">
+              <div class="health-row"><span>Performance Mgmt</span><span>3/3</span></div>
+              <div class="health-row"><span>Goal Management</span><span>2/3</span></div>
+              <div class="health-row"><span>360 Feedback</span><span>1/3</span></div>
+              <div class="health-row"><span>Compensation</span><span>1/3</span></div>
+              <div class="health-row"><span>Succession Planning</span><span>0/3</span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+      </div>
+
+      <div id="organizations-view" class="view hidden">
+        <div class="org-page-head">
+          <div>
+            <h2 class="org-page-title">Organizations</h2>
+            <p class="org-page-sub">Manage all tenants, setup progress, seat utilization, and organization admins.</p>
+          </div>
+          <button class="btn btn-primary" onclick="openCreateOrganizationPage()">Add Organization</button>
+        </div>
+        <div class="org-page-stats">
+          <div class="kpi-card">
+            <div class="kpi-label">Total Organizations</div>
+            <div class="kpi-value" id="org-page-total-count">3</div>
+            <div class="kpi-sub">2 active, 1 in setup</div>
+          </div>
+          <div class="kpi-card">
+            <div class="kpi-label">Total Employees</div>
+            <div class="kpi-value">847</div>
+            <div class="kpi-sub">Across all tenants</div>
+          </div>
+          <div class="kpi-card">
+            <div class="kpi-label">Seat Utilization</div>
+            <div class="kpi-value">70.6%</div>
+            <div class="kpi-sub">847 of 1,200 seats</div>
+          </div>
+        </div>
+
+        <div class="card" id="orgs-page-card">
+          <div class="card-head">
+            <div>
+              <div class="fw-600">Organization Directory</div>
+              <div class="text-sm text-muted mt-4">Tenant details, status, and setup completion</div>
+            </div>
+          </div>
+          <div class="banner hidden" id="org-success-banner" style="margin:12px 12px 0;background:#F0FDF4;border:1px solid #BBF7D0;color:#14532D;">
+            <span>✅</span>
+            <span id="org-success-text"></span>
+          </div>
+          <table class="org-table">
+            <thead>
+              <tr><th>Organization</th><th>Industry</th><th>Employees</th><th>Setup</th><th>Status</th><th>Action</th></tr>
+            </thead>
+            <tbody id="org-page-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div id="create-org-view" class="view hidden">
+        <div class="create-org-shell">
+          <h1 class="create-org-title">Create Organization</h1>
+          <p class="create-org-sub">Set up a new company workspace and assign its HR administrator.</p>
+          <div class="create-org-steps" id="create-org-steps"></div>
+          <div class="card create-org-card">
+            <div class="create-org-body" id="create-org-body"></div>
+            <div class="create-org-actions">
+              <button class="btn btn-secondary" id="create-org-back" onclick="createOrgBack()">Back</button>
+              <button class="btn btn-primary" id="create-org-next" onclick="createOrgNext()">Continue</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<!-- ══════════════════════════════════════════════════════════════════════════
+  JAVASCRIPT
+═══════════════════════════════════════════════════════════════════════════ -->
+<script>
+let currentRole = 'super-admin';
+let currentPage = 'dashboard';
+let currentStep = 0;
+let createOrgSelectedModules = [];
+let createOrgForm = {};
+let createOrgSlugManuallyEdited = false;
+let createOrgShortCodeManuallyEdited = false;
+let createOrgTimezoneManuallyEdited = false;
+const COUNTRY_OPTIONS = [
+  'Afghanistan','Albania','Algeria','Argentina','Australia','Austria','Bangladesh','Belgium','Brazil','Canada',
+  'Chile','China','Colombia','Croatia','Czech Republic','Denmark','Egypt','Finland','France','Germany',
+  'Greece','Hong Kong','Hungary','India','Indonesia','Ireland','Israel','Italy','Japan','Kenya',
+  'Malaysia','Mexico','Morocco','Netherlands','New Zealand','Nigeria','Norway','Pakistan','Philippines','Poland',
+  'Portugal','Qatar','Romania','Saudi Arabia','Singapore','South Africa','South Korea','Spain','Sri Lanka','Sweden',
+  'Switzerland','Taiwan','Thailand','Turkey','UAE','Ukraine','United Kingdom','United States','Vietnam'
+];
+
+const SESSION_KEY = 'zarohr_auth_session';
+const DRAFT_KEY = 'zarohr_create_org_draft';
+const ROLE_META = {
+  'super-admin': { avatar: 'SA', name: 'Super Admin', role: 'Platform Owner' },
+};
+const dashboardFlags = { hasLicenseOverage: true, hasCriticalIssue: false };
+const feedData = [
+  { bg:'#EEF3FE', ic:'🏢', text:'<strong>Zenith Capital</strong> organization was created and HR Admin invite sent.', time:'2 hours ago' },
+  { bg:'#FEF2F2', ic:'⚠️', text:'<strong>Failed import</strong> detected for Nova Pharma — 23 rows with validation errors.', time:'4 hours ago' },
+  { bg:'#F0FDF4', ic:'✅', text:'<strong>Acme Technologies</strong> completed full PMS setup. First review cycle is active.', time:'Yesterday, 3:42 PM' },
+  { bg:'#FFFBEB', ic:'💳', text:'License for <strong>Acme Technologies</strong> auto-renewed. 500 seats confirmed.', time:'Yesterday, 11:20 AM' },
+];
+const CREATE_ORG_PAGE_STEPS = ['Organization Details', 'Workspace Settings', 'HR Admin Setup'];
+let organizationsData = [
+  {
+    key: 'acme',
+    orgCode: 'ACME',
+    name: 'Acme Technologies',
+    domain: 'acme.pulsehr.com',
+    industry: 'IT / Software',
+    industryBadgeClass: 'badge-blue',
+    employees: 412,
+    seats: 500,
+    setupPct: 100,
+    setupColor: '#16A34A',
+    status: 'Active',
+    statusBadgeClass: 'badge-green',
+    actionLabel: 'Manage',
+    logoText: 'A',
+    logoBg: 'linear-gradient(135deg,#3B6FF0,#6366f1)',
+  },
+  {
+    key: 'nova',
+    orgCode: 'NOVA',
+    name: 'Nova Pharma Ltd.',
+    domain: 'nova.pulsehr.com',
+    industry: 'Healthcare',
+    industryBadgeClass: 'badge-green',
+    employees: 285,
+    seats: 400,
+    setupPct: 60,
+    setupColor: '#D97706',
+    status: 'Setup',
+    statusBadgeClass: 'badge-amber',
+    actionLabel: 'Continue',
+    logoText: 'N',
+    logoBg: 'linear-gradient(135deg,#16A34A,#059669)',
+  },
+  {
+    key: 'zenith',
+    orgCode: 'ZENITH',
+    name: 'Zenith Capital',
+    domain: 'zenith.pulsehr.com',
+    industry: 'BFSI',
+    industryBadgeClass: 'badge-amber',
+    employees: 150,
+    seats: 300,
+    setupPct: 20,
+    setupColor: '#2563EB',
+    status: 'Pending',
+    statusBadgeClass: 'badge-blue',
+    actionLabel: 'Continue',
+    logoText: 'Z',
+    logoBg: 'linear-gradient(135deg,#D97706,#f59e0b)',
+  },
+];
+
+function applyRoleMeta(role) {
+  const meta = ROLE_META[role] || ROLE_META['super-admin'];
+  document.getElementById('sb-name').textContent = meta.name;
+  document.getElementById('sb-role').textContent = meta.role;
+  document.getElementById('sb-avatar').textContent = meta.avatar;
+}
+
+function saveSession(isLoggedIn = true) {
+  try {
+    const payload = JSON.stringify({ isLoggedIn, role: currentRole });
+    localStorage.setItem(SESSION_KEY, payload);
+    sessionStorage.setItem(SESSION_KEY, payload);
+  } catch (_) {}
+}
+
+function clearSession() {
+  try {
+    localStorage.removeItem(SESSION_KEY);
+    sessionStorage.removeItem(SESSION_KEY);
+  } catch (_) {}
+}
+
+function saveDraft() {
+  sessionStorage.setItem(DRAFT_KEY, JSON.stringify({
+    currentStep,
+    createOrgForm,
+    createOrgSelectedModules,
+    createOrgSlugManuallyEdited,
+    createOrgShortCodeManuallyEdited,
+    createOrgTimezoneManuallyEdited
+  }));
+}
+
+function clearDraft() {
+  sessionStorage.removeItem(DRAFT_KEY);
+}
+
+function loadDraft() {
+  try {
+    const raw = sessionStorage.getItem(DRAFT_KEY);
+    if (!raw) return;
+    const d = JSON.parse(raw);
+    currentStep = typeof d.currentStep === 'number' ? d.currentStep : 0;
+    createOrgForm = d.createOrgForm || {};
+    createOrgSelectedModules = Array.isArray(d.createOrgSelectedModules) ? d.createOrgSelectedModules : [];
+    createOrgSlugManuallyEdited = Boolean(d.createOrgSlugManuallyEdited);
+    createOrgShortCodeManuallyEdited = Boolean(d.createOrgShortCodeManuallyEdited);
+    createOrgTimezoneManuallyEdited = Boolean(d.createOrgTimezoneManuallyEdited);
+  } catch (_) {}
+}
+
+function showFormError(message) {
+  alert(message);
+}
+
+function showLoginView() {
+  document.getElementById('page-app').classList.add('hidden');
+  document.getElementById('page-login').classList.remove('hidden');
+}
+
+function showAppView() {
+  document.getElementById('page-login').classList.add('hidden');
+  document.getElementById('page-app').classList.remove('hidden');
+}
+
+function initDashboard() {
+  applyRoleMeta(currentRole);
+  setAlertState();
+  renderFeed();
+  renderOrganizations();
+  renderCreateOrganizationPage();
+  showPage('dashboard');
+  setTopbar('Dashboard');
+}
+
+function setCreateOrgFormField(key, value) {
+  createOrgForm[key] = value;
+  saveDraft();
+  updateCreateOrgNextState();
+}
+
+function slugify(value) {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/&/g, ' and ')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+}
+
+function normalizeShortCodeInput(value) {
+  return String(value || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, '')
+    .slice(0, 16);
+}
+
+function normalizeSlugInput(value) {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9-]/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-+|-+$/g, '');
+}
+
+function generateShortCodeFromName(name) {
+  const stopWords = new Set([
+    'pvt', 'ltd', 'limited', 'inc', 'llc', 'plc', 'private', 'company', 'co',
+    'technologies', 'technology', 'solutions', 'services', 'global', 'group'
+  ]);
+  const words = String(name || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .split(/\s+/)
+    .filter(Boolean)
+    .filter((w) => !stopWords.has(w));
+
+  if (words.length === 0) return '';
+  return normalizeShortCodeInput(words[0]);
+}
+
+function getExistingWorkspaceSlugs() {
+  const slugs = new Set();
+  organizationsData.forEach((org) => {
+    const domainSlug = String(org.domain || '').split('.')[0].trim().toLowerCase();
+    if (domainSlug) slugs.add(domainSlug);
+  });
+  return slugs;
+}
+
+function getExistingOrgCodes() {
+  const codes = new Set();
+  organizationsData.forEach((org) => {
+    const code = String(org.orgCode || org.key || '').trim().toLowerCase();
+    if (code) codes.add(code);
+  });
+  return codes;
+}
+
+function getOrgCodeValidation(code) {
+  const value = normalizeShortCodeInput(code);
+  if (!value) return { ok: false, message: 'Org Code is required.' };
+  if (value.length < 2) return { ok: false, message: 'Org Code should be at least 2 characters.' };
+  if (getExistingOrgCodes().has(value)) return { ok: false, message: 'This Org Code is already in use.' };
+  return { ok: true, message: 'Org Code is available.' };
+}
+
+function getWorkspaceSlugValidation(slug) {
+  const value = String(slug || '').trim();
+  if (!value) return { ok: false, message: 'Workspace slug is required.' };
+  if (!/^[a-z0-9-]+$/.test(value)) {
+    return { ok: false, message: 'Use lowercase letters, numbers, and hyphens only.' };
+  }
+  if (/--/.test(value) || value.startsWith('-') || value.endsWith('-')) {
+    return { ok: false, message: 'Slug cannot start/end with hyphen or contain repeated hyphens.' };
+  }
+  if (getExistingWorkspaceSlugs().has(value)) {
+    return { ok: false, message: 'This workspace slug is already in use.' };
+  }
+  return { ok: true, message: 'Slug is available.' };
+}
+
+function inferTimezoneFromCountry(country) {
+  const map = {
+    'India': 'Asia/Kolkata',
+    'United States': 'America/New_York',
+    'United Kingdom': 'Europe/London',
+    'UAE': 'Asia/Dubai',
+    'Singapore': 'Asia/Singapore',
+  };
+  return map[country] || 'Asia/Kolkata';
+}
+
+function handleHeadquartersCountryChange(value) {
+  setCreateOrgFormField('headquarters_country', value);
+  if (!createOrgTimezoneManuallyEdited) {
+    setCreateOrgFormField('timezone', inferTimezoneFromCountry(value));
+  }
+}
+
+function addOperatingCountry(value) {
+  const country = String(value || '').trim();
+  if (!country) return;
+  const list = Array.isArray(createOrgForm.operating_countries) ? createOrgForm.operating_countries : [];
+  if (list.includes(country)) return;
+  setCreateOrgFormField('operating_countries', [...list, country]);
+  const select = document.getElementById('operating-country-select');
+  if (select) select.value = '';
+  renderCreateOrganizationPage();
+}
+
+function removeOperatingCountry(country) {
+  const list = Array.isArray(createOrgForm.operating_countries) ? createOrgForm.operating_countries : [];
+  setCreateOrgFormField('operating_countries', list.filter((c) => c !== country));
+  renderCreateOrganizationPage();
+}
+
+function countrySelectOptionsHtml(selectedValue = '') {
+  return [
+    '<option value="">Select country</option>',
+    ...COUNTRY_OPTIONS.map((c) => `<option value="${c}" ${selectedValue === c ? 'selected' : ''}>${c}</option>`),
+  ].join('');
+}
+
+function addOperatingCountryFromDropdown() {
+  const select = document.getElementById('operating-country-select');
+  if (!select) return;
+  addOperatingCountry(select.value);
+  select.value = '';
+}
+
+function handleOrganizationNameInput(value) {
+  setCreateOrgFormField('organization_name', value);
+  if (!createOrgShortCodeManuallyEdited) {
+    const autoCode = generateShortCodeFromName(value);
+    setCreateOrgFormField('organization_code', autoCode);
+    const shortCodeInput = document.getElementById('organization-code-input');
+    if (shortCodeInput) shortCodeInput.value = autoCode;
+    updateOrgCodeStatus(autoCode);
+    if (!createOrgSlugManuallyEdited) {
+      const nextSlug = slugify(autoCode);
+      setCreateOrgFormField('workspace_slug', nextSlug);
+      updateWorkspaceSlugPreview(nextSlug);
+    }
+  }
+}
+
+function handleShortCodeInput(value) {
+  createOrgShortCodeManuallyEdited = true;
+  const code = normalizeShortCodeInput(value);
+  setCreateOrgFormField('organization_code', code);
+  updateOrgCodeStatus(code);
+  if (!createOrgSlugManuallyEdited) {
+    const nextSlug = slugify(code);
+    setCreateOrgFormField('workspace_slug', nextSlug);
+    updateWorkspaceSlugPreview(nextSlug);
+  }
+}
+
+function updateOrgCodeStatus(value) {
+  const statusEl = document.getElementById('org-code-status');
+  if (!statusEl) return;
+  const v = String(value || '').trim();
+  if (!v) {
+    statusEl.textContent = '';
+    statusEl.className = 'f-hint';
+    return;
+  }
+  const check = getOrgCodeValidation(v);
+  statusEl.textContent = check.message;
+  statusEl.className = `f-hint ${check.ok ? 'hint-ok' : 'hint-err'}`;
+}
+
+function handleWorkspaceSlugInput(value) {
+  createOrgSlugManuallyEdited = true;
+  const nextSlug = normalizeSlugInput(value);
+  setCreateOrgFormField('workspace_slug', nextSlug);
+  updateWorkspaceSlugPreview(nextSlug);
+}
+
+function handleFinancialYearChange(value) {
+  setCreateOrgFormField('financial_year', value);
+}
+
+function handleTimezoneInput(value) {
+  createOrgTimezoneManuallyEdited = true;
+  setCreateOrgFormField('timezone', value);
+}
+
+function validateWorkspaceSettings(showErrors = false) {
+  const slugCheck = getWorkspaceSlugValidation(createOrgForm.workspace_slug || '');
+  const fyOk = Boolean((createOrgForm.financial_year || '').trim());
+  const tzOk = Boolean((createOrgForm.timezone || '').trim());
+  const valid = slugCheck.ok && fyOk && tzOk;
+  if (showErrors) {
+    if (!slugCheck.ok) {
+      alert(slugCheck.message);
+      return false;
+    }
+    if (!fyOk) {
+      alert('Financial Year is required.');
+      return false;
+    }
+    if (!tzOk) {
+      alert('Timezone is required.');
+      return false;
+    }
+  }
+  return valid;
+}
+
+function validateOrganizationDetails(showErrors = false) {
+  const orgNameOk = Boolean((createOrgForm.organization_name || '').trim());
+  const orgCodeCheck = getOrgCodeValidation(createOrgForm.organization_code || '');
+  const valid = orgNameOk && orgCodeCheck.ok;
+  if (showErrors) {
+    if (!orgNameOk) {
+      alert('Organization Name is required.');
+      return false;
+    }
+    if (!orgCodeCheck.ok) {
+      alert(orgCodeCheck.message);
+      return false;
+    }
+  }
+  return valid;
+}
+
+function updateCreateOrgNextState() {
+  const nextBtn = document.getElementById('create-org-next');
+  if (!nextBtn) return;
+  if (currentStep === 0) {
+    nextBtn.disabled = !validateOrganizationDetails(false);
+    return;
+  }
+  if (currentStep === 1) {
+    nextBtn.disabled = !validateWorkspaceSettings(false);
+    return;
+  }
+  nextBtn.disabled = false;
+}
+
+function triggerCreateOrgLogoPicker() {
+  const input = document.getElementById('create-org-logo-input');
+  if (input) input.click();
+}
+
+function handleCreateOrgLogoDragOver(event) {
+  event.preventDefault();
+  event.currentTarget.classList.add('dragover');
+}
+
+function handleCreateOrgLogoDragLeave(event) {
+  event.preventDefault();
+  event.currentTarget.classList.remove('dragover');
+}
+
+function handleCreateOrgLogoDrop(event) {
+  event.preventDefault();
+  event.currentTarget.classList.remove('dragover');
+  const file = event.dataTransfer && event.dataTransfer.files ? event.dataTransfer.files[0] : null;
+  applyCreateOrgLogoFile(file);
+}
+
+function handleCreateOrgLogoSelected(event) {
+  const file = event.target && event.target.files ? event.target.files[0] : null;
+  applyCreateOrgLogoFile(file);
+}
+
+function applyCreateOrgLogoFile(file) {
+  if (!file) return;
+  const allowedTypes = ['image/png', 'image/jpeg', 'image/jpg', 'image/svg+xml'];
+  const maxSizeBytes = 2 * 1024 * 1024;
+  if (!allowedTypes.includes(file.type)) {
+    alert('Please upload a PNG, JPG, or SVG logo.');
+    return;
+  }
+  if (file.size > maxSizeBytes) {
+    alert('Logo file size must be 2MB or less.');
+    return;
+  }
+  createOrgForm.company_logo_name = file.name;
+  updateCreateOrgLogoZone();
+}
+
+function updateCreateOrgLogoZone() {
+  const titleEl = document.getElementById('create-org-logo-title');
+  const fileEl = document.getElementById('create-org-logo-file');
+  if (!titleEl || !fileEl) return;
+  const fileName = createOrgForm.company_logo_name || '';
+  if (fileName) {
+    titleEl.textContent = 'Logo selected';
+    fileEl.textContent = fileName;
+    return;
+  }
+  titleEl.textContent = 'Drag & drop logo here or click to upload';
+  fileEl.textContent = 'No file selected';
+}
+
+function renderOrganizations() {
+  const dashboardBody = document.getElementById('dashboard-org-tbody');
+  const orgPageBody = document.getElementById('org-page-tbody');
+  const count = organizationsData.length;
+  const kpiCount = document.getElementById('kpi-org-count');
+  const orgPageCount = document.getElementById('org-page-total-count');
+  const navBadge = document.getElementById('org-count-badge');
+  if (kpiCount) kpiCount.textContent = String(count);
+  if (orgPageCount) orgPageCount.textContent = String(count);
+  if (navBadge) navBadge.textContent = String(count);
+
+  const rowsHtml = organizationsData.map((org) => `
+    <tr>
+      <td>
+        <div class="org-info">
+          <div class="org-logo" style="background:${org.logoBg}">${org.logoText}</div>
+          <div>
+            <div class="org-name">${org.name}</div>
+            <div class="org-meta">${org.domain}</div>
+          </div>
+        </div>
+      </td>
+      <td><span class="badge ${org.industryBadgeClass}">${org.industry}</span></td>
+      <td><div class="fw-600">${org.employees}</div><div class="text-xs text-muted">of ${org.seats} seats</div></td>
+      <td><div class="mini-progress"><div class="mini-progress-fill" style="width:${org.setupPct}%;background:${org.setupColor}"></div></div></td>
+      <td><span class="badge ${org.statusBadgeClass}">${org.status}</span></td>
+      <td><button class="btn btn-ghost btn-sm">${org.actionLabel}</button></td>
+    </tr>
+  `).join('');
+
+  if (dashboardBody) dashboardBody.innerHTML = rowsHtml;
+  if (orgPageBody) orgPageBody.innerHTML = rowsHtml;
+}
+
+function showOrgSuccessMessage(message) {
+  const banner = document.getElementById('org-success-banner');
+  const text = document.getElementById('org-success-text');
+  if (!banner || !text) return;
+  text.textContent = message;
+  banner.classList.remove('hidden');
+  setTimeout(() => banner.classList.add('hidden'), 4500);
+}
+
+function createOrganizationFromForm() {
+  const orgName = (createOrgForm.organization_name || '').trim() || 'New Organization';
+  const orgCode = normalizeShortCodeInput(createOrgForm.organization_code || generateShortCodeFromName(orgName) || 'ORG');
+  const slugRaw = (createOrgForm.workspace_slug || orgCode || orgName).toLowerCase();
+  const slug = slugRaw.replace(/[^a-z0-9-]/g, '').replace(/-+/g, '-').replace(/^-|-$/g, '') || `org-${Date.now().toString().slice(-4)}`;
+  const industry = createOrgForm.industry || 'Other';
+  const logoText = (orgName[0] || 'N').toUpperCase();
+  const nextOrg = {
+    key: `org-${Date.now()}`,
+    orgCode,
+    name: orgName,
+    domain: `${slug}.pulsehr.com`,
+    industry,
+    industryBadgeClass: industry === 'IT / Software' ? 'badge-blue' : industry === 'Healthcare' ? 'badge-green' : industry === 'BFSI' ? 'badge-amber' : 'badge-gray',
+    employees: 0,
+    seats: 200,
+    setupPct: 5,
+    setupColor: '#2563EB',
+    status: 'Setup',
+    statusBadgeClass: 'badge-amber',
+    actionLabel: 'Continue',
+    logoText,
+    logoBg: 'linear-gradient(135deg,#3B82F6,#2563EB)',
+  };
+  organizationsData = [nextOrg, ...organizationsData];
+  renderOrganizations();
+}
+
+function togglePwd() {
+  const i = document.getElementById('inp-pwd');
+  const btn = document.querySelector('.pwd-toggle');
+  if (i.type === 'password') {
+    i.type = 'text';
+    btn.textContent = '🙈';
+  } else {
+    i.type = 'password';
+    btn.textContent = '👁';
+  }
+}
+
+function handleLogin(e) {
+  e.preventDefault();
+  const email = document.getElementById('inp-email').value.trim().toLowerCase();
+  const pwd = document.getElementById('inp-pwd').value;
+
+  if (!(email === 'admin@zarohr.com' && pwd === 'admin123')) {
+    alert('Invalid Super Admin credentials.');
+    return;
+  }
+
+  currentRole = 'super-admin';
+  initDashboard();
+  showAppView();
+  saveSession(true);
+  history.pushState({ view: 'app', page: 'dashboard', label: 'Dashboard' }, '', '#dashboard');
+}
+
+function logout() {
+  showLoginView();
+  clearSession();
+  history.pushState({ view: 'login' }, '', '#login');
+}
+
+function setNav(el, label, page = 'dashboard') {
+  if (currentPage === page) return;
+
+  document.querySelectorAll('.sb-item').forEach(i => i.classList.remove('active'));
+  el.classList.add('active');
+  setTopbar(label);
+  history.pushState({ view: 'app', page, label }, '', `#${page}`);
+
+  showPage(page);
+  currentPage = page;
+}
+
+function setTopbar(label) {
+  document.getElementById('topbar-title').textContent = label;
+}
+
+function showPage(page) {
+  currentPage = page;
+  const dash = document.getElementById('dashboard-view');
+  const orgs = document.getElementById('organizations-view');
+  const createOrg = document.getElementById('create-org-view');
+
+  dash.style.opacity = page === 'dashboard' ? '1' : '0';
+  orgs.style.opacity = page === 'organizations' ? '1' : '0';
+  createOrg.style.opacity = page === 'create-org' ? '1' : '0';
+
+  dash.classList.toggle('hidden', page !== 'dashboard');
+  orgs.classList.toggle('hidden', page !== 'organizations');
+  createOrg.classList.toggle('hidden', page !== 'create-org');
+  document.querySelector('.page-body').scrollTop = 0;
+}
+
+function activateSidebarItemByLabel(label) {
+  const items = document.querySelectorAll('.sb-item');
+  items.forEach((item) => item.classList.remove('active'));
+  for (const item of items) {
+    const textEl = item.querySelector('span:nth-child(2)');
+    if (textEl && textEl.textContent.trim() === label) {
+      item.classList.add('active');
+      break;
+    }
+  }
+}
+
+function openCreateOrganizationPage() {
+  currentStep = 0;
+  createOrgSelectedModules = [];
+  createOrgForm = { headquarters_country: 'India' };
+  createOrgSlugManuallyEdited = false;
+  createOrgShortCodeManuallyEdited = false;
+  createOrgTimezoneManuallyEdited = false;
+  loadDraft();
+  if (!createOrgForm.headquarters_country) createOrgForm.headquarters_country = 'India';
+  renderCreateOrganizationPage();
+  showPage('create-org');
+  setTopbar('Create Organization');
+  activateSidebarItemByLabel('Organizations');
+  history.pushState({ view: 'app', page: 'create-org', label: 'Create Organization' }, '', '#create-organization');
+}
+
+function createOrgBack() {
+  if (currentStep > 0) {
+    currentStep -= 1;
+    saveDraft();
+    renderCreateOrganizationPage();
+    return;
+  }
+  showPage('organizations');
+  setTopbar('Organizations');
+  activateSidebarItemByLabel('Organizations');
+  history.pushState({ view: 'app', page: 'organizations', label: 'Organizations' }, '', '#organizations');
+}
+
+function createOrgNext() {
+  if (currentStep === 0 && !validateOrganizationDetails(true)) return;
+  if (currentStep === 1 && !validateWorkspaceSettings(true)) return;
+
+  if (currentStep < CREATE_ORG_PAGE_STEPS.length - 1) {
+    currentStep += 1;
+    saveDraft();
+    renderCreateOrganizationPage();
+    return;
+  }
+  const nextBtn = document.getElementById('create-org-next');
+  const backBtn = document.getElementById('create-org-back');
+  if (nextBtn) {
+    nextBtn.disabled = true;
+    nextBtn.textContent = 'Creating...';
+  }
+  if (backBtn) backBtn.disabled = true;
+
+  setTimeout(() => {
+    createOrganizationFromForm();
+    clearDraft();
+    showPage('organizations');
+    setTopbar('Organizations');
+    activateSidebarItemByLabel('Organizations');
+    showOrgSuccessMessage('Organization created successfully. HR Admin invitation sent.');
+    history.pushState({ view: 'app', page: 'organizations', label: 'Organizations' }, '', '#organizations');
+    if (nextBtn) {
+      nextBtn.disabled = false;
+      nextBtn.textContent = 'Continue';
+    }
+    if (backBtn) backBtn.disabled = false;
+  }, 900);
+}
+
+function updateWorkspaceSlugPreview(value) {
+  const previewEl = document.getElementById('workspace-url-preview');
+  const statusEl = document.getElementById('workspace-slug-status');
+  if (!previewEl) return;
+  const clean = String(value || '').trim().toLowerCase();
+  previewEl.textContent = `Preview: pms.zarohr.com/${clean || '{slug}'}`;
+  if (!statusEl) return;
+  if (!clean) {
+    statusEl.textContent = '';
+    statusEl.className = 'f-hint';
+    return;
+  }
+  const check = getWorkspaceSlugValidation(clean);
+  statusEl.textContent = check.message;
+  statusEl.className = `f-hint ${check.ok ? 'hint-ok' : 'hint-err'}`;
+}
+
+function toggleCreateOrgModule(id) {
+  createOrgSelectedModules = createOrgSelectedModules.includes(id)
+    ? createOrgSelectedModules.filter((m) => m !== id)
+    : [...createOrgSelectedModules, id];
+  renderCreateOrganizationPage();
+}
+
+function renderCreateOrganizationPage() {
+  const stepsEl = document.getElementById('create-org-steps');
+  const bodyEl = document.getElementById('create-org-body');
+  const backBtn = document.getElementById('create-org-back');
+  const nextBtn = document.getElementById('create-org-next');
+  if (!stepsEl || !bodyEl || !backBtn || !nextBtn) return;
+
+  stepsEl.innerHTML = CREATE_ORG_PAGE_STEPS.map((step, i) => `
+    <div class="create-org-step ${currentStep === i ? 'active' : ''} ${currentStep > i ? 'done' : ''}">
+      <span class="num">${currentStep > i ? '✓' : i + 1}</span>
+      <span>${step}</span>
+    </div>
+  `).join('');
+
+  if (currentStep === 0) {
+    bodyEl.innerHTML = `
+      <div class="wiz-grid">
+        <div class="form-group"><label class="lbl">Organization Name <span class="req">*</span></label><input type="text" value="${createOrgForm.organization_name || ''}" placeholder="e.g. Acme Technologies Pvt. Ltd." oninput="handleOrganizationNameInput(this.value)" /></div>
+        <div class="form-group"><label class="lbl">Org Code (Tenant Identifier) <span class="req">*</span></label><input id="organization-code-input" type="text" value="${createOrgForm.organization_code || ''}" placeholder="Auto from organization name" oninput="handleShortCodeInput(this.value)" /><div id="org-code-status" class="f-hint"></div></div>
+      </div>
+      <div class="wiz-grid">
+        <div class="form-group"><label class="lbl">Industry</label><select onchange="setCreateOrgFormField('industry', this.value)"><option value="">Select industry</option><option>IT / Software</option><option>BFSI (Banking, Financial Services, Insurance)</option><option>Healthcare & Pharma</option><option>Manufacturing</option><option>Retail & E-commerce</option><option>Consulting / Professional Services</option><option>Education / EdTech</option><option>Telecom</option><option>Media & Entertainment</option><option>Logistics & Supply Chain</option><option>Real Estate / Construction</option><option>Energy / Utilities</option><option>Hospitality / Travel</option><option>Government / Public Sector</option><option>Non-Profit / NGO</option><option>Other</option></select></div>
+        <div class="form-group"><label class="lbl">Legal Entity Type</label><select onchange="setCreateOrgFormField('legal_entity_type', this.value)"><option value="">Select legal entity</option><option>Private Limited</option><option>Public Limited</option><option>LLP</option><option>Partnership</option><option>Proprietorship</option></select></div>
+      </div>
+      <div class="wiz-grid">
+        <div class="form-group">
+          <label class="lbl">Headquarters Country</label>
+          <select onchange="handleHeadquartersCountryChange(this.value)">
+            ${countrySelectOptionsHtml(createOrgForm.headquarters_country || 'India')}
+          </select>
+        </div>
+        <div class="form-group">
+          <label class="lbl">Operating Countries (Optional)</label>
+          <div style="display:flex;gap:8px;align-items:center;">
+            <select id="operating-country-select">
+              ${countrySelectOptionsHtml()}
+            </select>
+            <button type="button" class="btn btn-secondary btn-sm" onclick="addOperatingCountryFromDropdown()">Add</button>
+          </div>
+          <div class="selected-countries">
+            ${(Array.isArray(createOrgForm.operating_countries) ? createOrgForm.operating_countries : []).map((c) => `
+              <span class="country-pill">${c}<button type="button" onclick="removeOperatingCountry('${c.replace(/'/g, "\\'")}')">✕</button></span>
+            `).join('')}
+          </div>
+        </div>
+      </div>
+      <div class="wiz-full">
+        <div class="form-group"><label class="lbl">Company Website (Optional)</label><input type="url" value="${createOrgForm.company_website || ''}" placeholder="https://company.com" oninput="setCreateOrgFormField('company_website', this.value)" /></div>
+      </div>
+      <div class="wiz-full">
+        <label class="lbl">Company Logo (Optional)</label>
+        <input id="create-org-logo-input" type="file" accept=".png,.jpg,.jpeg,.svg,image/png,image/jpeg,image/svg+xml" class="hidden" onchange="handleCreateOrgLogoSelected(event)" />
+        <div
+          class="upload-zone mt-8"
+          onclick="triggerCreateOrgLogoPicker()"
+          ondragover="handleCreateOrgLogoDragOver(event)"
+          ondragleave="handleCreateOrgLogoDragLeave(event)"
+          ondrop="handleCreateOrgLogoDrop(event)"
+        >
+          <div style="font-size:22px;">🖼️</div>
+          <div id="create-org-logo-title" style="font-size:12.5px;color:var(--ink-3);font-weight:500;">Drag & drop logo here or click to upload</div>
+          <div id="create-org-logo-file" style="font-size:11.5px;color:var(--ink-3);margin-top:4px;">No file selected</div>
+          <div style="font-size:11px;color:var(--ink-4);margin-top:3px;">PNG, JPG, SVG · max 2MB</div>
+        </div>
+      </div>
+    `;
+  } else if (currentStep === 1) {
+    const autoSlug = slugify(createOrgForm.organization_code || createOrgForm.organization_name || '');
+    if (!createOrgForm.workspace_slug && autoSlug) {
+      createOrgForm.workspace_slug = autoSlug;
+    }
+    const timezoneValue = createOrgForm.timezone || inferTimezoneFromCountry(createOrgForm.headquarters_country || 'India');
+    if (!createOrgForm.timezone && !createOrgTimezoneManuallyEdited) {
+      createOrgForm.timezone = timezoneValue;
+    }
+    bodyEl.innerHTML = `
+      <div class="ws-card">
+        <div class="ws-card-title">Workspace Identity</div>
+        <div class="form-group">
+          <label class="lbl">Workspace URL Slug <span class="req">*</span></label>
+          <input type="text" placeholder="e.g. acme" value="${createOrgForm.workspace_slug || ''}" oninput="handleWorkspaceSlugInput(this.value)" />
+          <div class="f-hint" id="workspace-url-preview" style="margin-top:6px;">Preview: pms.zarohr.com/{slug}</div>
+          <div class="f-hint hint-note" id="workspace-slug-status" style="margin-top:3px;"></div>
+        </div>
+      </div>
+
+      <div class="ws-card">
+        <div class="ws-card-title">Calendar & Regional Settings</div>
+        <div class="wiz-grid">
+          <div class="form-group">
+            <label class="lbl">Financial Year <span class="req">*</span></label>
+            <select onchange="handleFinancialYearChange(this.value)">
+              <option value="">Select financial year</option>
+              <option ${createOrgForm.financial_year === 'April–March' ? 'selected' : ''}>April–March</option>
+              <option ${createOrgForm.financial_year === 'January–December' ? 'selected' : ''}>January–December</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label class="lbl">Timezone <span class="req">*</span></label>
+            <input list="timezone-options" value="${timezoneValue}" placeholder="Search timezone (e.g. Asia/Kolkata)" oninput="handleTimezoneInput(this.value)" />
+            <datalist id="timezone-options">
+              <option value="Asia/Kolkata"></option>
+              <option value="Asia/Dubai"></option>
+              <option value="Asia/Singapore"></option>
+              <option value="Asia/Tokyo"></option>
+              <option value="Europe/London"></option>
+              <option value="Europe/Berlin"></option>
+              <option value="America/New_York"></option>
+              <option value="America/Chicago"></option>
+              <option value="America/Denver"></option>
+              <option value="America/Los_Angeles"></option>
+              <option value="Australia/Sydney"></option>
+              <option value="Africa/Johannesburg"></option>
+            </datalist>
+          </div>
+        </div>
+        <div class="banner" style="background:#FFFBEB;border:1px solid #FDE68A;color:#92400E;margin-bottom:0;">
+          <span>🔒</span>
+          <span>Financial year affects review cycles, analytics, and reports, and cannot be changed after employee data or performance cycles are created.</span>
+        </div>
+      </div>
+
+      <div class="ws-card">
+        <div class="ws-card-title">Organization Size & PMS Defaults</div>
+        <div class="wiz-grid">
+          <div class="form-group">
+            <label class="lbl">Estimated Company Size</label>
+            <select onchange="setCreateOrgFormField('estimated_company_size', this.value)">
+              <option value="">Select range</option>
+              <option ${createOrgForm.estimated_company_size === '1–50' ? 'selected' : ''}>1–50</option>
+              <option ${createOrgForm.estimated_company_size === '50–200' ? 'selected' : ''}>50–200</option>
+              <option ${createOrgForm.estimated_company_size === '200–1000' ? 'selected' : ''}>200–1000</option>
+              <option ${createOrgForm.estimated_company_size === '1000–5000' ? 'selected' : ''}>1000–5000</option>
+              <option ${createOrgForm.estimated_company_size === '5000+' ? 'selected' : ''}>5000+</option>
+            </select>
+            <div class="f-hint">Used for license planning, performance benchmarks, and scaling decisions.</div>
+          </div>
+          <div class="form-group">
+            <label class="lbl">Default Review Cycle Frequency</label>
+            <select onchange="setCreateOrgFormField('default_review_cycle_frequency', this.value)">
+              <option ${createOrgForm.default_review_cycle_frequency === 'Annual' ? 'selected' : ''}>Annual</option>
+              <option ${createOrgForm.default_review_cycle_frequency === 'Bi-Annual' ? 'selected' : ''}>Bi-Annual</option>
+              <option ${createOrgForm.default_review_cycle_frequency === 'Quarterly' ? 'selected' : ''}>Quarterly</option>
+              <option ${createOrgForm.default_review_cycle_frequency === 'Continuous' ? 'selected' : ''}>Continuous</option>
+            </select>
+          </div>
+        </div>
+        <div class="wiz-grid">
+          <div class="form-group">
+            <label class="lbl">Default Rating Scale</label>
+            <select onchange="setCreateOrgFormField('default_rating_scale', this.value)">
+              <option ${createOrgForm.default_rating_scale === '5-point scale' ? 'selected' : ''}>5-point scale</option>
+              <option ${createOrgForm.default_rating_scale === '4-point scale' ? 'selected' : ''}>4-point scale</option>
+              <option ${createOrgForm.default_rating_scale === '3-point scale' ? 'selected' : ''}>3-point scale</option>
+              <option ${createOrgForm.default_rating_scale === 'Custom' ? 'selected' : ''}>Custom</option>
+            </select>
+          </div>
+          <div></div>
+        </div>
+        <div class="f-hint">HR admins can modify these defaults later in PMS configuration.</div>
+      </div>
+    `;
+  } else {
+    const modules = [
+      { id: 'pms', name: 'Performance Management', desc: 'Core PMS workflows for reviews and appraisals.', locked: true },
+      { id: 'goal', name: 'Goal Management', desc: 'Create and track quarterly and annual goals.', locked: false },
+      { id: 'feedback360', name: '360 Feedback', desc: 'Collect peer and manager feedback at scale.', locked: false },
+      { id: 'comp', name: 'Compensation Planning', desc: 'Plan merit increases and compensation cycles.', locked: false },
+      { id: 'succession', name: 'Succession Planning', desc: 'Identify critical roles and successor pipelines.', locked: false },
+      { id: 'lnd', name: 'Learning & Development', desc: 'Map development plans to capability needs.', locked: false },
+    ];
+
+    bodyEl.innerHTML = `
+      <div class="wiz-full">
+        <label class="lbl">Module Activation</label>
+        <div class="create-mod-grid mt-8">
+          ${modules.map((m) => `
+            <div class="create-mod-card ${m.locked ? 'locked' : createOrgSelectedModules.includes(m.id) ? 'sel' : ''}" ${m.locked ? '' : `onclick="toggleCreateOrgModule('${m.id}')"`}>
+              <div class="create-mod-check">${m.locked || createOrgSelectedModules.includes(m.id) ? '✓' : ''}</div>
+              <div>
+                <div class="create-mod-name">${m.name}</div>
+                <div class="create-mod-desc">${m.desc}</div>
+              </div>
+            </div>
+          `).join('')}
+        </div>
+      </div>
+      <div class="wiz-grid">
+        <div class="form-group"><label class="lbl">HR Admin Full Name</label><input type="text" placeholder="Full name" oninput="setCreateOrgFormField('hr_admin_name', this.value)" /></div>
+        <div class="form-group"><label class="lbl">HR Admin Email</label><input type="email" placeholder="hr@company.com" oninput="setCreateOrgFormField('hr_admin_email', this.value)" /></div>
+      </div>
+      <div class="wiz-grid">
+        <div class="form-group"><label class="lbl">Temporary Password</label><input type="text" placeholder="Set temporary password" oninput="setCreateOrgFormField('temporary_password', this.value)" /></div>
+        <div></div>
+      </div>
+      <div class="banner" style="background:#F0FDF4;border:1px solid #BBF7D0;color:#14532D;">
+        <span>✉️</span>
+        <span>The HR Admin will receive an invitation email and complete the PMS configuration for this organization.</span>
+      </div>
+    `;
+  }
+
+  backBtn.disabled = currentStep === 0;
+  backBtn.style.opacity = currentStep === 0 ? '.6' : '1';
+  nextBtn.textContent = currentStep === CREATE_ORG_PAGE_STEPS.length - 1 ? 'Create Organization' : 'Continue';
+  updateOrgCodeStatus(createOrgForm.organization_code || '');
+  updateWorkspaceSlugPreview(createOrgForm.workspace_slug || '');
+  updateCreateOrgLogoZone();
+  updateCreateOrgNextState();
+}
+function setAlertState() {
+  const shouldShow = dashboardFlags.hasLicenseOverage || dashboardFlags.hasCriticalIssue;
+  document.getElementById('license-alert').classList.toggle('hidden', !shouldShow);
+  document.getElementById('overage-badge').style.display = dashboardFlags.hasLicenseOverage ? '' : 'none';
+}
+
+function dismissAlert() {
+  document.getElementById('license-alert').classList.add('hidden');
+}
+
+function renderFeed() {
+  const el = document.getElementById('feed-list');
+  el.innerHTML = feedData.map((f) => `
+    <div style="display:flex; gap:10px; padding:9px 0; border-bottom:1px solid var(--border);">
+      <div style="width:28px;height:28px;border-radius:50%;display:flex;align-items:center;justify-content:center;background:${f.bg};flex-shrink:0">${f.ic}</div>
+      <div style="font-size:12.5px;color:var(--ink-2);line-height:1.5;">
+        <div>${f.text}</div>
+        <div style="font-size:11px;color:var(--ink-4);margin-top:2px;">${f.time}</div>
+      </div>
+    </div>
+  `).join('');
+}
+
+window.addEventListener('popstate', (event) => {
+  const state = event.state;
+  if (!state || state.view === 'login') {
+    showLoginView();
+    return;
+  }
+  if (state.view === 'app') {
+    showAppView();
+    initDashboard();
+    const page = state.page || 'dashboard';
+    showPage(page);
+    if (page === 'create-org') {
+      loadDraft();
+      if (!createOrgForm.headquarters_country) createOrgForm.headquarters_country = 'India';
+      renderCreateOrganizationPage();
+    }
+    const label = state.label || (page === 'organizations' ? 'Organizations' : page === 'create-org' ? 'Create Organization' : 'Dashboard');
+    setTopbar(label);
+    activateSidebarItemByLabel(page === 'create-org' ? 'Organizations' : label);
+  }
+});
+
+(() => {
+  let restored = false;
+  const readStoredSession = () => {
+    try {
+      return localStorage.getItem(SESSION_KEY) || sessionStorage.getItem(SESSION_KEY);
+    } catch (_) {
+      return null;
+    }
+  };
+
+  try {
+    const raw = readStoredSession();
+    if (raw) {
+      const session = JSON.parse(raw);
+      if (session && session.isLoggedIn) {
+        currentRole = session.role || 'super-admin';
+        showAppView();
+        initDashboard();
+        const page = location.hash === '#organizations'
+          ? 'organizations'
+          : location.hash === '#create-organization'
+            ? 'create-org'
+            : 'dashboard';
+        const label = page === 'organizations' ? 'Organizations' : page === 'create-org' ? 'Create Organization' : 'Dashboard';
+        showPage(page);
+        if (page === 'create-org') {
+          loadDraft();
+          if (!createOrgForm.headquarters_country) createOrgForm.headquarters_country = 'India';
+          renderCreateOrganizationPage();
+        }
+        setTopbar(label);
+        activateSidebarItemByLabel(page === 'create-org' ? 'Organizations' : label);
+        history.replaceState({ view: 'app', page, label }, '', page === 'organizations' ? '#organizations' : page === 'create-org' ? '#create-organization' : '#dashboard');
+        restored = true;
+      }
+    }
+  } catch (_) {}
+
+  if (!restored && (location.hash === '#dashboard' || location.hash === '#organizations' || location.hash === '#create-organization')) {
+    currentRole = 'super-admin';
+    showAppView();
+    initDashboard();
+    const page = location.hash === '#organizations'
+      ? 'organizations'
+      : location.hash === '#create-organization'
+        ? 'create-org'
+        : 'dashboard';
+    const label = page === 'organizations' ? 'Organizations' : page === 'create-org' ? 'Create Organization' : 'Dashboard';
+    showPage(page);
+    if (page === 'create-org') {
+      loadDraft();
+      if (!createOrgForm.headquarters_country) createOrgForm.headquarters_country = 'India';
+      renderCreateOrganizationPage();
+    }
+    setTopbar(label);
+    activateSidebarItemByLabel(page === 'create-org' ? 'Organizations' : label);
+    saveSession(true);
+    history.replaceState({ view: 'app', page, label }, '', page === 'organizations' ? '#organizations' : page === 'create-org' ? '#create-organization' : '#dashboard');
+    restored = true;
+  }
+
+  if (!restored) {
+    showLoginView();
+    history.replaceState({ view: 'login' }, '', '#login');
+  }
+})();
+</script>
+
+</body>
+</html>
