@@ -128,7 +128,7 @@ html, body { height: 100%; font-family: 'Geist', 'Segoe UI', 'Inter', Arial, san
 .form-group { display: flex; flex-direction: column; gap: 5px; }
 label.lbl { font-size: 12.5px; font-weight: 500; color: var(--ink-2); }
 label.lbl .req { color: var(--red); margin-left: 2px; }
-input[type=text], input[type=email], input[type=password], input[type=url], input[type=number], select, textarea {
+input[type=text], input[type=email], input[type=password], input[type=url], input[type=number], input[type=date], select, textarea {
   background: var(--white); border: 1.5px solid var(--border);
   border-radius: var(--radius); padding: 9px 13px;
   font-family: 'Geist', 'Segoe UI', 'Inter', Arial, sans-serif; font-size: 13.5px; color: var(--ink);
@@ -328,7 +328,7 @@ select { cursor: pointer; appearance: none; background-image: url("data:image/sv
   margin-bottom: 2px;
 }
 .login-left input[type="email"],
-.login-left input[type="password"] {
+.login-left .pwd-wrap input {
   border: 1.5px solid #e4eaf3;
   border-radius: 14px;
   height: 56px;
@@ -340,12 +340,12 @@ select { cursor: pointer; appearance: none; background-image: url("data:image/sv
   transition: border-color .25s ease, box-shadow .25s ease, transform .25s ease;
 }
 .login-left input[type="email"]:hover,
-.login-left input[type="password"]:hover {
+.login-left .pwd-wrap input:hover {
   border-color: #d4deeb;
   box-shadow: 0 2px 8px rgba(15,23,42,0.06);
 }
 .login-left input[type="email"]:focus,
-.login-left input[type="password"]:focus {
+.login-left .pwd-wrap input:focus {
   border-color: #2563eb;
   box-shadow: 0 0 0 4px rgba(37,99,235,0.12), 0 6px 14px rgba(37,99,235,0.12);
 }
@@ -434,11 +434,16 @@ select { cursor: pointer; appearance: none; background-image: url("data:image/sv
 /*  APP SHELL (sidebar + topbar)                                              */
 /* ────────────────────────────────────────────────────────────────────────── */
 #page-app { display:flex; min-height:100vh; background:#F5F6FA; }
+#page-app.hr-mode .sidebar,
+#page-app.hr-mode .topbar { display:none; }
+#page-app.hr-mode .page-body { padding:0; }
+#page-app.hr-mode .main-content { width:100%; }
 .sidebar {
   width:250px; min-width:250px; background:#fff; color:var(--ink-2); border-right:1px solid var(--border);
   display:flex; flex-direction:column; height:100vh; overflow-y:auto; position:sticky; top:0;
 }
-.sidebar-logo { padding:18px; border-bottom:1px solid var(--border); display:flex; align-items:center; gap:8px; }
+.sidebar-logo { padding:18px; border-bottom:1px solid var(--border); display:flex; align-items:center; gap:8px; cursor:pointer; }
+.sidebar-logo:hover { background:#fbfcff; }
 .sidebar-logo .brand-mark { width:36px; height:36px; overflow:hidden; }
 .sidebar-logo .brand-mark { background:transparent; border-radius:0; display:flex; align-items:center; justify-content:center; }
 .sidebar-brand-icon { width:100%; height:100%; object-fit:cover; transform:scale(1.16); }
@@ -452,6 +457,19 @@ select { cursor: pointer; appearance: none; background-image: url("data:image/sv
 }
 .sb-item:hover { background:var(--bg-subtle); color:var(--ink); }
 .sb-item.active { background:#EEF3FE; color:var(--blue); }
+.sb-item.inactive {
+  color:#B6BDC9;
+  cursor:default;
+  pointer-events:none;
+}
+.sb-item.inactive:hover {
+  background:transparent;
+  color:#B6BDC9;
+}
+.sb-item.inactive .sb-item-icon,
+.sb-item.inactive .sb-badge {
+  opacity:.55;
+}
 .sb-item-icon { width:22px; text-align:center; font-size:14px; }
 .sb-badge { margin-left:auto; padding:2px 7px; border-radius:999px; font-size:10px; font-weight:700; background:#3B6FF0; color:#fff; }
 .sb-badge-alert { background:#D97706; }
@@ -488,6 +506,13 @@ select { cursor: pointer; appearance: none; background-image: url("data:image/sv
 .notif-dot { position:absolute; width:7px; height:7px; border-radius:999px; background:#ef4444; top:8px; right:8px; }
 
 .page-body { flex:1; overflow-y:auto; padding:24px; }
+.admin-page-frame {
+  width: 100%;
+  min-height: 100vh;
+  border: none;
+  background: #fff;
+  display: block;
+}
 .view { animation:fadeUp .24s ease both; }
 .view.hidden { display:none; }
 .kpi-strip { display:grid; grid-template-columns:repeat(5, minmax(0,1fr)); gap:12px; margin-bottom:16px; }
@@ -517,6 +542,24 @@ select { cursor: pointer; appearance: none; background-image: url("data:image/sv
 .org-table td { font-size:13px; color:var(--ink-2); }
 .org-table tr:last-child td { border-bottom:none; }
 .org-info { display:flex; align-items:center; gap:10px; }
+.org-action-wrap { position:relative; display:flex; justify-content:flex-end; }
+.org-menu-btn {
+  width:32px; height:32px; border-radius:8px; border:1px solid transparent; background:transparent;
+  color:var(--ink-3); cursor:pointer; font-size:18px; line-height:1; display:flex; align-items:center; justify-content:center;
+}
+.org-menu-btn:hover { background:var(--bg-subtle); border-color:var(--border); color:var(--ink); }
+.org-menu {
+  position:absolute; top:38px; right:0; min-width:132px; background:#fff; border:1px solid var(--border);
+  border-radius:10px; box-shadow:var(--shadow-md); padding:6px; z-index:30;
+}
+.org-menu.hidden { display:none !important; }
+.org-menu-item {
+  width:100%; border:none; background:transparent; text-align:left; padding:9px 10px; border-radius:8px;
+  color:var(--ink-2); font-size:12.5px; cursor:pointer; font-family:'Geist','Segoe UI','Inter',Arial,sans-serif;
+}
+.org-menu-item:hover { background:var(--bg-subtle); }
+.org-menu-item.danger { color:var(--red); }
+.org-menu-item.danger:hover { background:var(--red-light); }
 .org-logo {
   width:30px; height:30px; border-radius:8px; background:linear-gradient(135deg,#3B6FF0,#6366f1); color:#fff;
   display:flex; align-items:center; justify-content:center; font-size:12px; font-weight:700;
@@ -540,14 +583,55 @@ select { cursor: pointer; appearance: none; background-image: url("data:image/sv
 .org-page-title { font-size:34px; line-height:1.1; margin:0 0 6px; font-family:'Geist','Segoe UI','Inter',Arial,sans-serif; color:var(--ink); }
 .org-page-sub { margin:0; color:var(--ink-3); font-size:14px; max-width:620px; line-height:1.6; }
 .org-page-stats { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:12px; margin-bottom:14px; }
+.org-row-clickable { cursor:pointer; }
+.org-row-clickable:hover td { background:#fbfdff; }
+.org-detail-overlay {
+  position:fixed; inset:0; background:rgba(15,23,42,.32); backdrop-filter:blur(10px); -webkit-backdrop-filter:blur(10px);
+  display:flex; align-items:center; justify-content:center; z-index:140; padding:24px;
+}
+.org-detail-dialog {
+  width:min(920px,96vw); max-height:88vh; overflow:auto;
+  background:rgba(255,255,255,.88); border:1px solid rgba(255,255,255,.5);
+  box-shadow:0 24px 60px rgba(15,23,42,.20); border-radius:22px; padding:22px;
+}
+.org-detail-head { display:flex; justify-content:space-between; gap:16px; margin-bottom:18px; }
+.org-detail-title { font-size:28px; line-height:1.1; color:var(--ink); margin:0 0 6px; }
+.org-detail-sub { font-size:13px; color:var(--ink-3); margin:0; }
+.org-detail-close {
+  width:38px; height:38px; border-radius:12px; border:1px solid var(--border);
+  background:#fff; color:var(--ink-3); cursor:pointer; font-size:18px; flex-shrink:0;
+}
+.org-detail-grid { display:grid; grid-template-columns:1.2fr .8fr; gap:14px; }
+.org-detail-card {
+  border:1px solid var(--border); border-radius:16px;
+  background:linear-gradient(180deg,#ffffff 0%,#fbfcff 100%); padding:16px;
+}
+.org-detail-card-title { font-size:12px; font-weight:700; color:var(--ink-4); text-transform:uppercase; letter-spacing:.6px; margin-bottom:12px; }
+.org-detail-list { display:flex; flex-direction:column; gap:12px; }
+.org-detail-row { display:flex; justify-content:space-between; gap:16px; font-size:13px; }
+.org-detail-row span:first-child { color:var(--ink-4); }
+.org-detail-row span:last-child { color:var(--ink); font-weight:600; text-align:right; }
+.org-detail-progress {
+  height:10px; border-radius:999px; background:var(--bg-subtle); overflow:hidden; margin:10px 0 8px;
+}
+.org-detail-progress-fill { height:100%; border-radius:inherit; }
+.org-detail-progress-copy { font-size:12.5px; color:var(--ink-3); }
+.org-credential {
+  display:flex; justify-content:space-between; gap:12px; padding:12px 14px;
+  border:1px solid #dbe5f4; border-radius:14px; background:#f8fbff; font-size:13px;
+}
+.org-credential strong { display:block; color:var(--ink-4); font-size:11.5px; font-weight:600; margin-bottom:4px; text-transform:uppercase; letter-spacing:.5px; }
+.org-credential code { font-family:'Geist Mono','SFMono-Regular',Consolas,monospace; font-size:13px; color:var(--ink); }
 .create-org-shell { max-width:900px; margin:36px auto 96px; }
 .create-org-title { font-family:'Geist','Segoe UI','Inter',Arial,sans-serif; font-size:34px; line-height:1.1; color:var(--ink); margin:0 0 8px; }
 .create-org-sub { margin:0 0 24px; color:var(--ink-3); font-size:14px; line-height:1.6; }
 .create-org-steps { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:10px; margin-bottom:18px; }
 .create-org-step {
   border:1px solid var(--border); background:#fff; border-radius:10px; padding:10px 12px; font-size:12.5px;
-  color:var(--ink-3); font-weight:500; display:flex; align-items:center; gap:8px;
+  color:var(--ink-3); font-weight:500; display:flex; align-items:center; gap:8px; cursor:pointer;
+  transition:border-color .16s ease, background .16s ease, color .16s ease, transform .16s ease;
 }
+.create-org-step:hover { border-color:#D7DFEB; transform:translateY(-1px); }
 .create-org-step .num {
   width:22px; height:22px; border-radius:50%; background:#E5E7EB; color:#6B7280; font-size:11px; font-weight:700;
   display:flex; align-items:center; justify-content:center; flex-shrink:0;
@@ -556,6 +640,12 @@ select { cursor: pointer; appearance: none; background-image: url("data:image/sv
 .create-org-step.active .num { background:var(--blue); color:#fff; }
 .create-org-step.done { border-color:#BBF7D0; background:#F0FDF4; color:#15803D; }
 .create-org-step.done .num { background:#16A34A; color:#fff; }
+.create-org-feedback {
+  min-height: 20px;
+  margin: -6px 0 14px;
+  font-size: 12.5px;
+  color: #b45309;
+}
 .create-org-card { border-radius:14px; }
 .create-org-body { min-height:360px; padding:22px; }
 .create-org-actions {
@@ -564,6 +654,72 @@ select { cursor: pointer; appearance: none; background-image: url("data:image/sv
 }
 .ws-card { border:1px solid var(--border); border-radius:12px; background:#fff; padding:14px; margin-bottom:12px; }
 .ws-card-title { font-size:13px; font-weight:600; color:var(--ink); margin-bottom:10px; }
+.calendar-choice-grid { display:grid; grid-template-columns:repeat(3, minmax(0,1fr)); gap:12px; margin:12px 0 14px; }
+.calendar-choice {
+  position:relative;
+  border:1.5px solid var(--border);
+  border-radius:16px;
+  background:linear-gradient(180deg,#ffffff 0%,#fbfcff 100%);
+  padding:16px;
+  cursor:pointer;
+  transition:border-color .18s ease, box-shadow .18s ease, transform .18s ease;
+}
+.calendar-choice:hover {
+  border-color:var(--blue-mid);
+  box-shadow:0 10px 24px rgba(13,17,23,.06);
+  transform:translateY(-1px);
+}
+.calendar-choice.selected {
+  border-color:var(--blue);
+  background:linear-gradient(180deg,#f8fbff 0%,#eef4ff 100%);
+  box-shadow:0 0 0 3px rgba(37,99,235,.08);
+}
+.calendar-choice-badge {
+  width:34px; height:34px; border-radius:10px;
+  background:#eef2ff; color:#1d4ed8;
+  display:inline-flex; align-items:center; justify-content:center;
+  font-size:15px; margin-bottom:12px;
+}
+.calendar-choice.selected .calendar-choice-badge { background:#dbeafe; }
+.calendar-choice-title { font-size:14px; font-weight:600; color:var(--ink); }
+.calendar-choice-desc { font-size:12px; color:var(--ink-3); line-height:1.5; margin-top:4px; }
+.calendar-choice-check {
+  position:absolute; top:14px; right:14px;
+  width:22px; height:22px; border-radius:999px;
+  border:1.5px solid var(--border-mid);
+  display:inline-flex; align-items:center; justify-content:center;
+  font-size:12px; color:transparent; background:#fff;
+}
+.calendar-choice.selected .calendar-choice-check {
+  border-color:var(--blue); background:var(--blue); color:#fff;
+}
+.calendar-custom-panel {
+  margin-top:14px;
+  padding:14px;
+  border-radius:14px;
+  border:1px solid #dbe5f4;
+  background:linear-gradient(180deg,#fbfdff 0%,#f6f9ff 100%);
+}
+.calendar-custom-head { font-size:13px; font-weight:600; color:var(--ink); margin-bottom:4px; }
+.calendar-custom-sub { font-size:12px; color:var(--ink-3); margin-bottom:12px; }
+.calendar-range-preview {
+  margin-top:10px; padding:10px 12px; border-radius:12px;
+  background:#fff; border:1px dashed #cdd8ea;
+  font-size:12.5px; color:var(--ink-2);
+}
+.slug-suggestion {
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:10px;
+  margin-top:8px;
+  padding:10px 12px;
+  border:1px solid #dbe5f4;
+  border-radius:12px;
+  background:#f8fbff;
+}
+.slug-suggestion-copy { font-size:12.5px; color:var(--ink-2); }
+.slug-suggestion-copy strong { color:var(--ink); }
 .hint-ok { color:#15803d; }
 .hint-err { color:#B91C1C; }
 .hint-note { color:var(--ink-4); }
@@ -604,6 +760,17 @@ select { cursor: pointer; appearance: none; background-image: url("data:image/sv
 .create-mod-card.locked .create-mod-check { background:#16A34A; border-color:#16A34A; }
 .create-mod-name { font-size:13px; font-weight:600; color:var(--ink); margin-bottom:2px; }
 .create-mod-desc { font-size:11.5px; color:var(--ink-4); line-height:1.45; }
+.glass-overlay {
+  position:fixed; inset:0; background:rgba(15,23,42,.24); backdrop-filter:blur(14px); -webkit-backdrop-filter:blur(14px);
+  display:flex; align-items:center; justify-content:center; z-index:120;
+}
+.glass-dialog {
+  width:min(440px,92vw); background:rgba(255,255,255,.74); border:1px solid rgba(255,255,255,.46);
+  box-shadow:0 24px 60px rgba(15,23,42,.18); border-radius:18px; padding:22px;
+}
+.glass-title { font-size:20px; font-weight:700; color:var(--ink); margin-bottom:8px; }
+.glass-sub { font-size:13.5px; color:var(--ink-3); line-height:1.6; margin-bottom:18px; }
+.glass-actions { display:flex; justify-content:flex-end; gap:10px; }
 .wiz-grid { display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-bottom:12px; }
 .wiz-full { margin-bottom:12px; }
 .hidden { display:none !important; }
@@ -620,9 +787,11 @@ select { cursor: pointer; appearance: none; background-image: url("data:image/sv
   .dash-grid { grid-template-columns: 1fr; }
   .org-page-stats { grid-template-columns:1fr; }
   .org-page-head { flex-direction:column; }
+  .org-detail-grid { grid-template-columns:1fr; }
   .create-org-steps { grid-template-columns:1fr; }
   .create-mod-grid { grid-template-columns:1fr; }
   .wiz-grid { grid-template-columns: 1fr; }
+  .calendar-choice-grid { grid-template-columns:1fr; }
 }
 </style>
 </head>
@@ -698,7 +867,7 @@ select { cursor: pointer; appearance: none; background-image: url("data:image/sv
 ═══════════════════════════════════════════════════════════════════════════ -->
 <div id="page-app" class="hidden">
   <aside class="sidebar">
-    <div class="sidebar-logo">
+    <div class="sidebar-logo" onclick="goHome()">
       <div class="brand-mark"><img class="sidebar-brand-icon" src="images/final zaro logo.png" alt="Zaro HR logo" /></div>
       <div class="sidebar-brand-text">
         <div class="brand-name"><span class="brand-zaro">Zaro</span><span class="brand-hr">HR</span></div>
@@ -706,20 +875,21 @@ select { cursor: pointer; appearance: none; background-image: url("data:image/sv
       </div>
     </div>
 
-    <div class="nav-section-label">Main</div>
-    <div class="sb-item active" onclick="setNav(this,'Dashboard','dashboard')"><span class="sb-item-icon">📊</span><span>Dashboard</span></div>
-    <div class="sb-item" onclick="setNav(this,'Organizations','organizations')"><span class="sb-item-icon">🏢</span><span>Organizations</span></div>
-    <div class="sb-item" onclick="setNav(this,'User Management','dashboard')"><span class="sb-item-icon">👥</span><span>User Management</span></div>
-    <div class="sb-item" onclick="setNav(this,'Module Control','dashboard')"><span class="sb-item-icon">🧩</span><span>Module Control</span></div>
+    <div class="nav-section-label" id="nav-main-label">Main</div>
+    <div class="sb-item active" id="nav-dashboard" onclick="setNav(this,'Dashboard','dashboard')"><span class="sb-item-icon">📊</span><span>Dashboard</span></div>
+    <div class="sb-item hidden" id="nav-hr-home" onclick="setNav(this,'My Workspace','hr-home')"><span class="sb-item-icon">🏠</span><span>My Workspace</span></div>
+    <div class="sb-item" id="nav-organizations" onclick="setNav(this,'Organizations','organizations')"><span class="sb-item-icon">🏢</span><span>Organizations</span></div>
+    <div class="sb-item inactive" id="nav-user-mgmt"><span class="sb-item-icon">👥</span><span>User Management</span></div>
+    <div class="sb-item inactive" id="nav-module-control"><span class="sb-item-icon">🧩</span><span>Module Control</span></div>
 
-    <div class="nav-section-label">Finance & Ops</div>
-    <div class="sb-item" onclick="setNav(this,'Billing & Licenses','dashboard')"><span class="sb-item-icon">💳</span><span>Billing & Licenses</span><span class="sb-badge sb-badge-alert" id="overage-badge">!</span></div>
-    <div class="sb-item" onclick="setNav(this,'Audit Logs','dashboard')"><span class="sb-item-icon">📋</span><span>Audit Logs</span></div>
-    <div class="sb-item" onclick="setNav(this,'Integrations','dashboard')"><span class="sb-item-icon">🔗</span><span>Integrations</span></div>
+    <div class="nav-section-label" id="nav-finance-label">Finance & Ops</div>
+    <div class="sb-item inactive" id="nav-billing"><span class="sb-item-icon">💳</span><span>Billing & Licenses</span><span class="sb-badge sb-badge-alert" id="overage-badge">!</span></div>
+    <div class="sb-item inactive" id="nav-audit"><span class="sb-item-icon">📋</span><span>Audit Logs</span></div>
+    <div class="sb-item inactive" id="nav-integrations"><span class="sb-item-icon">🔗</span><span>Integrations</span></div>
 
-    <div class="nav-section-label">System</div>
-    <div class="sb-item" onclick="setNav(this,'Platform Settings','dashboard')"><span class="sb-item-icon">⚙️</span><span>Platform Settings</span></div>
-    <div class="sb-item" onclick="setNav(this,'Support & Docs','dashboard')"><span class="sb-item-icon">🛟</span><span>Support & Docs</span></div>
+    <div class="nav-section-label" id="nav-system-label">System</div>
+    <div class="sb-item inactive" id="nav-platform-settings"><span class="sb-item-icon">⚙️</span><span>Platform Settings</span></div>
+    <div class="sb-item inactive" id="nav-support"><span class="sb-item-icon">🛟</span><span>Support & Docs</span></div>
 
     <div class="sidebar-footer">
       <div class="sidebar-user">
@@ -748,7 +918,7 @@ select { cursor: pointer; appearance: none; background-image: url("data:image/sv
       <div id="dashboard-view" class="view">
       <div class="banner banner-amber" id="license-alert">
         <span>⚠️</span>
-        <span><strong>Acme Technologies</strong> has exceeded their licensed seat count by 12 users. Review license usage and adjust billing.</span>
+        <span id="license-alert-text"></span>
         <button class="alert-close" onclick="dismissAlert()">✕</button>
       </div>
 
@@ -760,8 +930,8 @@ select { cursor: pointer; appearance: none; background-image: url("data:image/sv
         </div>
         <div class="kpi-card">
           <div class="kpi-label">Total Employees</div>
-          <div class="kpi-value">847</div>
-          <div class="kpi-sub">Across all orgs</div>
+          <div class="kpi-value" id="kpi-total-employees">847</div>
+          <div class="kpi-sub" id="kpi-total-employees-sub">Across all orgs</div>
         </div>
         <div class="kpi-card">
           <div class="kpi-label">Active Review Cycles</div>
@@ -770,8 +940,8 @@ select { cursor: pointer; appearance: none; background-image: url("data:image/sv
         </div>
         <div class="kpi-card">
           <div class="kpi-label">Licensed Seats</div>
-          <div class="kpi-value">1,200</div>
-          <div class="kpi-sub">70.6% used</div>
+          <div class="kpi-value" id="kpi-total-seats">1,200</div>
+          <div class="kpi-sub" id="kpi-seat-usage">70.6% used</div>
         </div>
         <div class="kpi-card">
           <div class="kpi-label">HR Admins</div>
@@ -788,6 +958,7 @@ select { cursor: pointer; appearance: none; background-image: url("data:image/sv
                 <div class="fw-600">Organizations</div>
                 <div class="text-sm text-muted mt-4">All tenants on this platform</div>
               </div>
+              <button class="btn btn-primary btn-sm" onclick="openCreateOrganizationPage()">Add Organization</button>
             </div>
             <table class="org-table">
               <thead>
@@ -810,13 +981,8 @@ select { cursor: pointer; appearance: none; background-image: url("data:image/sv
 
         <div class="dash-right">
           <div class="card">
-            <div class="card-head"><div class="fw-600">Pending Actions</div><span class="badge badge-red">4</span></div>
-            <div class="card-p compact-list">
-              <div class="list-row"><span>License overage - Acme</span><span>›</span></div>
-              <div class="list-row"><span>HR invite pending - Zenith</span><span>›</span></div>
-              <div class="list-row"><span>Failed import - Nova</span><span>›</span></div>
-              <div class="list-row"><span>Approve module request</span><span>›</span></div>
-            </div>
+            <div class="card-head"><div class="fw-600">Pending Actions</div><span class="badge badge-red" id="pending-actions-count">4</span></div>
+            <div class="card-p compact-list" id="pending-actions-list"></div>
           </div>
 
           <div class="card">
@@ -859,13 +1025,13 @@ select { cursor: pointer; appearance: none; background-image: url("data:image/sv
           </div>
           <div class="kpi-card">
             <div class="kpi-label">Total Employees</div>
-            <div class="kpi-value">847</div>
+            <div class="kpi-value" id="org-page-total-employees">847</div>
             <div class="kpi-sub">Across all tenants</div>
           </div>
           <div class="kpi-card">
             <div class="kpi-label">Seat Utilization</div>
-            <div class="kpi-value">70.6%</div>
-            <div class="kpi-sub">847 of 1,200 seats</div>
+            <div class="kpi-value" id="org-page-seat-usage">70.6%</div>
+            <div class="kpi-sub" id="org-page-seat-sub">847 of 1,200 seats</div>
           </div>
         </div>
 
@@ -889,11 +1055,16 @@ select { cursor: pointer; appearance: none; background-image: url("data:image/sv
         </div>
       </div>
 
+      <div id="hr-home-view" class="view hidden">
+        <iframe id="hr-admin-frame" class="admin-page-frame" src="pms.html" title="Assigned Admin Workspace"></iframe>
+      </div>
+
       <div id="create-org-view" class="view hidden">
         <div class="create-org-shell">
-          <h1 class="create-org-title">Create Organization</h1>
-          <p class="create-org-sub">Set up a new company workspace and assign its HR administrator.</p>
+          <h1 class="create-org-title" id="create-org-title">Create Organization</h1>
+          <p class="create-org-sub" id="create-org-sub">Set up a new company workspace and assign its HR administrator.</p>
           <div class="create-org-steps" id="create-org-steps"></div>
+          <div class="create-org-feedback" id="create-org-feedback"></div>
           <div class="card create-org-card">
             <div class="create-org-body" id="create-org-body"></div>
             <div class="create-org-actions">
@@ -906,6 +1077,26 @@ select { cursor: pointer; appearance: none; background-image: url("data:image/sv
     </div>
   </div>
 
+  <div class="glass-overlay hidden" id="delete-org-overlay">
+    <div class="glass-dialog">
+      <div class="glass-title">Delete Organization?</div>
+      <div class="glass-sub" id="delete-org-text">Are you sure you want to delete this organization?</div>
+      <div class="form-group" style="margin-bottom:18px;">
+        <label class="lbl">Confirm with password</label>
+        <input type="password" id="delete-org-password" placeholder="Enter your password" autocomplete="off" />
+        <div class="input-hint hint-err hidden" id="delete-org-error">Incorrect password.</div>
+      </div>
+      <div class="glass-actions">
+        <button class="btn btn-secondary" onclick="closeDeleteOrgModal()">Cancel</button>
+        <button class="btn btn-danger" onclick="deleteSelectedOrganization()">Delete</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="org-detail-overlay hidden" id="org-detail-overlay">
+    <div class="org-detail-dialog" id="org-detail-dialog"></div>
+  </div>
+
 </div>
 
 <!-- ══════════════════════════════════════════════════════════════════════════
@@ -915,11 +1106,16 @@ select { cursor: pointer; appearance: none; background-image: url("data:image/sv
 let currentRole = 'super-admin';
 let currentPage = 'dashboard';
 let currentStep = 0;
+let activeOrgMenuKey = null;
+let deleteOrgKey = null;
+let activeOrgDetailKey = null;
+let activeEditOrgKey = null;
+let currentOrgKey = null;
+let currentUserName = '';
 let createOrgSelectedModules = [];
 let createOrgForm = {};
 let createOrgSlugManuallyEdited = false;
 let createOrgShortCodeManuallyEdited = false;
-let createOrgTimezoneManuallyEdited = false;
 const COUNTRY_OPTIONS = [
   'Afghanistan','Albania','Algeria','Argentina','Australia','Austria','Bangladesh','Belgium','Brazil','Canada',
   'Chile','China','Colombia','Croatia','Czech Republic','Denmark','Egypt','Finland','France','Germany',
@@ -931,23 +1127,32 @@ const COUNTRY_OPTIONS = [
 
 const SESSION_KEY = 'zarohr_auth_session';
 const DRAFT_KEY = 'zarohr_create_org_draft';
+const APP_DATA_KEY = 'zarohr_app_data_v1';
+const SUPER_ADMIN_PASSWORD = 'admin123';
 const ROLE_META = {
   'super-admin': { avatar: 'SA', name: 'Super Admin', role: 'Platform Owner' },
+  'hr-admin': { avatar: 'HR', name: 'HR Admin', role: 'Organization Admin' },
 };
-const dashboardFlags = { hasLicenseOverage: true, hasCriticalIssue: false };
-const feedData = [
-  { bg:'#EEF3FE', ic:'🏢', text:'<strong>Zenith Capital</strong> organization was created and HR Admin invite sent.', time:'2 hours ago' },
-  { bg:'#FEF2F2', ic:'⚠️', text:'<strong>Failed import</strong> detected for Nova Pharma — 23 rows with validation errors.', time:'4 hours ago' },
-  { bg:'#F0FDF4', ic:'✅', text:'<strong>Acme Technologies</strong> completed full PMS setup. First review cycle is active.', time:'Yesterday, 3:42 PM' },
-  { bg:'#FFFBEB', ic:'💳', text:'License for <strong>Acme Technologies</strong> auto-renewed. 500 seats confirmed.', time:'Yesterday, 11:20 AM' },
+const DEFAULT_DASHBOARD_FLAGS = { licenseOverageOrgKey: 'acme', hasCriticalIssue: false };
+const DEFAULT_PENDING_ACTIONS = [
+  { orgKey: 'acme', text: 'License overage - Acme' },
+  { orgKey: 'zenith', text: 'HR invite pending - Zenith' },
+  { orgKey: 'nova', text: 'Failed import - Nova' },
+  { orgKey: 'nova', text: 'Approve module request' },
+];
+const DEFAULT_FEED_DATA = [
+  { orgKey:'zenith', bg:'#EEF3FE', ic:'🏢', text:'<strong>Zenith Capital</strong> organization was created and HR Admin invite sent.', time:'2 hours ago' },
+  { orgKey:'nova', bg:'#FEF2F2', ic:'⚠️', text:'<strong>Failed import</strong> detected for Nova Pharma — 23 rows with validation errors.', time:'4 hours ago' },
+  { orgKey:'acme', bg:'#F0FDF4', ic:'✅', text:'<strong>Acme Technologies</strong> completed full PMS setup. First review cycle is active.', time:'Yesterday, 3:42 PM' },
+  { orgKey:'acme', bg:'#FFFBEB', ic:'💳', text:'License for <strong>Acme Technologies</strong> auto-renewed. 500 seats confirmed.', time:'Yesterday, 11:20 AM' },
 ];
 const CREATE_ORG_PAGE_STEPS = ['Organization Details', 'Workspace Settings', 'HR Admin Setup'];
-let organizationsData = [
+const DEFAULT_ORGANIZATIONS = [
   {
     key: 'acme',
     orgCode: 'ACME',
     name: 'Acme Technologies',
-    domain: 'acme.pulsehr.com',
+    domain: 'acme.zarohr.com',
     industry: 'IT / Software',
     industryBadgeClass: 'badge-blue',
     employees: 412,
@@ -964,7 +1169,7 @@ let organizationsData = [
     key: 'nova',
     orgCode: 'NOVA',
     name: 'Nova Pharma Ltd.',
-    domain: 'nova.pulsehr.com',
+    domain: 'nova.zarohr.com',
     industry: 'Healthcare',
     industryBadgeClass: 'badge-green',
     employees: 285,
@@ -981,7 +1186,7 @@ let organizationsData = [
     key: 'zenith',
     orgCode: 'ZENITH',
     name: 'Zenith Capital',
-    domain: 'zenith.pulsehr.com',
+    domain: 'zenith.zarohr.com',
     industry: 'BFSI',
     industryBadgeClass: 'badge-amber',
     employees: 150,
@@ -995,17 +1200,21 @@ let organizationsData = [
     logoBg: 'linear-gradient(135deg,#D97706,#f59e0b)',
   },
 ];
+let dashboardFlags = { ...DEFAULT_DASHBOARD_FLAGS };
+let pendingActionsData = DEFAULT_PENDING_ACTIONS.map((item) => ({ ...item }));
+let feedData = DEFAULT_FEED_DATA.map((item) => ({ ...item }));
+let organizationsData = DEFAULT_ORGANIZATIONS.map((org) => ({ ...org }));
 
 function applyRoleMeta(role) {
   const meta = ROLE_META[role] || ROLE_META['super-admin'];
-  document.getElementById('sb-name').textContent = meta.name;
+  document.getElementById('sb-name').textContent = currentUserName || meta.name;
   document.getElementById('sb-role').textContent = meta.role;
   document.getElementById('sb-avatar').textContent = meta.avatar;
 }
 
 function saveSession(isLoggedIn = true) {
   try {
-    const payload = JSON.stringify({ isLoggedIn, role: currentRole });
+    const payload = JSON.stringify({ isLoggedIn, role: currentRole, orgKey: currentOrgKey, userName: currentUserName });
     localStorage.setItem(SESSION_KEY, payload);
     sessionStorage.setItem(SESSION_KEY, payload);
   } catch (_) {}
@@ -1019,23 +1228,30 @@ function clearSession() {
 }
 
 function saveDraft() {
-  sessionStorage.setItem(DRAFT_KEY, JSON.stringify({
+  const draft = JSON.stringify({
     currentStep,
     createOrgForm,
     createOrgSelectedModules,
     createOrgSlugManuallyEdited,
     createOrgShortCodeManuallyEdited,
-    createOrgTimezoneManuallyEdited
-  }));
+    activeEditOrgKey
+  });
+  try {
+    localStorage.setItem(DRAFT_KEY, draft);
+    sessionStorage.setItem(DRAFT_KEY, draft);
+  } catch (_) {}
 }
 
 function clearDraft() {
-  sessionStorage.removeItem(DRAFT_KEY);
+  try {
+    localStorage.removeItem(DRAFT_KEY);
+    sessionStorage.removeItem(DRAFT_KEY);
+  } catch (_) {}
 }
 
 function loadDraft() {
   try {
-    const raw = sessionStorage.getItem(DRAFT_KEY);
+    const raw = localStorage.getItem(DRAFT_KEY) || sessionStorage.getItem(DRAFT_KEY);
     if (!raw) return;
     const d = JSON.parse(raw);
     currentStep = typeof d.currentStep === 'number' ? d.currentStep : 0;
@@ -1043,12 +1259,96 @@ function loadDraft() {
     createOrgSelectedModules = Array.isArray(d.createOrgSelectedModules) ? d.createOrgSelectedModules : [];
     createOrgSlugManuallyEdited = Boolean(d.createOrgSlugManuallyEdited);
     createOrgShortCodeManuallyEdited = Boolean(d.createOrgShortCodeManuallyEdited);
-    createOrgTimezoneManuallyEdited = Boolean(d.createOrgTimezoneManuallyEdited);
+    activeEditOrgKey = d.activeEditOrgKey || null;
+  } catch (_) {}
+}
+
+function migrateOrganizationRecord(org) {
+  if (!org || typeof org !== 'object') return org;
+  const nextOrg = { ...org };
+  if (typeof nextOrg.domain === 'string' && nextOrg.domain.includes('pulsehr.com')) {
+    nextOrg.domain = nextOrg.domain.replace(/pulsehr\.com/g, 'zarohr.com');
+  }
+  if (!nextOrg.workspaceSlug && typeof nextOrg.domain === 'string') {
+    nextOrg.workspaceSlug = String(nextOrg.domain).split('.')[0] || '';
+  }
+  if (!Array.isArray(nextOrg.selectedModules)) {
+    nextOrg.selectedModules = [];
+  }
+  if (!nextOrg.setupFormSnapshot || typeof nextOrg.setupFormSnapshot !== 'object') {
+    nextOrg.setupFormSnapshot = {
+      organization_name: nextOrg.name || '',
+      organization_code: String(nextOrg.orgCode || '').toLowerCase(),
+      industry: nextOrg.industry || '',
+      legal_entity_type: nextOrg.legalEntityType || '',
+      headquarters_country: nextOrg.headquartersCountry || 'India',
+      operating_countries: Array.isArray(nextOrg.operatingCountries) ? [...nextOrg.operatingCountries] : [],
+      company_website: nextOrg.companyWebsite || '',
+      company_logo_name: nextOrg.companyLogoName || '',
+      workspace_slug: nextOrg.workspaceSlug || '',
+      financial_year: nextOrg.pmsCalendar || '',
+      custom_pms_start_date: nextOrg.customPmsStartDate || '',
+      custom_pms_end_date: nextOrg.customPmsEndDate || '',
+      estimated_company_size: nextOrg.estimatedCompanySize || '',
+      hr_admin_name: nextOrg.hrAdminName || '',
+      hr_admin_email: nextOrg.hrAdminEmail || '',
+      temporary_password: nextOrg.temporaryPassword || '',
+    };
+  }
+  return nextOrg;
+}
+
+function saveAppData() {
+  try {
+    localStorage.setItem(APP_DATA_KEY, JSON.stringify({
+      dashboardFlags,
+      pendingActionsData,
+      feedData,
+      organizationsData
+    }));
+  } catch (_) {}
+}
+
+function loadAppData() {
+  try {
+    const raw = localStorage.getItem(APP_DATA_KEY);
+    if (!raw) return;
+    const data = JSON.parse(raw);
+    dashboardFlags = {
+      ...DEFAULT_DASHBOARD_FLAGS,
+      ...(data.dashboardFlags || {})
+    };
+    pendingActionsData = Array.isArray(data.pendingActionsData)
+      ? data.pendingActionsData
+      : DEFAULT_PENDING_ACTIONS.map((item) => ({ ...item }));
+    feedData = Array.isArray(data.feedData)
+      ? data.feedData
+      : DEFAULT_FEED_DATA.map((item) => ({ ...item }));
+    const incomingOrganizations = Array.isArray(data.organizationsData)
+      ? data.organizationsData
+      : DEFAULT_ORGANIZATIONS.map((org) => ({ ...org }));
+    const migratedOrganizations = incomingOrganizations.map(migrateOrganizationRecord);
+    organizationsData = Array.isArray(data.organizationsData)
+      ? migratedOrganizations
+      : DEFAULT_ORGANIZATIONS.map((org) => ({ ...org }));
+    if (Array.isArray(data.organizationsData) && JSON.stringify(incomingOrganizations) !== JSON.stringify(migratedOrganizations)) {
+      saveAppData();
+    }
   } catch (_) {}
 }
 
 function showFormError(message) {
   alert(message);
+}
+
+function showCreateOrgFeedback(message) {
+  const el = document.getElementById('create-org-feedback');
+  if (!el) return;
+  el.textContent = message || '';
+}
+
+function clearCreateOrgFeedback() {
+  showCreateOrgFeedback('');
 }
 
 function showLoginView() {
@@ -1062,18 +1362,23 @@ function showAppView() {
 }
 
 function initDashboard() {
+  loadAppData();
   applyRoleMeta(currentRole);
+  applyRoleNavigation();
   setAlertState();
   renderFeed();
+  renderPendingActions();
   renderOrganizations();
+  renderHrWorkspace();
   renderCreateOrganizationPage();
-  showPage('dashboard');
-  setTopbar('Dashboard');
+  showPage(currentRole === 'hr-admin' ? 'hr-home' : 'dashboard');
+  setTopbar(currentRole === 'hr-admin' ? 'My Workspace' : 'Dashboard');
 }
 
 function setCreateOrgFormField(key, value) {
   createOrgForm[key] = value;
   saveDraft();
+  clearCreateOrgFeedback();
   updateCreateOrgNextState();
 }
 
@@ -1121,6 +1426,7 @@ function generateShortCodeFromName(name) {
 function getExistingWorkspaceSlugs() {
   const slugs = new Set();
   organizationsData.forEach((org) => {
+    if (activeEditOrgKey && org.key === activeEditOrgKey) return;
     const domainSlug = String(org.domain || '').split('.')[0].trim().toLowerCase();
     if (domainSlug) slugs.add(domainSlug);
   });
@@ -1130,6 +1436,7 @@ function getExistingWorkspaceSlugs() {
 function getExistingOrgCodes() {
   const codes = new Set();
   organizationsData.forEach((org) => {
+    if (activeEditOrgKey && org.key === activeEditOrgKey) return;
     const code = String(org.orgCode || org.key || '').trim().toLowerCase();
     if (code) codes.add(code);
   });
@@ -1159,22 +1466,8 @@ function getWorkspaceSlugValidation(slug) {
   return { ok: true, message: 'Slug is available.' };
 }
 
-function inferTimezoneFromCountry(country) {
-  const map = {
-    'India': 'Asia/Kolkata',
-    'United States': 'America/New_York',
-    'United Kingdom': 'Europe/London',
-    'UAE': 'Asia/Dubai',
-    'Singapore': 'Asia/Singapore',
-  };
-  return map[country] || 'Asia/Kolkata';
-}
-
 function handleHeadquartersCountryChange(value) {
   setCreateOrgFormField('headquarters_country', value);
-  if (!createOrgTimezoneManuallyEdited) {
-    setCreateOrgFormField('timezone', inferTimezoneFromCountry(value));
-  }
 }
 
 function addOperatingCountry(value) {
@@ -1257,31 +1550,59 @@ function handleWorkspaceSlugInput(value) {
   updateWorkspaceSlugPreview(nextSlug);
 }
 
-function handleFinancialYearChange(value) {
-  setCreateOrgFormField('financial_year', value);
+function useSuggestedWorkspaceSlug(value) {
+  const nextSlug = normalizeSlugInput(value);
+  createOrgSlugManuallyEdited = false;
+  setCreateOrgFormField('workspace_slug', nextSlug);
+  renderCreateOrganizationPage();
 }
 
-function handleTimezoneInput(value) {
-  createOrgTimezoneManuallyEdited = true;
-  setCreateOrgFormField('timezone', value);
+function handlePmsCalendarSelection(value) {
+  setCreateOrgFormField('financial_year', value);
+  if (value !== 'Custom') {
+    delete createOrgForm.custom_pms_start_date;
+    delete createOrgForm.custom_pms_end_date;
+  }
+  saveDraft();
+  renderCreateOrganizationPage();
+}
+
+function handleCustomPmsCalendarDate(field, value) {
+  setCreateOrgFormField(field, value);
+  renderCreateOrganizationPage();
+}
+
+function formatCalendarDateForPreview(value) {
+  if (!value) return '';
+  const date = new Date(`${value}T00:00:00`);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' });
 }
 
 function validateWorkspaceSettings(showErrors = false) {
   const slugCheck = getWorkspaceSlugValidation(createOrgForm.workspace_slug || '');
   const fyOk = Boolean((createOrgForm.financial_year || '').trim());
-  const tzOk = Boolean((createOrgForm.timezone || '').trim());
-  const valid = slugCheck.ok && fyOk && tzOk;
+  const isCustomCalendar = createOrgForm.financial_year === 'Custom';
+  const customStart = createOrgForm.custom_pms_start_date || '';
+  const customEnd = createOrgForm.custom_pms_end_date || '';
+  const customDatesOk = !isCustomCalendar || (customStart && customEnd);
+  const customRangeOk = !isCustomCalendar || customEnd >= customStart;
+  const valid = slugCheck.ok && fyOk && customDatesOk && customRangeOk;
   if (showErrors) {
     if (!slugCheck.ok) {
-      alert(slugCheck.message);
+      showCreateOrgFeedback(slugCheck.message);
       return false;
     }
     if (!fyOk) {
-      alert('Financial Year is required.');
+      showCreateOrgFeedback('Select a PMS calendar option to continue.');
       return false;
     }
-    if (!tzOk) {
-      alert('Timezone is required.');
+    if (isCustomCalendar && !customDatesOk) {
+      showCreateOrgFeedback('Custom PMS calendar requires both start date and end date.');
+      return false;
+    }
+    if (isCustomCalendar && !customRangeOk) {
+      showCreateOrgFeedback('Custom PMS calendar end date must be on or after the start date.');
       return false;
     }
   }
@@ -1294,11 +1615,11 @@ function validateOrganizationDetails(showErrors = false) {
   const valid = orgNameOk && orgCodeCheck.ok;
   if (showErrors) {
     if (!orgNameOk) {
-      alert('Organization Name is required.');
+      showCreateOrgFeedback('Organization name is required.');
       return false;
     }
     if (!orgCodeCheck.ok) {
-      alert(orgCodeCheck.message);
+      showCreateOrgFeedback(orgCodeCheck.message);
       return false;
     }
   }
@@ -1358,7 +1679,7 @@ function applyCreateOrgLogoFile(file) {
     alert('Logo file size must be 2MB or less.');
     return;
   }
-  createOrgForm.company_logo_name = file.name;
+  setCreateOrgFormField('company_logo_name', file.name);
   updateCreateOrgLogoZone();
 }
 
@@ -1376,6 +1697,61 @@ function updateCreateOrgLogoZone() {
   fileEl.textContent = 'No file selected';
 }
 
+function getOrganizationByKey(orgKey) {
+  return organizationsData.find((org) => org.key === orgKey) || null;
+}
+
+function applyRoleNavigation() {
+  const appEl = document.getElementById('page-app');
+  const hrHomeNav = document.getElementById('nav-hr-home');
+  const dashboardNav = document.getElementById('nav-dashboard');
+  const orgNav = document.getElementById('nav-organizations');
+  const mainLabel = document.getElementById('nav-main-label');
+  const financeLabel = document.getElementById('nav-finance-label');
+  const systemLabel = document.getElementById('nav-system-label');
+  const userMgmt = document.getElementById('nav-user-mgmt');
+  const moduleControl = document.getElementById('nav-module-control');
+  const billing = document.getElementById('nav-billing');
+  const audit = document.getElementById('nav-audit');
+  const integrations = document.getElementById('nav-integrations');
+  const platformSettings = document.getElementById('nav-platform-settings');
+  const support = document.getElementById('nav-support');
+  const isHr = currentRole === 'hr-admin';
+
+  if (appEl) appEl.classList.toggle('hr-mode', isHr);
+
+  if (hrHomeNav) hrHomeNav.classList.toggle('hidden', !isHr);
+  if (dashboardNav) dashboardNav.classList.toggle('hidden', isHr);
+  if (orgNav) orgNav.classList.toggle('hidden', isHr);
+  if (mainLabel) mainLabel.textContent = isHr ? 'Workspace' : 'Main';
+
+  [financeLabel, systemLabel, userMgmt, moduleControl, billing, audit, integrations, platformSettings].forEach((el) => {
+    if (el) el.classList.toggle('hidden', isHr);
+  });
+  if (support) support.classList.toggle('hidden', false);
+}
+
+function renderHrWorkspace() {
+  const org = getOrganizationByKey(currentOrgKey);
+  const frame = document.getElementById('hr-admin-frame');
+  if (!frame) return;
+  if (!org) {
+    frame.srcdoc = '<div style="font-family:Arial,sans-serif;padding:32px;color:#334155;">No organization is linked to this admin login yet.</div>';
+    return;
+  }
+  frame.removeAttribute('srcdoc');
+  frame.src = `pms.html?orgKey=${encodeURIComponent(org.key)}`;
+}
+
+function getOrgTotals() {
+  const totalEmployees = organizationsData.reduce((sum, org) => sum + (org.employees || 0), 0);
+  const totalSeats = organizationsData.reduce((sum, org) => sum + (org.seats || 0), 0);
+  const seatUsage = totalSeats ? `${((totalEmployees / totalSeats) * 100).toFixed(1)}% used` : '0% used';
+  const activeCount = organizationsData.filter((org) => org.status === 'Active').length;
+  const setupCount = organizationsData.filter((org) => org.status !== 'Active').length;
+  return { totalEmployees, totalSeats, seatUsage, activeCount, setupCount };
+}
+
 function renderOrganizations() {
   const dashboardBody = document.getElementById('dashboard-org-tbody');
   const orgPageBody = document.getElementById('org-page-tbody');
@@ -1383,12 +1759,32 @@ function renderOrganizations() {
   const kpiCount = document.getElementById('kpi-org-count');
   const orgPageCount = document.getElementById('org-page-total-count');
   const navBadge = document.getElementById('org-count-badge');
+  const totalEmployeesEl = document.getElementById('kpi-total-employees');
+  const totalEmployeesSubEl = document.getElementById('kpi-total-employees-sub');
+  const totalSeatsEl = document.getElementById('kpi-total-seats');
+  const seatUsageEl = document.getElementById('kpi-seat-usage');
+  const orgPageEmployeesEl = document.getElementById('org-page-total-employees');
+  const orgPageSeatUsageEl = document.getElementById('org-page-seat-usage');
+  const orgPageSeatSubEl = document.getElementById('org-page-seat-sub');
+  const totals = getOrgTotals();
   if (kpiCount) kpiCount.textContent = String(count);
   if (orgPageCount) orgPageCount.textContent = String(count);
   if (navBadge) navBadge.textContent = String(count);
+  if (totalEmployeesEl) totalEmployeesEl.textContent = String(totals.totalEmployees);
+  if (totalEmployeesSubEl) totalEmployeesSubEl.textContent = 'Across all orgs';
+  if (totalSeatsEl) totalSeatsEl.textContent = totals.totalSeats.toLocaleString();
+  if (seatUsageEl) seatUsageEl.textContent = totals.seatUsage;
+  if (orgPageEmployeesEl) orgPageEmployeesEl.textContent = String(totals.totalEmployees);
+  if (orgPageSeatUsageEl) orgPageSeatUsageEl.textContent = totals.totalSeats ? `${((totals.totalEmployees / totals.totalSeats) * 100).toFixed(1)}%` : '0%';
+  if (orgPageSeatSubEl) orgPageSeatSubEl.textContent = `${totals.totalEmployees} of ${totals.totalSeats.toLocaleString()} seats`;
+
+  const orgPageCountCardSub = orgPageCount ? orgPageCount.parentElement.querySelector('.kpi-sub') : null;
+  if (orgPageCountCardSub) {
+    orgPageCountCardSub.textContent = `${totals.activeCount} active, ${totals.setupCount} in setup`;
+  }
 
   const rowsHtml = organizationsData.map((org) => `
-    <tr>
+    <tr class="org-row-clickable" ondblclick="openOrganizationDetails('${org.key}')">
       <td>
         <div class="org-info">
           <div class="org-logo" style="background:${org.logoBg}">${org.logoText}</div>
@@ -1402,12 +1798,135 @@ function renderOrganizations() {
       <td><div class="fw-600">${org.employees}</div><div class="text-xs text-muted">of ${org.seats} seats</div></td>
       <td><div class="mini-progress"><div class="mini-progress-fill" style="width:${org.setupPct}%;background:${org.setupColor}"></div></div></td>
       <td><span class="badge ${org.statusBadgeClass}">${org.status}</span></td>
-      <td><button class="btn btn-ghost btn-sm">${org.actionLabel}</button></td>
+      <td>
+        <div class="org-action-wrap">
+          <button class="org-menu-btn" onclick="toggleOrgMenu(event, '${org.key}')" ondblclick="event.stopPropagation()" aria-label="Organization actions">⋯</button>
+          <div class="org-menu ${activeOrgMenuKey === org.key ? '' : 'hidden'}">
+            <button class="org-menu-item" onclick="editOrganization('${org.key}')">Edit</button>
+            <button class="org-menu-item danger" onclick="openDeleteOrgModal('${org.key}')">Delete</button>
+          </div>
+        </div>
+      </td>
     </tr>
   `).join('');
 
   if (dashboardBody) dashboardBody.innerHTML = rowsHtml;
   if (orgPageBody) orgPageBody.innerHTML = rowsHtml;
+}
+
+function renderPendingActions() {
+  const list = document.getElementById('pending-actions-list');
+  const count = document.getElementById('pending-actions-count');
+  if (!list || !count) return;
+  count.textContent = String(pendingActionsData.length);
+  list.innerHTML = pendingActionsData.map((item) => `
+    <div class="list-row"><span>${item.text}</span><span>›</span></div>
+  `).join('');
+}
+
+function toggleOrgMenu(event, orgKey) {
+  event.stopPropagation();
+  activeOrgMenuKey = activeOrgMenuKey === orgKey ? null : orgKey;
+  renderOrganizations();
+}
+
+function closeOrgMenus() {
+  if (activeOrgMenuKey === null) return;
+  activeOrgMenuKey = null;
+  renderOrganizations();
+}
+
+function editOrganization(orgKey) {
+  closeOrgMenus();
+  const org = organizationsData.find((item) => item.key === orgKey);
+  if (!org) return;
+  const snapshot = org.setupFormSnapshot || {};
+  activeEditOrgKey = org.key;
+  currentStep = 0;
+  createOrgSelectedModules = Array.isArray(org.selectedModules) ? [...org.selectedModules] : [];
+  createOrgSlugManuallyEdited = true;
+  createOrgShortCodeManuallyEdited = true;
+  createOrgForm = {
+    organization_name: snapshot.organization_name || org.name || '',
+    organization_code: snapshot.organization_code || String(org.orgCode || '').toLowerCase(),
+    industry: snapshot.industry || org.industry || '',
+    legal_entity_type: snapshot.legal_entity_type || org.legalEntityType || '',
+    headquarters_country: snapshot.headquarters_country || org.headquartersCountry || 'India',
+    operating_countries: Array.isArray(snapshot.operating_countries) ? [...snapshot.operating_countries] : Array.isArray(org.operatingCountries) ? [...org.operatingCountries] : [],
+    company_website: snapshot.company_website || org.companyWebsite || '',
+    company_logo_name: snapshot.company_logo_name || org.companyLogoName || '',
+    workspace_slug: snapshot.workspace_slug || org.workspaceSlug || String(org.domain || '').split('.')[0] || '',
+    financial_year: snapshot.financial_year || org.pmsCalendar || '',
+    custom_pms_start_date: snapshot.custom_pms_start_date || org.customPmsStartDate || '',
+    custom_pms_end_date: snapshot.custom_pms_end_date || org.customPmsEndDate || '',
+    estimated_company_size: snapshot.estimated_company_size || org.estimatedCompanySize || '',
+    hr_admin_name: snapshot.hr_admin_name || org.hrAdminName || '',
+    hr_admin_email: snapshot.hr_admin_email || org.hrAdminEmail || '',
+    temporary_password: snapshot.temporary_password || org.temporaryPassword || '',
+  };
+  saveDraft();
+  renderCreateOrganizationPage();
+  showPage('create-org');
+  setTopbar('Edit Organization');
+  activateSidebarItemByLabel('Organizations');
+  history.pushState({ view: 'app', page: 'create-org', label: 'Edit Organization' }, '', '#create-organization');
+}
+
+function openDeleteOrgModal(orgKey) {
+  deleteOrgKey = orgKey;
+  closeOrgMenus();
+  const org = organizationsData.find((item) => item.key === orgKey);
+  const text = document.getElementById('delete-org-text');
+  const overlay = document.getElementById('delete-org-overlay');
+  const passwordInput = document.getElementById('delete-org-password');
+  const error = document.getElementById('delete-org-error');
+  if (text) {
+    text.textContent = org
+      ? `Are you sure you want to delete ${org.name}? This action cannot be undone.`
+      : 'Are you sure you want to delete this organization?';
+  }
+  if (passwordInput) passwordInput.value = '';
+  if (error) error.classList.add('hidden');
+  if (overlay) overlay.classList.remove('hidden');
+}
+
+function closeDeleteOrgModal() {
+  deleteOrgKey = null;
+  const overlay = document.getElementById('delete-org-overlay');
+  const passwordInput = document.getElementById('delete-org-password');
+  const error = document.getElementById('delete-org-error');
+  if (passwordInput) passwordInput.value = '';
+  if (error) error.classList.add('hidden');
+  if (overlay) overlay.classList.add('hidden');
+}
+
+function deleteSelectedOrganization() {
+  if (!deleteOrgKey) return;
+  const passwordInput = document.getElementById('delete-org-password');
+  const error = document.getElementById('delete-org-error');
+  const enteredPassword = passwordInput ? passwordInput.value : '';
+  if (enteredPassword !== SUPER_ADMIN_PASSWORD) {
+    if (error) error.classList.remove('hidden');
+    if (passwordInput) passwordInput.focus();
+    return;
+  }
+  cleanupDeletedOrganizationReferences(deleteOrgKey);
+  organizationsData = organizationsData.filter((org) => org.key !== deleteOrgKey);
+  saveAppData();
+  closeDeleteOrgModal();
+  renderOrganizations();
+  renderFeed();
+  renderPendingActions();
+  setAlertState();
+  showOrgSuccessMessage('Organization deleted successfully.');
+}
+
+function cleanupDeletedOrganizationReferences(orgKey) {
+  feedData = feedData.filter((item) => item.orgKey !== orgKey);
+  pendingActionsData = pendingActionsData.filter((item) => item.orgKey !== orgKey);
+  if (dashboardFlags.licenseOverageOrgKey === orgKey) {
+    dashboardFlags.licenseOverageOrgKey = null;
+  }
 }
 
 function showOrgSuccessMessage(message) {
@@ -1419,32 +1938,76 @@ function showOrgSuccessMessage(message) {
   setTimeout(() => banner.classList.add('hidden'), 4500);
 }
 
-function createOrganizationFromForm() {
+function buildOrganizationFromForm(existingOrg = null) {
   const orgName = (createOrgForm.organization_name || '').trim() || 'New Organization';
   const orgCode = normalizeShortCodeInput(createOrgForm.organization_code || generateShortCodeFromName(orgName) || 'ORG');
   const slugRaw = (createOrgForm.workspace_slug || orgCode || orgName).toLowerCase();
   const slug = slugRaw.replace(/[^a-z0-9-]/g, '').replace(/-+/g, '-').replace(/^-|-$/g, '') || `org-${Date.now().toString().slice(-4)}`;
   const industry = createOrgForm.industry || 'Other';
   const logoText = (orgName[0] || 'N').toUpperCase();
-  const nextOrg = {
-    key: `org-${Date.now()}`,
+  const hrAdminName = (createOrgForm.hr_admin_name || '').trim();
+  const hrAdminEmail = (createOrgForm.hr_admin_email || '').trim().toLowerCase();
+  const temporaryPassword = createOrgForm.temporary_password || '';
+  const setupFormSnapshot = {
+    organization_name: createOrgForm.organization_name || '',
+    organization_code: createOrgForm.organization_code || '',
+    industry: createOrgForm.industry || '',
+    legal_entity_type: createOrgForm.legal_entity_type || '',
+    headquarters_country: createOrgForm.headquarters_country || 'India',
+    operating_countries: Array.isArray(createOrgForm.operating_countries) ? [...createOrgForm.operating_countries] : [],
+    company_website: createOrgForm.company_website || '',
+    company_logo_name: createOrgForm.company_logo_name || '',
+    workspace_slug: slug,
+    financial_year: createOrgForm.financial_year || '',
+    custom_pms_start_date: createOrgForm.custom_pms_start_date || '',
+    custom_pms_end_date: createOrgForm.custom_pms_end_date || '',
+    estimated_company_size: createOrgForm.estimated_company_size || '',
+    hr_admin_name: hrAdminName,
+    hr_admin_email: hrAdminEmail,
+    temporary_password: temporaryPassword,
+  };
+  return {
+    ...(existingOrg || {}),
+    key: existingOrg ? existingOrg.key : `org-${Date.now()}`,
     orgCode,
     name: orgName,
-    domain: `${slug}.pulsehr.com`,
+    domain: `${slug}.zarohr.com`,
     industry,
     industryBadgeClass: industry === 'IT / Software' ? 'badge-blue' : industry === 'Healthcare' ? 'badge-green' : industry === 'BFSI' ? 'badge-amber' : 'badge-gray',
-    employees: 0,
-    seats: 200,
-    setupPct: 5,
-    setupColor: '#2563EB',
-    status: 'Setup',
-    statusBadgeClass: 'badge-amber',
-    actionLabel: 'Continue',
+    employees: existingOrg ? existingOrg.employees : 0,
+    seats: existingOrg ? existingOrg.seats : 200,
+    setupPct: existingOrg ? existingOrg.setupPct : 5,
+    setupColor: existingOrg ? existingOrg.setupColor : '#2563EB',
+    status: existingOrg ? existingOrg.status : 'Setup',
+    statusBadgeClass: existingOrg ? existingOrg.statusBadgeClass : 'badge-amber',
+    actionLabel: existingOrg ? existingOrg.actionLabel : 'Continue',
+    legalEntityType: createOrgForm.legal_entity_type || '',
+    headquartersCountry: createOrgForm.headquarters_country || 'India',
+    operatingCountries: Array.isArray(createOrgForm.operating_countries) ? [...createOrgForm.operating_countries] : [],
+    companyWebsite: createOrgForm.company_website || '',
+    companyLogoName: createOrgForm.company_logo_name || '',
+    workspaceSlug: slug,
+    pmsCalendar: createOrgForm.financial_year || '',
+    customPmsStartDate: createOrgForm.custom_pms_start_date || '',
+    customPmsEndDate: createOrgForm.custom_pms_end_date || '',
+    estimatedCompanySize: createOrgForm.estimated_company_size || '',
+    selectedModules: [...createOrgSelectedModules],
+    setupFormSnapshot,
+    hrAdminName,
+    hrAdminEmail,
+    temporaryPassword,
     logoText,
     logoBg: 'linear-gradient(135deg,#3B82F6,#2563EB)',
   };
+}
+
+function createOrganizationFromForm() {
+  const nextOrg = buildOrganizationFromForm();
   organizationsData = [nextOrg, ...organizationsData];
+  saveAppData();
   renderOrganizations();
+  renderPendingActions();
+  setAlertState();
 }
 
 function togglePwd() {
@@ -1463,17 +2026,36 @@ function handleLogin(e) {
   e.preventDefault();
   const email = document.getElementById('inp-email').value.trim().toLowerCase();
   const pwd = document.getElementById('inp-pwd').value;
+  loadAppData();
 
-  if (!(email === 'admin@zarohr.com' && pwd === 'admin123')) {
-    alert('Invalid Super Admin credentials.');
+  if (email === 'admin@zarohr.com' && pwd === SUPER_ADMIN_PASSWORD) {
+    currentRole = 'super-admin';
+    currentOrgKey = null;
+    currentUserName = '';
+    initDashboard();
+    showAppView();
+    saveSession(true);
+    history.pushState({ view: 'app', page: 'dashboard', label: 'Dashboard' }, '', '#dashboard');
     return;
   }
 
-  currentRole = 'super-admin';
+  const matchedOrg = organizationsData.find((org) =>
+    String(org.hrAdminEmail || '').trim().toLowerCase() === email &&
+    String(org.temporaryPassword || '') === pwd
+  );
+
+  if (!matchedOrg) {
+    alert('Invalid credentials.');
+    return;
+  }
+
+  currentRole = 'hr-admin';
+  currentOrgKey = matchedOrg.key;
+  currentUserName = matchedOrg.hrAdminName || 'HR Admin';
   initDashboard();
   showAppView();
   saveSession(true);
-  history.pushState({ view: 'app', page: 'dashboard', label: 'Dashboard' }, '', '#dashboard');
+  history.pushState({ view: 'app', page: 'hr-home', label: 'My Workspace' }, '', '#hr-home');
 }
 
 function logout() {
@@ -1483,6 +2065,7 @@ function logout() {
 }
 
 function setNav(el, label, page = 'dashboard') {
+  if (currentRole === 'hr-admin' && page !== 'hr-home') return;
   if (currentPage === page) return;
 
   document.querySelectorAll('.sb-item').forEach(i => i.classList.remove('active'));
@@ -1498,18 +2081,39 @@ function setTopbar(label) {
   document.getElementById('topbar-title').textContent = label;
 }
 
+function goHome() {
+  closeOrgMenus();
+  closeOrganizationDetails();
+  activeEditOrgKey = null;
+  clearDraft();
+  loadAppData();
+  renderOrganizations();
+  renderFeed();
+  renderPendingActions();
+  setAlertState();
+  const homePage = currentRole === 'hr-admin' ? 'hr-home' : 'dashboard';
+  const homeLabel = currentRole === 'hr-admin' ? 'My Workspace' : 'Dashboard';
+  showPage(homePage);
+  setTopbar(homeLabel);
+  activateSidebarItemByLabel(homeLabel);
+  history.pushState({ view: 'app', page: homePage, label: homeLabel }, '', currentRole === 'hr-admin' ? '#hr-home' : '#dashboard');
+}
+
 function showPage(page) {
   currentPage = page;
   const dash = document.getElementById('dashboard-view');
   const orgs = document.getElementById('organizations-view');
+  const hrHome = document.getElementById('hr-home-view');
   const createOrg = document.getElementById('create-org-view');
 
   dash.style.opacity = page === 'dashboard' ? '1' : '0';
   orgs.style.opacity = page === 'organizations' ? '1' : '0';
+  hrHome.style.opacity = page === 'hr-home' ? '1' : '0';
   createOrg.style.opacity = page === 'create-org' ? '1' : '0';
 
   dash.classList.toggle('hidden', page !== 'dashboard');
   orgs.classList.toggle('hidden', page !== 'organizations');
+  hrHome.classList.toggle('hidden', page !== 'hr-home');
   createOrg.classList.toggle('hidden', page !== 'create-org');
   document.querySelector('.page-body').scrollTop = 0;
 }
@@ -1527,12 +2131,12 @@ function activateSidebarItemByLabel(label) {
 }
 
 function openCreateOrganizationPage() {
+  activeEditOrgKey = null;
   currentStep = 0;
   createOrgSelectedModules = [];
   createOrgForm = { headquarters_country: 'India' };
   createOrgSlugManuallyEdited = false;
   createOrgShortCodeManuallyEdited = false;
-  createOrgTimezoneManuallyEdited = false;
   loadDraft();
   if (!createOrgForm.headquarters_country) createOrgForm.headquarters_country = 'India';
   renderCreateOrganizationPage();
@@ -1543,12 +2147,15 @@ function openCreateOrganizationPage() {
 }
 
 function createOrgBack() {
+  clearCreateOrgFeedback();
   if (currentStep > 0) {
     currentStep -= 1;
     saveDraft();
     renderCreateOrganizationPage();
     return;
   }
+  activeEditOrgKey = null;
+  clearDraft();
   showPage('organizations');
   setTopbar('Organizations');
   activateSidebarItemByLabel('Organizations');
@@ -1556,6 +2163,7 @@ function createOrgBack() {
 }
 
 function createOrgNext() {
+  clearCreateOrgFeedback();
   if (currentStep === 0 && !validateOrganizationDetails(true)) return;
   if (currentStep === 1 && !validateWorkspaceSettings(true)) return;
 
@@ -1574,7 +2182,22 @@ function createOrgNext() {
   if (backBtn) backBtn.disabled = true;
 
   setTimeout(() => {
-    createOrganizationFromForm();
+    if (activeEditOrgKey) {
+      const existingOrg = getOrganizationByKey(activeEditOrgKey);
+      if (existingOrg) {
+        const updatedOrg = buildOrganizationFromForm(existingOrg);
+        organizationsData = organizationsData.map((org) => org.key === activeEditOrgKey ? updatedOrg : org);
+        saveAppData();
+        renderOrganizations();
+        renderFeed();
+        renderPendingActions();
+        setAlertState();
+        showOrgSuccessMessage('Organization updated successfully.');
+      }
+    } else {
+      createOrganizationFromForm();
+    }
+    activeEditOrgKey = null;
     clearDraft();
     showPage('organizations');
     setTopbar('Organizations');
@@ -1587,6 +2210,31 @@ function createOrgNext() {
     }
     if (backBtn) backBtn.disabled = false;
   }, 900);
+}
+
+function canAccessCreateOrgStep(stepIndex, showErrors = false) {
+  if (stepIndex <= 0) return true;
+  if (!validateOrganizationDetails(showErrors)) return false;
+  if (stepIndex <= 1) return true;
+  if (!validateWorkspaceSettings(showErrors)) return false;
+  return true;
+}
+
+function openCreateOrgStep(stepIndex) {
+  const targetStep = Number(stepIndex);
+  if (Number.isNaN(targetStep) || targetStep < 0 || targetStep >= CREATE_ORG_PAGE_STEPS.length) return;
+  if (targetStep === currentStep) return;
+  clearCreateOrgFeedback();
+  if (targetStep < currentStep) {
+    currentStep = targetStep;
+    saveDraft();
+    renderCreateOrganizationPage();
+    return;
+  }
+  if (!canAccessCreateOrgStep(targetStep, true)) return;
+  currentStep = targetStep;
+  saveDraft();
+  renderCreateOrganizationPage();
 }
 
 function updateWorkspaceSlugPreview(value) {
@@ -1606,6 +2254,92 @@ function updateWorkspaceSlugPreview(value) {
   statusEl.className = `f-hint ${check.ok ? 'hint-ok' : 'hint-err'}`;
 }
 
+function renderOrganizationDetails() {
+  const overlay = document.getElementById('org-detail-overlay');
+  const dialog = document.getElementById('org-detail-dialog');
+  if (!overlay || !dialog) return;
+  const org = getOrganizationByKey(activeOrgDetailKey);
+  if (!org) {
+    overlay.classList.add('hidden');
+    dialog.innerHTML = '';
+    return;
+  }
+  dialog.innerHTML = `
+    <div class="org-detail-head">
+      <div>
+        <h3 class="org-detail-title">${org.name}</h3>
+        <p class="org-detail-sub">${org.domain} · ${org.orgCode || 'N/A'} · ${org.industry || 'Other'}</p>
+      </div>
+      <button type="button" class="org-detail-close" onclick="closeOrganizationDetails()">✕</button>
+    </div>
+    <div class="org-detail-grid">
+      <div class="org-detail-card">
+        <div class="org-detail-card-title">Organization Details</div>
+        <div class="org-detail-list">
+          <div class="org-detail-row"><span>Workspace</span><span>${org.domain || 'Not set'}</span></div>
+          <div class="org-detail-row"><span>Organization Code</span><span>${org.orgCode || 'Not set'}</span></div>
+          <div class="org-detail-row"><span>Industry</span><span>${org.industry || 'Other'}</span></div>
+          <div class="org-detail-row"><span>Status</span><span>${org.status || 'Setup'}</span></div>
+          <div class="org-detail-row"><span>Employees</span><span>${org.employees || 0} of ${org.seats || 0} seats</span></div>
+        </div>
+      </div>
+      <div class="org-detail-card">
+        <div class="org-detail-card-title">Setup Progress</div>
+        <div class="org-detail-progress">
+          <div class="org-detail-progress-fill" style="width:${org.setupPct || 0}%;background:${org.setupColor || '#2563EB'}"></div>
+        </div>
+        <div class="org-detail-progress-copy">${org.setupPct || 0}% complete</div>
+      </div>
+      <div class="org-detail-card">
+        <div class="org-detail-card-title">HR Admin Credentials</div>
+        <div class="org-detail-list">
+          <div class="org-credential">
+            <div>
+              <strong>HR Admin Name</strong>
+              <code>${org.hrAdminName || 'Not assigned'}</code>
+            </div>
+          </div>
+          <div class="org-credential">
+            <div>
+              <strong>HR Admin ID</strong>
+              <code>${org.hrAdminEmail || 'Not assigned'}</code>
+            </div>
+          </div>
+          <div class="org-credential">
+            <div>
+              <strong>Temporary Password</strong>
+              <code>${org.temporaryPassword || 'Not assigned'}</code>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="org-detail-card">
+        <div class="org-detail-card-title">Snapshot</div>
+        <div class="org-detail-list">
+          <div class="org-detail-row"><span>Action Label</span><span>${org.actionLabel || 'Continue'}</span></div>
+          <div class="org-detail-row"><span>Seat Utilization</span><span>${org.seats ? `${((org.employees || 0) / org.seats * 100).toFixed(1)}%` : '0%'}</span></div>
+          <div class="org-detail-row"><span>Enabled Modules</span><span>${Array.isArray(org.selectedModules) && org.selectedModules.length ? org.selectedModules.join(', ') : 'Core PMS only'}</span></div>
+        </div>
+      </div>
+    </div>
+  `;
+  overlay.classList.remove('hidden');
+}
+
+function openOrganizationDetails(orgKey) {
+  activeOrgDetailKey = orgKey;
+  closeOrgMenus();
+  renderOrganizationDetails();
+}
+
+function closeOrganizationDetails() {
+  activeOrgDetailKey = null;
+  const overlay = document.getElementById('org-detail-overlay');
+  const dialog = document.getElementById('org-detail-dialog');
+  if (overlay) overlay.classList.add('hidden');
+  if (dialog) dialog.innerHTML = '';
+}
+
 function toggleCreateOrgModule(id) {
   createOrgSelectedModules = createOrgSelectedModules.includes(id)
     ? createOrgSelectedModules.filter((m) => m !== id)
@@ -1614,14 +2348,22 @@ function toggleCreateOrgModule(id) {
 }
 
 function renderCreateOrganizationPage() {
+  const titleEl = document.getElementById('create-org-title');
+  const subEl = document.getElementById('create-org-sub');
   const stepsEl = document.getElementById('create-org-steps');
   const bodyEl = document.getElementById('create-org-body');
   const backBtn = document.getElementById('create-org-back');
   const nextBtn = document.getElementById('create-org-next');
-  if (!stepsEl || !bodyEl || !backBtn || !nextBtn) return;
+  if (!titleEl || !subEl || !stepsEl || !bodyEl || !backBtn || !nextBtn) return;
+
+  setTopbar(activeEditOrgKey ? 'Edit Organization' : 'Create Organization');
+  titleEl.textContent = activeEditOrgKey ? 'Edit Organization' : 'Create Organization';
+  subEl.textContent = activeEditOrgKey
+    ? 'Update organization details, workspace settings, and assigned HR administrator.'
+    : 'Set up a new company workspace and assign its HR administrator.';
 
   stepsEl.innerHTML = CREATE_ORG_PAGE_STEPS.map((step, i) => `
-    <div class="create-org-step ${currentStep === i ? 'active' : ''} ${currentStep > i ? 'done' : ''}">
+    <div class="create-org-step ${currentStep === i ? 'active' : ''} ${currentStep > i ? 'done' : ''}" onclick="openCreateOrgStep(${i})">
       <span class="num">${currentStep > i ? '✓' : i + 1}</span>
       <span>${step}</span>
     </div>
@@ -1634,8 +2376,8 @@ function renderCreateOrganizationPage() {
         <div class="form-group"><label class="lbl">Org Code (Tenant Identifier) <span class="req">*</span></label><input id="organization-code-input" type="text" value="${createOrgForm.organization_code || ''}" placeholder="Auto from organization name" oninput="handleShortCodeInput(this.value)" /><div id="org-code-status" class="f-hint"></div></div>
       </div>
       <div class="wiz-grid">
-        <div class="form-group"><label class="lbl">Industry</label><select onchange="setCreateOrgFormField('industry', this.value)"><option value="">Select industry</option><option>IT / Software</option><option>BFSI (Banking, Financial Services, Insurance)</option><option>Healthcare & Pharma</option><option>Manufacturing</option><option>Retail & E-commerce</option><option>Consulting / Professional Services</option><option>Education / EdTech</option><option>Telecom</option><option>Media & Entertainment</option><option>Logistics & Supply Chain</option><option>Real Estate / Construction</option><option>Energy / Utilities</option><option>Hospitality / Travel</option><option>Government / Public Sector</option><option>Non-Profit / NGO</option><option>Other</option></select></div>
-        <div class="form-group"><label class="lbl">Legal Entity Type</label><select onchange="setCreateOrgFormField('legal_entity_type', this.value)"><option value="">Select legal entity</option><option>Private Limited</option><option>Public Limited</option><option>LLP</option><option>Partnership</option><option>Proprietorship</option></select></div>
+        <div class="form-group"><label class="lbl">Industry</label><select onchange="setCreateOrgFormField('industry', this.value)"><option value="">Select industry</option><option ${createOrgForm.industry === 'IT / Software' ? 'selected' : ''}>IT / Software</option><option ${createOrgForm.industry === 'BFSI (Banking, Financial Services, Insurance)' ? 'selected' : ''}>BFSI (Banking, Financial Services, Insurance)</option><option ${createOrgForm.industry === 'Healthcare & Pharma' ? 'selected' : ''}>Healthcare & Pharma</option><option ${createOrgForm.industry === 'Manufacturing' ? 'selected' : ''}>Manufacturing</option><option ${createOrgForm.industry === 'Retail & E-commerce' ? 'selected' : ''}>Retail & E-commerce</option><option ${createOrgForm.industry === 'Consulting / Professional Services' ? 'selected' : ''}>Consulting / Professional Services</option><option ${createOrgForm.industry === 'Education / EdTech' ? 'selected' : ''}>Education / EdTech</option><option ${createOrgForm.industry === 'Telecom' ? 'selected' : ''}>Telecom</option><option ${createOrgForm.industry === 'Media & Entertainment' ? 'selected' : ''}>Media & Entertainment</option><option ${createOrgForm.industry === 'Logistics & Supply Chain' ? 'selected' : ''}>Logistics & Supply Chain</option><option ${createOrgForm.industry === 'Real Estate / Construction' ? 'selected' : ''}>Real Estate / Construction</option><option ${createOrgForm.industry === 'Energy / Utilities' ? 'selected' : ''}>Energy / Utilities</option><option ${createOrgForm.industry === 'Hospitality / Travel' ? 'selected' : ''}>Hospitality / Travel</option><option ${createOrgForm.industry === 'Government / Public Sector' ? 'selected' : ''}>Government / Public Sector</option><option ${createOrgForm.industry === 'Non-Profit / NGO' ? 'selected' : ''}>Non-Profit / NGO</option><option ${createOrgForm.industry === 'Other' ? 'selected' : ''}>Other</option></select></div>
+        <div class="form-group"><label class="lbl">Legal Entity Type</label><select onchange="setCreateOrgFormField('legal_entity_type', this.value)"><option value="">Select legal entity</option><option ${createOrgForm.legal_entity_type === 'Private Limited' ? 'selected' : ''}>Private Limited</option><option ${createOrgForm.legal_entity_type === 'Public Limited' ? 'selected' : ''}>Public Limited</option><option ${createOrgForm.legal_entity_type === 'LLP' ? 'selected' : ''}>LLP</option><option ${createOrgForm.legal_entity_type === 'Partnership' ? 'selected' : ''}>Partnership</option><option ${createOrgForm.legal_entity_type === 'Proprietorship' ? 'selected' : ''}>Proprietorship</option></select></div>
       </div>
       <div class="wiz-grid">
         <div class="form-group">
@@ -1684,95 +2426,94 @@ function renderCreateOrganizationPage() {
     if (!createOrgForm.workspace_slug && autoSlug) {
       createOrgForm.workspace_slug = autoSlug;
     }
-    const timezoneValue = createOrgForm.timezone || inferTimezoneFromCountry(createOrgForm.headquarters_country || 'India');
-    if (!createOrgForm.timezone && !createOrgTimezoneManuallyEdited) {
-      createOrgForm.timezone = timezoneValue;
-    }
+    const suggestedSlug = autoSlug;
+    const showSuggestedSlug = Boolean(suggestedSlug) && suggestedSlug !== (createOrgForm.workspace_slug || '');
+    const selectedCalendar = createOrgForm.financial_year || '';
+    const customStartDate = createOrgForm.custom_pms_start_date || '';
+    const customEndDate = createOrgForm.custom_pms_end_date || '';
+    const customRangeReady = customStartDate && customEndDate;
     bodyEl.innerHTML = `
       <div class="ws-card">
         <div class="ws-card-title">Workspace Identity</div>
         <div class="form-group">
           <label class="lbl">Workspace URL Slug <span class="req">*</span></label>
           <input type="text" placeholder="e.g. acme" value="${createOrgForm.workspace_slug || ''}" oninput="handleWorkspaceSlugInput(this.value)" />
+          ${showSuggestedSlug ? `
+            <div class="slug-suggestion">
+              <div class="slug-suggestion-copy">Suggested: <strong>${suggestedSlug}</strong></div>
+              <button type="button" class="btn btn-secondary btn-sm" onclick="useSuggestedWorkspaceSlug('${suggestedSlug}')">Use it</button>
+            </div>
+          ` : ''}
           <div class="f-hint" id="workspace-url-preview" style="margin-top:6px;">Preview: pms.zarohr.com/{slug}</div>
           <div class="f-hint hint-note" id="workspace-slug-status" style="margin-top:3px;"></div>
         </div>
       </div>
 
       <div class="ws-card">
-        <div class="ws-card-title">Calendar & Regional Settings</div>
-        <div class="wiz-grid">
-          <div class="form-group">
-            <label class="lbl">Financial Year <span class="req">*</span></label>
-            <select onchange="handleFinancialYearChange(this.value)">
-              <option value="">Select financial year</option>
-              <option ${createOrgForm.financial_year === 'April–March' ? 'selected' : ''}>April–March</option>
-              <option ${createOrgForm.financial_year === 'January–December' ? 'selected' : ''}>January–December</option>
-            </select>
+        <div class="ws-card-title">PMS Calendar</div>
+        <div class="f-hint" style="margin-bottom:4px;">Choose the cycle your PMS reviews, analytics, and reporting should follow.</div>
+        <div class="calendar-choice-grid">
+          <div class="calendar-choice ${selectedCalendar === 'April–March' ? 'selected' : ''}" onclick="handlePmsCalendarSelection('April–March')">
+            <span class="calendar-choice-check">✓</span>
+            <div class="calendar-choice-badge">FY</div>
+            <div class="calendar-choice-title">April to March</div>
+            <div class="calendar-choice-desc">Fits India-led financial year planning and annual appraisal cycles.</div>
           </div>
-          <div class="form-group">
-            <label class="lbl">Timezone <span class="req">*</span></label>
-            <input list="timezone-options" value="${timezoneValue}" placeholder="Search timezone (e.g. Asia/Kolkata)" oninput="handleTimezoneInput(this.value)" />
-            <datalist id="timezone-options">
-              <option value="Asia/Kolkata"></option>
-              <option value="Asia/Dubai"></option>
-              <option value="Asia/Singapore"></option>
-              <option value="Asia/Tokyo"></option>
-              <option value="Europe/London"></option>
-              <option value="Europe/Berlin"></option>
-              <option value="America/New_York"></option>
-              <option value="America/Chicago"></option>
-              <option value="America/Denver"></option>
-              <option value="America/Los_Angeles"></option>
-              <option value="Australia/Sydney"></option>
-              <option value="Africa/Johannesburg"></option>
-            </datalist>
+          <div class="calendar-choice ${selectedCalendar === 'January–December' ? 'selected' : ''}" onclick="handlePmsCalendarSelection('January–December')">
+            <span class="calendar-choice-check">✓</span>
+            <div class="calendar-choice-badge">CY</div>
+            <div class="calendar-choice-title">January to December</div>
+            <div class="calendar-choice-desc">Matches standard calendar-year review planning used by many global teams.</div>
+          </div>
+          <div class="calendar-choice ${selectedCalendar === 'Custom' ? 'selected' : ''}" onclick="handlePmsCalendarSelection('Custom')">
+            <span class="calendar-choice-check">✓</span>
+            <div class="calendar-choice-badge">+</div>
+            <div class="calendar-choice-title">Create a custom PMS calendar</div>
+            <div class="calendar-choice-desc">Define your own PMS cycle using a start date and end date.</div>
           </div>
         </div>
+        ${selectedCalendar === 'Custom' ? `
+          <div class="calendar-custom-panel">
+            <div class="calendar-custom-head">Custom PMS Calendar</div>
+            <div class="calendar-custom-sub">Set the exact review-cycle window for this organization.</div>
+            <div class="wiz-grid" style="margin-bottom:0;">
+              <div class="form-group">
+                <label class="lbl">Start Date <span class="req">*</span></label>
+                <input type="date" value="${customStartDate}" onchange="handleCustomPmsCalendarDate('custom_pms_start_date', this.value)" />
+              </div>
+              <div class="form-group">
+                <label class="lbl">End Date <span class="req">*</span></label>
+                <input type="date" value="${customEndDate}" min="${customStartDate}" onchange="handleCustomPmsCalendarDate('custom_pms_end_date', this.value)" />
+              </div>
+            </div>
+            <div class="calendar-range-preview">
+              ${customRangeReady
+                ? `PMS calendar runs from <strong>${formatCalendarDateForPreview(customStartDate)}</strong> to <strong>${formatCalendarDateForPreview(customEndDate)}</strong>.`
+                : 'Choose both dates to preview the custom PMS calendar range.'}
+            </div>
+          </div>
+        ` : ''}
         <div class="banner" style="background:#FFFBEB;border:1px solid #FDE68A;color:#92400E;margin-bottom:0;">
           <span>🔒</span>
-          <span>Financial year affects review cycles, analytics, and reports, and cannot be changed after employee data or performance cycles are created.</span>
+          <span>PMS calendar affects review cycles, analytics, and reports, and cannot be changed after employee data or performance cycles are created.</span>
         </div>
       </div>
 
       <div class="ws-card">
         <div class="ws-card-title">Organization Size & PMS Defaults</div>
-        <div class="wiz-grid">
-          <div class="form-group">
-            <label class="lbl">Estimated Company Size</label>
-            <select onchange="setCreateOrgFormField('estimated_company_size', this.value)">
-              <option value="">Select range</option>
-              <option ${createOrgForm.estimated_company_size === '1–50' ? 'selected' : ''}>1–50</option>
-              <option ${createOrgForm.estimated_company_size === '50–200' ? 'selected' : ''}>50–200</option>
-              <option ${createOrgForm.estimated_company_size === '200–1000' ? 'selected' : ''}>200–1000</option>
-              <option ${createOrgForm.estimated_company_size === '1000–5000' ? 'selected' : ''}>1000–5000</option>
-              <option ${createOrgForm.estimated_company_size === '5000+' ? 'selected' : ''}>5000+</option>
-            </select>
-            <div class="f-hint">Used for license planning, performance benchmarks, and scaling decisions.</div>
-          </div>
-          <div class="form-group">
-            <label class="lbl">Default Review Cycle Frequency</label>
-            <select onchange="setCreateOrgFormField('default_review_cycle_frequency', this.value)">
-              <option ${createOrgForm.default_review_cycle_frequency === 'Annual' ? 'selected' : ''}>Annual</option>
-              <option ${createOrgForm.default_review_cycle_frequency === 'Bi-Annual' ? 'selected' : ''}>Bi-Annual</option>
-              <option ${createOrgForm.default_review_cycle_frequency === 'Quarterly' ? 'selected' : ''}>Quarterly</option>
-              <option ${createOrgForm.default_review_cycle_frequency === 'Continuous' ? 'selected' : ''}>Continuous</option>
-            </select>
-          </div>
+        <div class="form-group">
+          <label class="lbl">Estimated Company Size</label>
+          <select onchange="setCreateOrgFormField('estimated_company_size', this.value)">
+            <option value="">Select range</option>
+            <option ${createOrgForm.estimated_company_size === '1–50' ? 'selected' : ''}>1–50</option>
+            <option ${createOrgForm.estimated_company_size === '50–200' ? 'selected' : ''}>50–200</option>
+            <option ${createOrgForm.estimated_company_size === '200–1000' ? 'selected' : ''}>200–1000</option>
+            <option ${createOrgForm.estimated_company_size === '1000–5000' ? 'selected' : ''}>1000–5000</option>
+            <option ${createOrgForm.estimated_company_size === '5000+' ? 'selected' : ''}>5000+</option>
+          </select>
+          <div class="f-hint">Used for license planning, performance benchmarks, and scaling decisions.</div>
         </div>
-        <div class="wiz-grid">
-          <div class="form-group">
-            <label class="lbl">Default Rating Scale</label>
-            <select onchange="setCreateOrgFormField('default_rating_scale', this.value)">
-              <option ${createOrgForm.default_rating_scale === '5-point scale' ? 'selected' : ''}>5-point scale</option>
-              <option ${createOrgForm.default_rating_scale === '4-point scale' ? 'selected' : ''}>4-point scale</option>
-              <option ${createOrgForm.default_rating_scale === '3-point scale' ? 'selected' : ''}>3-point scale</option>
-              <option ${createOrgForm.default_rating_scale === 'Custom' ? 'selected' : ''}>Custom</option>
-            </select>
-          </div>
-          <div></div>
-        </div>
-        <div class="f-hint">HR admins can modify these defaults later in PMS configuration.</div>
+        <div class="f-hint" style="margin-top:10px;">HR admins can complete review cycle frequency, timezone, rating scale, and other PMS-specific defaults later in configuration.</div>
       </div>
     `;
   } else {
@@ -1801,11 +2542,11 @@ function renderCreateOrganizationPage() {
         </div>
       </div>
       <div class="wiz-grid">
-        <div class="form-group"><label class="lbl">HR Admin Full Name</label><input type="text" placeholder="Full name" oninput="setCreateOrgFormField('hr_admin_name', this.value)" /></div>
-        <div class="form-group"><label class="lbl">HR Admin Email</label><input type="email" placeholder="hr@company.com" oninput="setCreateOrgFormField('hr_admin_email', this.value)" /></div>
+        <div class="form-group"><label class="lbl">HR Admin Full Name</label><input type="text" value="${createOrgForm.hr_admin_name || ''}" placeholder="Full name" oninput="setCreateOrgFormField('hr_admin_name', this.value)" /></div>
+        <div class="form-group"><label class="lbl">HR Admin Email</label><input type="email" value="${createOrgForm.hr_admin_email || ''}" placeholder="hr@company.com" oninput="setCreateOrgFormField('hr_admin_email', this.value)" /></div>
       </div>
       <div class="wiz-grid">
-        <div class="form-group"><label class="lbl">Temporary Password</label><input type="text" placeholder="Set temporary password" oninput="setCreateOrgFormField('temporary_password', this.value)" /></div>
+        <div class="form-group"><label class="lbl">Temporary Password</label><input type="text" value="${createOrgForm.temporary_password || ''}" placeholder="Set temporary password" oninput="setCreateOrgFormField('temporary_password', this.value)" /></div>
         <div></div>
       </div>
       <div class="banner" style="background:#F0FDF4;border:1px solid #BBF7D0;color:#14532D;">
@@ -1817,16 +2558,25 @@ function renderCreateOrganizationPage() {
 
   backBtn.disabled = currentStep === 0;
   backBtn.style.opacity = currentStep === 0 ? '.6' : '1';
-  nextBtn.textContent = currentStep === CREATE_ORG_PAGE_STEPS.length - 1 ? 'Create Organization' : 'Continue';
+  nextBtn.textContent = currentStep === CREATE_ORG_PAGE_STEPS.length - 1
+    ? (activeEditOrgKey ? 'Save Changes' : 'Create Organization')
+    : 'Continue';
   updateOrgCodeStatus(createOrgForm.organization_code || '');
   updateWorkspaceSlugPreview(createOrgForm.workspace_slug || '');
   updateCreateOrgLogoZone();
   updateCreateOrgNextState();
 }
 function setAlertState() {
-  const shouldShow = dashboardFlags.hasLicenseOverage || dashboardFlags.hasCriticalIssue;
-  document.getElementById('license-alert').classList.toggle('hidden', !shouldShow);
-  document.getElementById('overage-badge').style.display = dashboardFlags.hasLicenseOverage ? '' : 'none';
+  const alertEl = document.getElementById('license-alert');
+  const alertText = document.getElementById('license-alert-text');
+  const overageBadge = document.getElementById('overage-badge');
+  const overageOrg = getOrganizationByKey(dashboardFlags.licenseOverageOrgKey);
+  const shouldShow = Boolean(overageOrg) || dashboardFlags.hasCriticalIssue;
+  if (alertEl) alertEl.classList.toggle('hidden', !shouldShow);
+  if (overageBadge) overageBadge.style.display = overageOrg ? '' : 'none';
+  if (alertText && overageOrg) {
+    alertText.innerHTML = `<strong>${overageOrg.name}</strong> has exceeded their licensed seat count by 12 users. Review license usage and adjust billing.`;
+  }
 }
 
 function dismissAlert() {
@@ -1835,6 +2585,7 @@ function dismissAlert() {
 
 function renderFeed() {
   const el = document.getElementById('feed-list');
+  if (!el) return;
   el.innerHTML = feedData.map((f) => `
     <div style="display:flex; gap:10px; padding:9px 0; border-bottom:1px solid var(--border);">
       <div style="width:28px;height:28px;border-radius:50%;display:flex;align-items:center;justify-content:center;background:${f.bg};flex-shrink:0">${f.ic}</div>
@@ -1855,14 +2606,14 @@ window.addEventListener('popstate', (event) => {
   if (state.view === 'app') {
     showAppView();
     initDashboard();
-    const page = state.page || 'dashboard';
+    const page = currentRole === 'hr-admin' && state.page !== 'create-org' ? 'hr-home' : (state.page || 'dashboard');
     showPage(page);
     if (page === 'create-org') {
       loadDraft();
       if (!createOrgForm.headquarters_country) createOrgForm.headquarters_country = 'India';
       renderCreateOrganizationPage();
     }
-    const label = state.label || (page === 'organizations' ? 'Organizations' : page === 'create-org' ? 'Create Organization' : 'Dashboard');
+    const label = state.label || (page === 'organizations' ? 'Organizations' : page === 'create-org' ? 'Create Organization' : page === 'hr-home' ? 'My Workspace' : 'Dashboard');
     setTopbar(label);
     activateSidebarItemByLabel(page === 'create-org' ? 'Organizations' : label);
   }
@@ -1884,14 +2635,18 @@ window.addEventListener('popstate', (event) => {
       const session = JSON.parse(raw);
       if (session && session.isLoggedIn) {
         currentRole = session.role || 'super-admin';
+        currentOrgKey = session.orgKey || null;
+        currentUserName = session.userName || '';
         showAppView();
         initDashboard();
-        const page = location.hash === '#organizations'
-          ? 'organizations'
-          : location.hash === '#create-organization'
-            ? 'create-org'
-            : 'dashboard';
-        const label = page === 'organizations' ? 'Organizations' : page === 'create-org' ? 'Create Organization' : 'Dashboard';
+        const page = currentRole === 'hr-admin'
+          ? (location.hash === '#create-organization' ? 'create-org' : 'hr-home')
+          : location.hash === '#organizations'
+            ? 'organizations'
+            : location.hash === '#create-organization'
+              ? 'create-org'
+              : 'dashboard';
+        const label = page === 'organizations' ? 'Organizations' : page === 'create-org' ? 'Create Organization' : page === 'hr-home' ? 'My Workspace' : 'Dashboard';
         showPage(page);
         if (page === 'create-org') {
           loadDraft();
@@ -1900,14 +2655,16 @@ window.addEventListener('popstate', (event) => {
         }
         setTopbar(label);
         activateSidebarItemByLabel(page === 'create-org' ? 'Organizations' : label);
-        history.replaceState({ view: 'app', page, label }, '', page === 'organizations' ? '#organizations' : page === 'create-org' ? '#create-organization' : '#dashboard');
+        history.replaceState({ view: 'app', page, label }, '', page === 'organizations' ? '#organizations' : page === 'create-org' ? '#create-organization' : page === 'hr-home' ? '#hr-home' : '#dashboard');
         restored = true;
       }
     }
   } catch (_) {}
 
-  if (!restored && (location.hash === '#dashboard' || location.hash === '#organizations' || location.hash === '#create-organization')) {
+  if (!restored && (location.hash === '#dashboard' || location.hash === '#organizations' || location.hash === '#create-organization' || location.hash === '#hr-home')) {
     currentRole = 'super-admin';
+    currentOrgKey = null;
+    currentUserName = '';
     showAppView();
     initDashboard();
     const page = location.hash === '#organizations'
@@ -1934,6 +2691,18 @@ window.addEventListener('popstate', (event) => {
     history.replaceState({ view: 'login' }, '', '#login');
   }
 })();
+
+document.addEventListener('click', () => {
+  closeOrgMenus();
+});
+
+document.getElementById('delete-org-overlay').addEventListener('click', function (event) {
+  if (event.target === this) closeDeleteOrgModal();
+});
+
+document.getElementById('org-detail-overlay').addEventListener('click', function (event) {
+  if (event.target === this) closeOrganizationDetails();
+});
 </script>
 
 </body>
