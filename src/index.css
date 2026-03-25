@@ -43,3 +43,246 @@ button {
 #root {
   min-height: 100vh;
 }
+
+.framework-process-graphic {
+  position: relative;
+  margin-top: 18px;
+  margin-bottom: 16px;
+  padding: 16px;
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  border-radius: 16px;
+  overflow: hidden;
+  background:
+    radial-gradient(circle at top right, rgba(255, 255, 255, 0.85), rgba(255, 255, 255, 0.35) 38%, transparent 65%),
+    linear-gradient(135deg, rgba(248, 250, 252, 0.98), rgba(239, 244, 255, 0.94));
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.8),
+    0 14px 28px rgba(15, 23, 42, 0.06);
+}
+
+.framework-process-graphic::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background:
+    linear-gradient(115deg, transparent 0 58%, rgba(255, 255, 255, 0.5) 58% 62%, transparent 62% 100%),
+    repeating-linear-gradient(
+      115deg,
+      color-mix(in srgb, var(--stage-color, #2563eb) 5%, transparent) 0 1px,
+      transparent 1px 18px
+    );
+  opacity: 0.9;
+  pointer-events: none;
+}
+
+.framework-process-graphic::after {
+  content: "";
+  position: absolute;
+  top: -8px;
+  right: 18px;
+  width: 180px;
+  height: 120px;
+  border-radius: 24px;
+  background:
+    linear-gradient(135deg, rgba(255, 255, 255, 0.62), rgba(255, 255, 255, 0.12)),
+    repeating-linear-gradient(
+      90deg,
+      color-mix(in srgb, var(--stage-color, #2563eb) 10%, transparent) 0 2px,
+      transparent 2px 18px
+    ),
+    repeating-linear-gradient(
+      180deg,
+      color-mix(in srgb, var(--stage-color, #2563eb) 8%, transparent) 0 2px,
+      transparent 2px 18px
+    );
+  border: 1px solid color-mix(in srgb, var(--stage-color, #2563eb) 12%, rgba(255, 255, 255, 0.7));
+  transform: rotate(-8deg);
+  opacity: 0.8;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.72),
+    0 10px 24px rgba(37, 99, 235, 0.08);
+  pointer-events: none;
+}
+
+.framework-process-grid {
+  position: relative;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 10px;
+  z-index: 1;
+}
+
+.framework-stage-card {
+  position: relative;
+  min-height: 138px;
+  padding: 14px 14px 16px;
+  border-radius: 14px;
+  border: 1px solid color-mix(in srgb, var(--stage-color, #2563eb) 22%, #dbe4f0);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.94), rgba(248, 250, 252, 0.86)),
+    color-mix(in srgb, var(--stage-color, #2563eb) 7%, white);
+  box-shadow:
+    0 8px 18px rgba(15, 23, 42, 0.06),
+    inset 0 1px 0 rgba(255, 255, 255, 0.75);
+  animation: framework-stage-rise 700ms cubic-bezier(.22,1,.36,1) both;
+  animation-delay: var(--stage-delay, 0ms);
+}
+
+.framework-stage-index {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 38px;
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--stage-color, #2563eb) 12%, white);
+  color: var(--stage-color, #2563eb);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+}
+
+.framework-stage-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.framework-stage-icon {
+  min-width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 17px;
+  color: var(--stage-color, #2563eb);
+  flex-shrink: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.framework-stage-name {
+  margin-top: 12px;
+  font-size: 17px;
+  line-height: 1.1;
+  font-weight: 700;
+  color: #0f172a;
+}
+
+.framework-stage-title {
+  margin-top: 6px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--stage-color, #2563eb);
+}
+
+.framework-stage-copy {
+  margin: 7px 0 0;
+  max-width: 20ch;
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: #475569;
+}
+
+.framework-stage-connector {
+  position: absolute;
+  top: 50%;
+  right: -21px;
+  transform: translateY(-50%);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  pointer-events: none;
+  animation: framework-connector-shift 2s ease-in-out infinite;
+}
+
+.framework-stage-connector-line {
+  width: 22px;
+  height: 2px;
+  border-radius: 999px;
+  background: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--stage-color, #2563eb) 30%, white),
+    color-mix(in srgb, var(--stage-color, #2563eb) 82%, white)
+  );
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.65);
+}
+
+.framework-stage-connector-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  background: linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--stage-color, #2563eb) 92%, white),
+    color-mix(in srgb, var(--stage-color, #2563eb) 58%, white)
+  );
+  box-shadow:
+    0 0 0 4px color-mix(in srgb, var(--stage-color, #2563eb) 12%, white),
+    0 6px 12px rgba(37, 99, 235, 0.18);
+}
+
+.framework-process-footer {
+  position: relative;
+  z-index: 1;
+  margin-top: 10px;
+  padding: 10px 0 0;
+  border-top: 1px solid rgba(148, 163, 184, 0.12);
+}
+
+.framework-process-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 5px 10px;
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.05);
+  color: #334155;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+@keyframes framework-stage-rise {
+  from {
+    opacity: 0;
+    transform: translateY(18px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes framework-connector-shift {
+  0%, 100% {
+    transform: translateY(-50%) translateX(0);
+  }
+  50% {
+    transform: translateY(-50%) translateX(3px);
+  }
+}
+
+@media (max-width: 900px) {
+  .framework-process-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .framework-stage-card {
+    min-height: auto;
+  }
+
+  .framework-stage-copy {
+    max-width: none;
+  }
+
+  .framework-stage-connector {
+    top: auto;
+    right: 18px;
+    bottom: -13px;
+    transform: none;
+  }
+}

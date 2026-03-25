@@ -1,20 +1,23 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import zaroLogo from '../images/final zaro logo.png';
 
 /* ─── CONSTANTS ──────────────────────────────────────────────────────────── */
 function getNavSteps(frameworkId) {
+  if (frameworkId === 'bsc') {
+    return [
+      { id: 'framework',    label: 'Performance Framework', desc: 'Choose framework' },
+      { id: 'perspectives', label: 'BSC Perspectives',      desc: 'Strategy layers & weights' },
+      { id: 'goals',        label: 'Goal Library',           desc: 'How goals are created' },
+      { id: 'upload',       label: 'Employee Upload',        desc: 'Upload employees & managers' },
+    ];
+  }
   const steps = [
     { id: 'framework',    label: 'Performance Framework', desc: 'Structure & model' },
-  ];
-  if (frameworkId === 'bsc') {
-    steps.push({ id: 'perspectives', label: 'BSC Perspectives', desc: 'Strategy layers & weights' });
-  }
-  steps.push(
     { id: 'goals',        label: 'Goal Library',           desc: 'KRA / KPI structure' },
     { id: 'limits',       label: 'Limits & Rules',          desc: 'Counts, weights & permissions' },
     { id: 'hierarchy',    label: 'Rating Hierarchy',        desc: 'Who rates whom' },
     { id: 'scale',        label: 'Rating Scale',            desc: 'Points & labels' },
-  );
+  ];
   if (frameworkId !== 'kra') {
     steps.push({ id: 'targets', label: 'Targets & Auto-Rating', desc: 'Achievement mapping' });
   }
@@ -93,6 +96,7 @@ const KRA_ASSIGNMENT_MODES = [
 const COMPETENCY_CHIPS = ['Communication', 'Problem Solving', 'Teamwork', 'Ownership', 'Technical Expertise', 'Leadership', 'Innovation', 'Customer Focus', 'Adaptability', 'Collaboration', 'Result Orientation', 'Strategic Thinking'];
 const APP_DATA_KEY = 'zarohr_app_data_v1';
 const SESSION_KEY = 'zarohr_auth_session';
+const WIZARD_STATE_KEY = 'zarohr_pms_wizard_state_v1';
 
 const FRAMEWORK_MODULE_RULES = {
   bsc: {
@@ -154,6 +158,38 @@ function getWorkspaceContext() {
   } catch (_) {}
 
   return { orgKey, orgName: orgKey ? orgKey.replace(/-/g, ' ') : 'Assigned Organization' };
+}
+
+function getWizardStorageKey(orgKey = '') {
+  return `${WIZARD_STATE_KEY}:${orgKey || 'default'}`;
+}
+
+function loadWizardState() {
+  if (typeof window === 'undefined') {
+    return null;
+  }
+
+  const params = new URLSearchParams(window.location.search);
+  const orgKey = params.get('orgKey') || '';
+  const storageKey = getWizardStorageKey(orgKey);
+
+  try {
+    const raw = window.sessionStorage.getItem(storageKey) || window.localStorage.getItem(storageKey);
+    if (!raw) return null;
+    return JSON.parse(raw);
+  } catch (_) {
+    return null;
+  }
+}
+
+function saveWizardState(orgKey, payload) {
+  if (typeof window === 'undefined') return;
+  const storageKey = getWizardStorageKey(orgKey);
+  try {
+    const serialized = JSON.stringify(payload);
+    window.sessionStorage.setItem(storageKey, serialized);
+    window.localStorage.setItem(storageKey, serialized);
+  } catch (_) {}
 }
 
 function exitToLogin() {
@@ -271,6 +307,98 @@ function Banner({ type = 'blue', children }) {
   );
 }
 
+function FrameworkProcessGraphic({ framework }) {
+  const stageMeta = {
+    Perspectives: {
+      icon: '◔',
+      title: 'Strategic lenses',
+      copy: 'Split performance into business perspectives so goals roll up to strategy.',
+    },
+    KRAs: {
+      icon: '▣',
+      title: 'Outcome areas',
+      copy: 'Define the key result areas for the role.',
+    },
+    KPIs: {
+      icon: '◫',
+      title: 'Measure points',
+      copy: 'Add measurable indicators under each KRA.',
+    },
+    Targets: {
+      icon: '◎',
+      title: 'Success thresholds',
+      copy: 'Set expected numbers or milestone targets.',
+    },
+    Rating: {
+      icon: '★',
+      title: 'Final evaluation',
+      copy: 'Roll up achievement into the final score.',
+    },
+    Weightage: {
+      icon: '◌',
+      title: 'Weight split',
+      copy: 'Distribute contribution across KRAs before direct assessment.',
+    },
+    'Direct Rating': {
+      icon: '✦',
+      title: 'Manager scoring',
+      copy: 'Rate KRAs directly without KPI-level scoring.',
+    },
+    'Custom Mix': {
+      icon: '◇',
+      title: 'Custom structure',
+      copy: 'Choose the layers that fit your appraisal design.',
+    },
+    'Configure Each Layer': {
+      icon: '⬢',
+      title: 'Layer setup',
+      copy: 'Tune visibility, depth, scoring, and ownership per layer.',
+    },
+  };
+
+  return (
+    <div className="framework-process-graphic">
+      <div className="framework-process-grid">
+        {framework.flow.map((stage, index) => {
+          const meta = stageMeta[stage] || {
+            icon: '•',
+            title: stage,
+            copy: 'Configured as part of the selected framework.',
+          };
+          return (
+            <div
+              key={stage}
+              className="framework-stage-card"
+              style={{ '--stage-color': framework.color, '--stage-delay': `${index * 90}ms` }}
+            >
+              <div className="framework-stage-top">
+                <div className="framework-stage-index">0{index + 1}</div>
+                <div className="framework-stage-icon">{meta.icon}</div>
+              </div>
+              <div className="framework-stage-name">{stage}</div>
+              <div className="framework-stage-title">{meta.title}</div>
+              <p className="framework-stage-copy">{meta.copy}</p>
+              {index < framework.flow.length - 1 ? (
+                <div className="framework-stage-connector" aria-hidden="true">
+                  <span className="framework-stage-connector-line" />
+                  <span className="framework-stage-connector-dot" />
+                </div>
+              ) : null}
+            </div>
+          );
+        })}
+      </div>
+      <div className="framework-process-footer">
+        <span className="framework-process-badge">
+          {framework.id === 'bsc'
+            ? 'Strategy to score'
+            : 'Framework flow'}
+        </span>
+      </div>
+    </div>
+  );
+}
+
 /* ─── TOG ROW ────────────────────────────────────────────────────────────── */
 function TogRow({ label, desc, on, onChange, last, disabled = false }) {
   return (
@@ -330,15 +458,8 @@ function StepFramework({ config, update }) {
             ))}
           </div>
           {/* Flow viz */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '10px 14px', background: '#F8FAFC', borderRadius: 8, flexWrap: 'wrap', marginBottom: 16 }}>
-            {selected.flow.map((s, i) => (
-              <span key={s} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                <span style={{ padding: '4px 12px', borderRadius: 7, background: ['#EFF4FF','#F0FDF4','#FFFBEB','#FAF5FF','#FFF1F2'][i % 5], fontSize: 12, fontWeight: 500, color: ['#2563EB','#16A34A','#D97706','#7C3AED','#DC2626'][i % 5] }}>{s}</span>
-                {i < selected.flow.length - 1 && <span style={{ color: '#9CA3AF', fontSize: 14 }}>→</span>}
-              </span>
-            ))}
-          </div>
-          <div style={{ borderTop: '1px solid #F1F3F5', paddingTop: 16 }}>
+          <FrameworkProcessGraphic framework={selected} />
+          {false && <div style={{ borderTop: '1px solid #F1F3F5', paddingTop: 16 }}>
             <div style={{ fontSize: 12.5, fontWeight: 600, color: '#374151', marginBottom: 12 }}>Framework-driven modules</div>
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 16 }}>
               {modulePreview.map((module) => {
@@ -426,7 +547,7 @@ function StepFramework({ config, update }) {
                 </div>
               );
             })()}
-          </div>
+          </div>}
         </CardBody>
       </Card>
 
@@ -436,10 +557,223 @@ function StepFramework({ config, update }) {
 
 /* ── BSC PERSPECTIVES (dynamic step — BSC only) ─────────────────────── */
 const PERSPECTIVE_COLORS = ['#2563EB', '#16A34A', '#D97706', '#7C3AED', '#DC2626', '#0F766E', '#4F46E5'];
+const PERSPECTIVE_NAME_OPTIONS = [
+  'Financial',
+  'Customer',
+  'Internal Process',
+  'Learning & Growth',
+  'People',
+  'Innovation',
+  'Risk / Compliance',
+  'Sustainability / ESG',
+  'Operational Excellence',
+  'Digital Transformation',
+  'Stakeholder / Community',
+];
+
+function getPerspectiveNameMode(perspective) {
+  if (perspective.nameOption === 'custom') return 'custom';
+  if (perspective.nameOption && PERSPECTIVE_NAME_OPTIONS.includes(perspective.nameOption)) return perspective.nameOption;
+  if (PERSPECTIVE_NAME_OPTIONS.includes(perspective.name)) return perspective.name;
+  return 'custom';
+}
+
+function getPerspectiveDisplayName(perspective) {
+  const mode = getPerspectiveNameMode(perspective);
+  return mode === 'custom' ? (perspective.customName ?? perspective.name ?? '') : mode;
+}
+
+function normalizePerspectiveName(name) {
+  return String(name || '').trim().toLowerCase();
+}
+
+function isPerspectiveRowComplete(perspective) {
+  return getPerspectiveDisplayName(perspective).trim() !== '' && perspective.weight !== '' && !Number.isNaN(Number(perspective.weight));
+}
+
+function isPerspectiveRowEmpty(perspective) {
+  return getPerspectiveDisplayName(perspective).trim() === '' && (perspective.weight === '' || Number(perspective.weight) === 0);
+}
 
 function StepPerspectives({ config, update }) {
-  const total = config.perspectives.reduce((s, p) => s + (Number(p.weight) || 0), 0);
-  const isValid = total === 100;
+  const [reviewOpen, setReviewOpen] = useState(false);
+  const [reviewMessage, setReviewMessage] = useState('');
+  const [cleanupMessage, setCleanupMessage] = useState('');
+  const isLocked = !!config.perspectivesConfirmed;
+  const deletedPerspective = config.lastDeletedPerspective;
+  const activePerspectives = config.perspectives.filter((perspective) => !isPerspectiveRowEmpty(perspective));
+  const selectedPerspectives = activePerspectives.filter((perspective) => perspective.selected);
+  const incompletePerspective = activePerspectives.find((perspective) => !isPerspectiveRowComplete(perspective));
+  const unselectedPerspective = activePerspectives.find((perspective) => isPerspectiveRowComplete(perspective) && !perspective.selected);
+  const total = selectedPerspectives.reduce((s, p) => s + (Number(p.weight) || 0), 0);
+  const isValid = selectedPerspectives.length > 0 && total === 100 && !incompletePerspective && !unselectedPerspective;
+  const canAddPerspective = !isLocked && !incompletePerspective && !unselectedPerspective;
+
+  function updatePerspective(index, field, value) {
+    setReviewOpen(false);
+    setReviewMessage('');
+    setCleanupMessage('');
+    update('perspectives', config.perspectives.map((x, j) => {
+      if (j !== index) return x;
+      const next = { ...x, [field]: value, selected: false };
+      if (field === 'nameOption') {
+        if (value === 'custom') {
+          next.name = next.customName || '';
+        } else {
+          next.name = value;
+          next.customName = '';
+        }
+      }
+      if (field === 'customName') {
+        next.name = value;
+      }
+      return next;
+    }));
+  }
+
+  function isOptionTakenByOtherSelectedPerspective(index, option) {
+    const normalizedOption = normalizePerspectiveName(option);
+    return config.perspectives.some((perspective, perspectiveIndex) => (
+      perspectiveIndex !== index &&
+      perspective.selected &&
+      normalizePerspectiveName(getPerspectiveDisplayName(perspective)) === normalizedOption
+    ));
+  }
+
+  function togglePerspectiveSelection(index) {
+    const perspective = config.perspectives[index];
+    if (isLocked || !isPerspectiveRowComplete(perspective)) return;
+    const duplicateSelected = config.perspectives.find((item, itemIndex) => (
+      itemIndex !== index &&
+      item.selected &&
+      normalizePerspectiveName(getPerspectiveDisplayName(item)) === normalizePerspectiveName(getPerspectiveDisplayName(perspective))
+    ));
+    if (!perspective.selected && duplicateSelected) {
+      setReviewOpen(false);
+      setCleanupMessage('');
+      setReviewMessage(`"${getPerspectiveDisplayName(perspective)}" is already included in the final set. Remove or untick the existing one before selecting it again.`);
+      return;
+    }
+    setReviewOpen(false);
+    setReviewMessage('');
+    setCleanupMessage('');
+    update('perspectives', config.perspectives.map((x, j) => j === index ? { ...x, selected: !x.selected } : x));
+  }
+
+  function deletePerspective(index) {
+    if (config.perspectives.length <= 1 || isLocked) return;
+    const removed = config.perspectives[index];
+    setReviewOpen(false);
+    setReviewMessage('');
+    setCleanupMessage('');
+    update('lastDeletedPerspective', { perspective: removed, index });
+    update('perspectives', config.perspectives.filter((_, j) => j !== index));
+  }
+
+  function addPerspective() {
+    if (!canAddPerspective) return;
+    const restored = deletedPerspective?.perspective;
+    const nextPerspective = restored
+      ? { ...restored, id: Date.now(), selected: false }
+      : {
+          id: Date.now(),
+          name: '',
+          nameOption: 'custom',
+          customName: '',
+          weight: '',
+          color: PERSPECTIVE_COLORS[config.perspectives.length % PERSPECTIVE_COLORS.length],
+          objective: '',
+          selected: false,
+        };
+    setReviewOpen(false);
+    setReviewMessage('');
+    setCleanupMessage('');
+    update('perspectives', [...config.perspectives, nextPerspective]);
+    if (restored) update('lastDeletedPerspective', null);
+  }
+
+  function undoDelete() {
+    if (!deletedPerspective || isLocked) return;
+    const next = [...config.perspectives];
+    next.splice(Math.min(deletedPerspective.index, next.length), 0, deletedPerspective.perspective);
+    setReviewOpen(false);
+    setReviewMessage('');
+    setCleanupMessage('');
+    update('perspectives', next);
+    update('lastDeletedPerspective', null);
+  }
+
+  function confirmStructure() {
+    if (isLocked) return;
+    const cleanedPerspectives = config.perspectives.filter((perspective) => !isPerspectiveRowEmpty(perspective));
+    const removedCount = config.perspectives.length - cleanedPerspectives.length;
+    const cleanedActive = cleanedPerspectives.filter((perspective) => !isPerspectiveRowEmpty(perspective));
+    const cleanedSelected = cleanedActive.filter((perspective) => perspective.selected);
+    const hasIncomplete = cleanedActive.some((perspective) => !isPerspectiveRowComplete(perspective));
+    const hasUnticked = cleanedActive.some((perspective) => isPerspectiveRowComplete(perspective) && !perspective.selected);
+    const cleanedTotal = cleanedSelected.reduce((sum, perspective) => sum + (Number(perspective.weight) || 0), 0);
+    const selectedNameSet = new Set();
+    const hasDuplicateSelectedNames = cleanedSelected.some((perspective) => {
+      const normalized = normalizePerspectiveName(getPerspectiveDisplayName(perspective));
+      if (selectedNameSet.has(normalized)) return true;
+      selectedNameSet.add(normalized);
+      return false;
+    });
+
+    if (removedCount > 0) {
+      update('perspectives', cleanedPerspectives);
+      setCleanupMessage(`${removedCount} empty perspective ${removedCount === 1 ? 'draft was' : 'drafts were'} removed from the final set.`);
+    } else {
+      setCleanupMessage('');
+    }
+
+    if (!cleanedSelected.length) {
+      setReviewOpen(false);
+      setReviewMessage('Tick the perspectives you want to keep in the final set before continuing.');
+      return;
+    }
+    if (hasIncomplete) {
+      setReviewOpen(false);
+      setReviewMessage('Complete the unfinished perspective row before continuing.');
+      return;
+    }
+    if (hasUnticked) {
+      setReviewOpen(false);
+      setReviewMessage('You still have completed rows that are not ticked. Tick them to include them or delete them from the final set.');
+      return;
+    }
+    if (cleanedTotal !== 100) {
+      setReviewOpen(false);
+      setReviewMessage('The final selected perspective set must total exactly 100% before it can be fixed.');
+      return;
+    }
+    if (hasDuplicateSelectedNames) {
+      setReviewOpen(false);
+      setReviewMessage('The final perspective set cannot contain the same perspective more than once.');
+      return;
+    }
+
+    setReviewMessage('');
+    setReviewOpen(true);
+  }
+
+  function finalizeStructure() {
+    const finalPerspectives = config.perspectives
+      .filter((perspective) => !isPerspectiveRowEmpty(perspective) && perspective.selected)
+      .map((perspective) => ({ ...perspective }));
+    if (!finalPerspectives.length) return;
+    update('perspectives', finalPerspectives);
+    update('perspectivesConfirmed', true);
+    update('lastDeletedPerspective', null);
+    setReviewOpen(false);
+    setReviewMessage('');
+  }
+
+  function unlockStructure() {
+    setReviewOpen(false);
+    setReviewMessage('');
+    update('perspectivesConfirmed', false);
+  }
 
   return (
     <div>
@@ -451,67 +785,221 @@ function StepPerspectives({ config, update }) {
         <span>💡</span>
         <span>Most organisations use the 4 classic perspectives. You can rename them to match your language — e.g. <strong>"People & Culture"</strong> instead of "Learning & Growth".</span>
       </Banner>
+      {isLocked ? (
+        <Banner type="green">
+          <span>✅</span>
+          <span>Perspective structure confirmed. This will be used as the fixed master for goal library mapping and Excel template generation.</span>
+        </Banner>
+      ) : null}
       <Card>
         <CardHead
           title="Perspectives"
-          badge={isValid ? '✓ 100%' : `Total: ${total}% — must be 100%`}
+          badge={isLocked ? 'Confirmed' : isValid ? 'Ready to confirm' : `Total: ${total}% — must be 100%`}
         />
         <CardBody>
-          <div style={{ display: 'grid', gridTemplateColumns: '14px 1fr 90px 1fr 28px', gap: '8px 12px', alignItems: 'center', marginBottom: 8 }}>
+          <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 14 }}>
+            <div style={{ fontSize: 13.5, fontWeight: 700, color: isValid ? '#16A34A' : '#DC2626', display: 'flex', alignItems: 'center', gap: 6 }}>
+              <div style={{ width: 10, height: 10, borderRadius: '50%', background: isValid ? '#16A34A' : '#DC2626' }} />
+              Final set total: {total}% {isValid ? '— ready' : '— must equal 100%'}
+            </div>
+          </div>
+          {isLocked ? (
+            <div style={{ marginBottom: 14, padding: '10px 12px', borderRadius: 9, background: '#F0FDF4', border: '1px solid #BBF7D0', fontSize: 12.5, color: '#166534', lineHeight: 1.55 }}>
+              Editing is locked. Unlock only if you intentionally want to change the BSC master structure and review downstream setup again.
+            </div>
+          ) : null}
+          {cleanupMessage ? (
+            <div style={{ marginBottom: 14, padding: '10px 12px', borderRadius: 9, background: '#EFF6FF', border: '1px solid #BFDBFE', fontSize: 12.5, color: '#1D4ED8', lineHeight: 1.55 }}>
+              {cleanupMessage}
+            </div>
+          ) : null}
+          {reviewMessage ? (
+            <div style={{ marginBottom: 14, padding: '10px 12px', borderRadius: 9, background: '#FEF2F2', border: '1px solid #FECACA', fontSize: 12.5, color: '#B91C1C', lineHeight: 1.55 }}>
+              {reviewMessage}
+            </div>
+          ) : null}
+          {!isLocked && incompletePerspective ? (
+            <div style={{ marginBottom: 14, padding: '10px 12px', borderRadius: 9, background: '#FFF7ED', border: '1px solid #FED7AA', fontSize: 12.5, color: '#9A3412', lineHeight: 1.55 }}>
+              Complete the current perspective first, then add another one. This step only allows one unfinished perspective at a time to prevent dummy entries in the final master.
+            </div>
+          ) : null}
+          {!isLocked && unselectedPerspective ? (
+            <div style={{ marginBottom: 14, padding: '10px 12px', borderRadius: 9, background: '#FFFBEB', border: '1px solid #FDE68A', fontSize: 12.5, color: '#92400E', lineHeight: 1.55 }}>
+              Tick the completed perspective row to include it in the final structure before adding another one.
+            </div>
+          ) : null}
+          <div style={{ display: 'grid', gridTemplateColumns: '14px 1fr 90px 72px 28px', gap: '8px 12px', alignItems: 'center', marginBottom: 8 }}>
             <div />
             <div style={{ fontSize: 10.5, fontWeight: 700, color: '#9CA3AF', textTransform: 'uppercase', letterSpacing: '0.06em' }}>Perspective name</div>
             <div style={{ fontSize: 10.5, fontWeight: 700, color: '#9CA3AF', textTransform: 'uppercase', letterSpacing: '0.06em' }}>Weight</div>
-            <div style={{ fontSize: 10.5, fontWeight: 700, color: '#9CA3AF', textTransform: 'uppercase', letterSpacing: '0.06em' }}>Strategic objective (optional)</div>
+            <div style={{ fontSize: 10.5, fontWeight: 700, color: '#9CA3AF', textTransform: 'uppercase', letterSpacing: '0.06em' }}>Include</div>
             <div />
           </div>
           {config.perspectives.map((p, i) => (
-            <div key={p.id} style={{ display: 'grid', gridTemplateColumns: '14px 1fr 90px 1fr 28px', gap: '8px 12px', alignItems: 'center', padding: '10px 0', borderBottom: i < config.perspectives.length - 1 ? '1px solid #F1F3F5' : 'none' }}>
+            <div key={p.id} style={{ display: 'grid', gridTemplateColumns: '14px 1fr 90px 72px 28px', gap: '8px 12px', alignItems: 'center', padding: '10px 0', borderBottom: i < config.perspectives.length - 1 ? '1px solid #F1F3F5' : 'none' }}>
               <div style={{ width: 14, height: 14, borderRadius: '50%', background: p.color || PERSPECTIVE_COLORS[i % PERSPECTIVE_COLORS.length], flexShrink: 0 }} />
-              <input
-                style={inputStyle}
-                placeholder="e.g. Financial"
-                value={p.name}
-                onChange={e => update('perspectives', config.perspectives.map((x, j) => j === i ? { ...x, name: e.target.value } : x))}
-              />
+              <div style={{ display: 'grid', gap: 8 }}>
+                <select
+                  style={{ ...selectStyle, background: isLocked ? '#F8FAFC' : '#fff', color: isLocked ? '#64748B' : '#0D1117' }}
+                  value={getPerspectiveNameMode(p)}
+                  onChange={e => updatePerspective(i, 'nameOption', e.target.value)}
+                  disabled={isLocked}
+                >
+                  <option value="">Select perspective</option>
+                  {PERSPECTIVE_NAME_OPTIONS.map((option) => (
+                    <option
+                      key={option}
+                      value={option}
+                      disabled={getPerspectiveNameMode(p) !== option && isOptionTakenByOtherSelectedPerspective(i, option)}
+                    >
+                      {option}{getPerspectiveNameMode(p) !== option && isOptionTakenByOtherSelectedPerspective(i, option) ? ' (already used)' : ''}
+                    </option>
+                  ))}
+                  <option value="custom">Custom...</option>
+                </select>
+                {getPerspectiveNameMode(p) === 'custom' ? (
+                  <input
+                    style={{ ...inputStyle, background: isLocked ? '#F8FAFC' : '#fff', color: isLocked ? '#64748B' : '#0D1117' }}
+                    placeholder="Enter custom perspective name"
+                    value={p.customName ?? p.name ?? ''}
+                    onChange={e => updatePerspective(i, 'customName', e.target.value)}
+                    disabled={isLocked}
+                  />
+                ) : null}
+              </div>
               <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
                 <input
-                  style={{ ...inputStyle, width: 58 }}
+                  style={{ ...inputStyle, width: 58, background: isLocked ? '#F8FAFC' : '#fff', color: isLocked ? '#64748B' : '#0D1117' }}
                   type="number" min="0" max="100" placeholder="%"
                   value={p.weight}
-                  onChange={e => update('perspectives', config.perspectives.map((x, j) => j === i ? { ...x, weight: e.target.value } : x))}
+                  onChange={e => updatePerspective(i, 'weight', e.target.value)}
+                  disabled={isLocked}
                 />
                 <span style={{ fontSize: 12, color: '#9CA3AF', flexShrink: 0 }}>%</span>
               </div>
-              <input
-                style={inputStyle}
-                placeholder="Drive profitable growth…"
-                value={p.objective}
-                onChange={e => update('perspectives', config.perspectives.map((x, j) => j === i ? { ...x, objective: e.target.value } : x))}
-              />
+              <button
+                type="button"
+                onClick={() => togglePerspectiveSelection(i)}
+                disabled={isLocked || !isPerspectiveRowComplete(p)}
+                style={{
+                  width: 34,
+                  height: 34,
+                  borderRadius: 10,
+                  border: `1.5px solid ${p.selected ? '#22C55E' : '#D7DFEB'}`,
+                  background: p.selected ? '#F0FDF4' : '#fff',
+                  color: p.selected ? '#16A34A' : '#94A3B8',
+                  cursor: isLocked || !isPerspectiveRowComplete(p) ? 'not-allowed' : 'pointer',
+                  fontSize: 16,
+                  fontWeight: 700,
+                  justifySelf: 'start',
+                }}
+                title={p.selected ? 'Included in final set' : 'Tick to include in final set'}
+              >
+                ✓
+              </button>
               {config.perspectives.length > 1 ? (
                 <button
-                  onClick={() => update('perspectives', config.perspectives.filter((_, j) => j !== i))}
-                  style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#DC2626', fontSize: 15, padding: 0, lineHeight: 1 }}>
+                  onClick={() => deletePerspective(i)}
+                  disabled={isLocked}
+                  style={{ background: 'none', border: 'none', cursor: isLocked ? 'not-allowed' : 'pointer', color: isLocked ? '#CBD5E1' : '#DC2626', fontSize: 15, padding: 0, lineHeight: 1 }}>
                   ✕
                 </button>
               ) : <div />}
             </div>
           ))}
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 16, paddingTop: 14, borderTop: '1px solid #F1F3F5' }}>
-            <button
-              onClick={() => update('perspectives', [...config.perspectives, {
-                id: Date.now(), name: '', weight: '',
-                color: PERSPECTIVE_COLORS[config.perspectives.length % PERSPECTIVE_COLORS.length],
-                objective: '',
-              }])}
-              style={{ fontSize: 13, color: '#2563EB', background: 'none', border: '1.5px dashed #BFCFFE', borderRadius: 8, padding: '7px 14px', cursor: 'pointer', fontWeight: 500 }}>
-              + Add custom perspective
-            </button>
-            <div style={{ fontSize: 13.5, fontWeight: 700, color: isValid ? '#16A34A' : '#DC2626', display: 'flex', alignItems: 'center', gap: 6 }}>
-              <div style={{ width: 10, height: 10, borderRadius: '50%', background: isValid ? '#16A34A' : '#DC2626' }} />
-              Total: {total}% {isValid ? '— valid' : '— must equal 100%'}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+              <button
+                onClick={addPerspective}
+                disabled={!canAddPerspective}
+                style={{ fontSize: 13, color: !canAddPerspective ? '#94A3B8' : '#2563EB', background: 'none', border: `1.5px dashed ${!canAddPerspective ? '#CBD5E1' : '#BFCFFE'}`, borderRadius: 8, padding: '7px 14px', cursor: !canAddPerspective ? 'not-allowed' : 'pointer', fontWeight: 500 }}>
+                + Add custom perspective
+              </button>
+              {deletedPerspective ? (
+                <button
+                  onClick={undoDelete}
+                  disabled={isLocked}
+                  style={{ fontSize: 13, color: isLocked ? '#94A3B8' : '#0F766E', background: '#fff', border: `1px solid ${isLocked ? '#CBD5E1' : '#99F6E4'}`, borderRadius: 8, padding: '7px 14px', cursor: isLocked ? 'not-allowed' : 'pointer', fontWeight: 500 }}>
+                  Undo delete
+                </button>
+              ) : null}
+              {deletedPerspective && canAddPerspective ? (
+                <div style={{ fontSize: 11.5, color: '#6B7280' }}>
+                  Next added perspective will reuse <strong>{deletedPerspective.perspective.name || 'the deleted draft'}</strong>.
+                </div>
+              ) : null}
+              {!isLocked && incompletePerspective ? (
+                <div style={{ fontSize: 11.5, color: '#9A3412' }}>
+                  Finish the unfinished perspective before adding another.
+                </div>
+              ) : null}
+              {!isLocked && !incompletePerspective && unselectedPerspective ? (
+                <div style={{ fontSize: 11.5, color: '#92400E' }}>
+                  Tick the completed perspective before adding another.
+                </div>
+              ) : null}
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+              {isLocked ? (
+                <button
+                  type="button"
+                  onClick={unlockStructure}
+                  style={{ padding: '8px 14px', border: '1.5px solid #FECACA', borderRadius: 9, fontSize: 13, cursor: 'pointer', background: '#FFF7F7', color: '#B91C1C', fontWeight: 600 }}
+                >
+                  Unlock structure
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={confirmStructure}
+                  style={{ padding: '8px 14px', background: '#2563EB', color: '#fff', border: 'none', borderRadius: 9, fontSize: 13, fontWeight: 600, cursor: 'pointer' }}
+                >
+                  Review final perspective set
+                </button>
+              )}
             </div>
           </div>
+          {reviewOpen ? (
+            <div style={{ marginTop: 16, padding: '16px 18px', borderRadius: 12, background: '#F8FAFC', border: '1px solid #DCE5F1' }}>
+              <div style={{ fontSize: 12, fontWeight: 700, color: '#2563EB', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 8 }}>
+                Final fixed set
+              </div>
+              <div style={{ fontSize: 14.5, fontWeight: 600, color: '#0D1117', marginBottom: 6 }}>
+                These perspectives will be used further in Goal Library and the master Excel template.
+              </div>
+              <div style={{ fontSize: 12.5, color: '#64748B', lineHeight: 1.55, marginBottom: 14 }}>
+                Changing them later will cause rework in downstream mapping. Review the final set once and lock it only when you are sure.
+              </div>
+              <div style={{ display: 'grid', gap: 8, marginBottom: 14 }}>
+                {selectedPerspectives.map((perspective) => (
+                  <div key={perspective.id} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, padding: '10px 12px', borderRadius: 10, background: '#fff', border: '1px solid #E2E8F0' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                      <div style={{ width: 12, height: 12, borderRadius: '50%', background: perspective.color }} />
+                      <div style={{ fontSize: 13.5, fontWeight: 600, color: '#0F172A' }}>{getPerspectiveDisplayName(perspective)}</div>
+                    </div>
+                    <div style={{ fontSize: 12.5, fontWeight: 700, color: '#2563EB' }}>{perspective.weight}%</div>
+                  </div>
+                ))}
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+                <div style={{ fontSize: 13, color: '#475569' }}>
+                  {selectedPerspectives.length} perspective{selectedPerspectives.length === 1 ? '' : 's'} selected · Total {total}%
+                </div>
+                <button
+                  type="button"
+                  onClick={finalizeStructure}
+                  style={{ padding: '9px 16px', background: '#16A34A', color: '#fff', border: 'none', borderRadius: 9, fontSize: 13, fontWeight: 700, cursor: 'pointer' }}
+                >
+                  Lock final perspective set
+                </button>
+              </div>
+            </div>
+          ) : null}
+          {!isLocked ? (
+            <div style={{ marginTop: 16, padding: '10px 12px', borderRadius: 9, background: '#F8FAFC', border: '1px solid #E2E8F0', fontSize: 12.5, color: '#475569', lineHeight: 1.55 }}>
+              Tick each perspective you want to keep in the final set. When you continue, only the green-ticked perspectives will be reviewed and then fixed for downstream goal mapping and master Excel generation.
+            </div>
+          ) : null}
         </CardBody>
       </Card>
     </div>
@@ -747,7 +1235,7 @@ function StepScale({ config, update }) {
   );
 }
 
-/* ── STEP 5: GOAL SETTING ──────────────────────────────────────────────── */
+/* ── STEP 3: GOAL LIBRARY ──────────────────────────────────────────────── */
 
 const GOAL_LIBRARY_MODES = [
   {
@@ -793,140 +1281,401 @@ const WEIGHTAGE_OWNERSHIP_OPTIONS = [
 
 const GOAL_SEGMENT_OPTIONS = ['Department', 'Designation / Role', 'Grade / Band', 'Location', 'Cost Center', 'Employment Type'];
 
-function StepGoalLibrary({ config, update }) {
-  const segmentLabel = config.goalSegmentBy || 'Department';
-  const kraMode = KRA_ASSIGNMENT_MODES.find(m => m.id === config.kraMode);
+/* ── MANUAL GOAL ENTRY ───────────────────────────────────────────────────── */
+function ManualGoalEntry({ config, perspectives }) {
+  const scope = config.goalLibraryScope;
+  const rawSegments = config.goalSegmentValues || [];
+  const segments = scope === 'by-attribute' ? rawSegments.filter(v => v.name.trim()) : [{ id: 'common', name: 'All Employees' }];
+  const [activeTab, setActiveTab] = useState(segments[0]?.id || 'common');
+  const [kras, setKras] = useState({});
+
+  if (scope === 'by-attribute' && segments.length === 0) {
+    return (
+      <Banner type="amber">
+        <span>⚠️</span>
+        <span>Add at least one {config.goalSegmentAttr || 'attribute'} value above to start entering goals.</span>
+      </Banner>
+    );
+  }
+
+  const currentKras = kras[activeTab] || [];
+  const totalWeight = currentKras.reduce((s, k) => s + (Number(k.weight) || 0), 0);
+
+  function addKra() {
+    setKras(prev => ({
+      ...prev,
+      [activeTab]: [...(prev[activeTab] || []), { id: Date.now(), name: '', weight: '', perspId: perspectives[0]?.id || '' }],
+    }));
+  }
+
+  function removeKra(id) {
+    setKras(prev => ({ ...prev, [activeTab]: (prev[activeTab] || []).filter(k => k.id !== id) }));
+  }
+
+  function updateKra(id, field, val) {
+    setKras(prev => ({ ...prev, [activeTab]: (prev[activeTab] || []).map(k => k.id === id ? { ...k, [field]: val } : k) }));
+  }
 
   return (
     <div>
-      <SectionHead
-        title="Goal library setup"
-        sub="Define how the KRA library is organised and how much structure HR pre-fills before employees see their goals."
-      />
-      {kraMode && (
-        <Banner type="blue">
-          <span>🔗</span>
-          <span>
-            Based on your assignment mode <strong>"{config.kraMode}"</strong>: {kraMode.impact.goalLibrary}. Pre-fill depth has been set to <strong>{kraMode.impact.preFill}</strong> — adjust below if needed.
-          </span>
-        </Banner>
+      {segments.length > 1 && (
+        <div style={{ display: 'flex', gap: 0, background: '#F8FAFC', border: '1px solid #E9EDF2', borderRadius: 8, padding: 3, marginBottom: 16, flexWrap: 'wrap' }}>
+          {segments.map(t => (
+            <button key={t.id} type="button" onClick={() => setActiveTab(t.id)}
+              style={{ padding: '5px 12px', borderRadius: 6, border: 'none', fontSize: 12, fontWeight: activeTab === t.id ? 600 : 400, color: activeTab === t.id ? '#2563EB' : '#9CA3AF', background: activeTab === t.id ? '#fff' : 'transparent', cursor: 'pointer', boxShadow: activeTab === t.id ? '0 1px 3px rgba(0,0,0,.07)' : 'none', transition: 'all .15s' }}>
+              {t.name}
+              {(kras[t.id] || []).length > 0 && <span style={{ marginLeft: 5, background: '#EFF4FF', color: '#2563EB', borderRadius: 10, fontSize: 10, padding: '1px 6px', fontWeight: 600 }}>{(kras[t.id] || []).length}</span>}
+            </button>
+          ))}
+        </div>
       )}
-
-      {/* ── A: GOAL LIBRARY MODE ─────────────────────────────────────── */}
-      <Card>
-        <CardHead title="A  —  How is the goal library organised?" badge="Start here" />
-        <CardBody>
-          <div style={{ fontSize: 12, color: '#6B7280', lineHeight: 1.55, marginBottom: 14 }}>
-            Decide whether all employees share one master list of KRAs, or whether different groups (e.g. departments) each get their own tailored library.
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 160px 80px 28px', gap: '6px 10px', alignItems: 'center', marginBottom: 6 }}>
+        <div style={{ fontSize: 10.5, fontWeight: 700, color: '#9CA3AF', textTransform: 'uppercase', letterSpacing: '0.04em' }}>KRA Name</div>
+        <div style={{ fontSize: 10.5, fontWeight: 700, color: '#9CA3AF', textTransform: 'uppercase', letterSpacing: '0.04em' }}>Perspective</div>
+        <div style={{ fontSize: 10.5, fontWeight: 700, color: '#9CA3AF', textTransform: 'uppercase', letterSpacing: '0.04em' }}>Weight %</div>
+        <div />
+      </div>
+      {currentKras.length === 0 && (
+        <div style={{ padding: '20px', textAlign: 'center', color: '#9CA3AF', fontSize: 13, border: '1.5px dashed #E9EDF2', borderRadius: 8, marginBottom: 10 }}>
+          No KRAs yet — click Add KRA to start
+        </div>
+      )}
+      {currentKras.map(kra => (
+        <div key={kra.id} style={{ display: 'grid', gridTemplateColumns: '1fr 160px 80px 28px', gap: '6px 10px', alignItems: 'center', padding: '6px 0', borderBottom: '1px solid #F1F3F5' }}>
+          <input style={inputStyle} placeholder="e.g. Revenue Growth" value={kra.name} onChange={e => updateKra(kra.id, 'name', e.target.value)} />
+          <select style={selectStyle} value={kra.perspId} onChange={e => updateKra(kra.id, 'perspId', e.target.value)}>
+            {perspectives.map(p => <option key={p.id} value={p.id}>{p.name || `Perspective ${p.id}`}</option>)}
+          </select>
+          <input style={{ ...inputStyle, textAlign: 'center' }} type="number" min={0} max={100} placeholder="%" value={kra.weight} onChange={e => updateKra(kra.id, 'weight', e.target.value)} />
+          <button onClick={() => removeKra(kra.id)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#DC2626', fontSize: 15, padding: 0, lineHeight: 1 }}>✕</button>
+        </div>
+      ))}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 12 }}>
+        <button onClick={addKra} style={{ fontSize: 13, color: '#2563EB', background: 'none', border: '1.5px dashed #BFCFFE', borderRadius: 8, padding: '6px 14px', cursor: 'pointer', fontWeight: 500 }}>
+          + Add KRA
+        </button>
+        {currentKras.length > 0 && (
+          <div style={{ fontSize: 13, fontWeight: 600, color: totalWeight === 100 ? '#16A34A' : '#DC2626' }}>
+            Total: {totalWeight}% {totalWeight === 100 ? '✓' : '— must equal 100%'}
           </div>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 16 }}>
-            {GOAL_LIBRARY_MODES.map(mode => {
-              const isSelected = config.goalLibraryMode === mode.id;
-              return (
-                <button
-                  key={mode.id}
-                  type="button"
-                  onClick={() => update('goalLibraryMode', mode.id)}
-                  style={{
-                    textAlign: 'left', border: `2px solid ${isSelected ? '#2563EB' : '#E9EDF2'}`,
-                    borderRadius: 10, padding: '16px 16px', cursor: 'pointer',
-                    background: isSelected ? '#EFF4FF' : '#fff', transition: 'all .16s', appearance: 'none',
-                    position: 'relative',
-                  }}
-                >
-                  {isSelected && (
-                    <div style={{ position: 'absolute', top: 10, right: 10, width: 18, height: 18, borderRadius: '50%', background: '#2563EB', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#fff', fontSize: 9, fontWeight: 700 }}>✓</div>
-                  )}
-                  <div style={{ fontSize: 22, marginBottom: 8 }}>{mode.icon}</div>
-                  <div style={{ fontSize: 13, fontWeight: 600, color: '#0D1117', marginBottom: 4 }}>{mode.title}</div>
-                  <div style={{ fontSize: 11.5, color: '#6B7280', lineHeight: 1.5 }}>{mode.desc}</div>
-                </button>
-              );
-            })}
-          </div>
+        )}
+      </div>
+    </div>
+  );
+}
 
-          {/* Segmented: choose attribute */}
-          {config.goalLibraryMode === 'segmented' && (
-            <div>
-              <div style={{ height: 1, background: '#F1F3F5', marginBottom: 16 }} />
-              <div style={{ fontSize: 12, fontWeight: 600, color: '#374151', textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: 10 }}>
-                Which attribute segments the library?
+function StepGoalLibrary({ config, update }) {
+  const mode = config.goalCreationMode;
+  const scope = config.goalLibraryScope;
+  const limitEnabled = config.goalLimitEnabled;
+  const limitScope = config.goalLimitScope;
+  const [entryMode, setEntryMode] = useState('upload');
+
+  function choiceToggle(opts, selectedId, onSelect) {
+    return (
+      <div style={{ display: 'grid', gap: 10 }}>
+        {opts.map(opt => {
+          const isSel = selectedId === opt.id;
+          return (
+            <div
+              key={opt.id}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                gap: 16,
+                padding: '14px 16px',
+                border: `1.5px solid ${isSel ? '#93C5FD' : '#E2E8F0'}`,
+                borderRadius: 12,
+                background: isSel ? '#EFF6FF' : '#fff',
+              }}
+            >
+              <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12 }}>
+                <div style={{ fontSize: 20, lineHeight: 1.1 }}>{opt.icon}</div>
+                <div>
+                  <div style={{ fontSize: 13.5, fontWeight: 600, color: '#0D1117', marginBottom: 4 }}>{opt.title}</div>
+                  <div style={{ fontSize: 11.5, color: '#6B7280', lineHeight: 1.5 }}>{opt.desc}</div>
+                </div>
               </div>
-              <Grid2>
-                <Field label="Segment goal library by" hint="Each unique value in this field gets its own goal set">
-                  <select style={selectStyle} value={config.goalSegmentBy} onChange={e => update('goalSegmentBy', e.target.value)}>
+              <Toggle on={isSel} onChange={() => onSelect(opt.id)} />
+            </div>
+          );
+        })}
+      </div>
+    );
+  }
+
+  function addSegmentValue() {
+    update('goalSegmentValues', [...(config.goalSegmentValues || []), { id: Date.now(), name: '' }]);
+  }
+  function removeSegmentValue(id) {
+    update('goalSegmentValues', (config.goalSegmentValues || []).filter(v => v.id !== id));
+  }
+  function updateSegmentValueName(id, name) {
+    update('goalSegmentValues', (config.goalSegmentValues || []).map(v => v.id === id ? { ...v, name } : v));
+  }
+
+  function addLimitValue() {
+    update('goalLimitValues', [...(config.goalLimitValues || []), { id: Date.now(), name: '', min: 3, max: 8 }]);
+  }
+  function removeLimitValue(id) {
+    update('goalLimitValues', (config.goalLimitValues || []).filter(v => v.id !== id));
+  }
+  function updateLimitValue(id, field, val) {
+    update('goalLimitValues', (config.goalLimitValues || []).map(v => v.id === id ? { ...v, [field]: val } : v));
+  }
+
+  const showGoalEntry = mode === 'admin-library' && (scope === 'common' || (scope === 'by-attribute' && (config.goalSegmentValues || []).filter(v => v.name.trim()).length > 0));
+  const attrLabel = config.goalSegmentAttr || 'Department';
+
+  return (
+    <div>
+      <SectionHead title="Goal library" sub="Define how employee goals are created and structured for this appraisal cycle." />
+
+      {/* Q1: How will goals be created? */}
+      <Card>
+        <CardHead title="How will employee goals be created?" badge="Step 1" />
+        <CardBody>
+          {choiceToggle([
+            { id: 'admin-library', icon: '🏛️', title: 'Admin builds a Goal Library', desc: 'HR pre-defines KRAs and KPIs. Employees work from a structured library.' },
+            { id: 'employee-self', icon: '✍️', title: 'Employees create their own goals', desc: 'Employees write goals from scratch. Manager reviews and approves.' },
+          ], mode, v => update('goalCreationMode', v))}
+        </CardBody>
+      </Card>
+
+      {/* PATH A ─────────────────────────────────────────────────────────── */}
+      {mode === 'admin-library' && (
+        <>
+          <Card>
+            <CardHead title="Will the goal library be the same for all employees?" badge="Step 2" />
+            <CardBody>
+              {choiceToggle([
+                { id: 'common', icon: '🌐', title: 'Common for all employees', desc: 'One shared KRA library that applies to everyone.' },
+                { id: 'by-attribute', icon: '🗂️', title: 'Differs by attribute', desc: 'Different KRA sets for different groups — e.g. each Department gets its own goals.' },
+              ], scope, v => update('goalLibraryScope', v))}
+            </CardBody>
+          </Card>
+
+          {scope === 'by-attribute' && (
+            <Card>
+              <CardHead title={`Define ${attrLabel} values`} />
+              <CardBody>
+                <Field label="Segment library by" hint="Each unique value gets its own KRA set">
+                  <select style={{ ...selectStyle, maxWidth: 260 }} value={config.goalSegmentAttr} onChange={e => update('goalSegmentAttr', e.target.value)}>
                     {GOAL_SEGMENT_OPTIONS.map(o => <option key={o}>{o}</option>)}
                   </select>
                 </Field>
-                <Field label="Fallback when no library exists for a segment" hint="Applied to employees whose attribute value has no library">
-                  <select style={selectStyle} value={config.goalSegmentFallback} onChange={e => update('goalSegmentFallback', e.target.value)}>
-                    <option value="merged">Show all goals (merged view)</option>
-                    <option value="empty">Empty library — employee creates own</option>
-                    <option value="block">Block goal setting — HR must assign first</option>
+                <div style={{ marginTop: 16, marginBottom: 4, fontSize: 12, fontWeight: 600, color: '#374151', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
+                  Unique values for {attrLabel}
+                </div>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 8 }}>
+                  {(config.goalSegmentValues || []).map(v => (
+                    <div key={v.id} style={{ display: 'flex', alignItems: 'center', gap: 5, background: '#EFF4FF', border: '1.5px solid #BFCFFE', borderRadius: 8, padding: '4px 10px' }}>
+                      <input value={v.name} onChange={e => updateSegmentValueName(v.id, e.target.value)} placeholder={`e.g. Finance`}
+                        style={{ border: 'none', background: 'transparent', fontSize: 13, color: '#1e40af', fontWeight: 500, outline: 'none', width: 90 }} />
+                      <button onClick={() => removeSegmentValue(v.id)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#DC2626', fontSize: 13, padding: 0, lineHeight: 1 }}>✕</button>
+                    </div>
+                  ))}
+                  <button onClick={addSegmentValue} style={{ fontSize: 13, color: '#2563EB', background: 'none', border: '1.5px dashed #BFCFFE', borderRadius: 8, padding: '4px 12px', cursor: 'pointer', fontWeight: 500 }}>
+                    + Add value
+                  </button>
+                </div>
+              </CardBody>
+            </Card>
+          )}
+
+          {showGoalEntry && (
+            <Card>
+              <CardHead title="Add your KRA library" badge={scope === 'by-attribute' ? `${(config.goalSegmentValues || []).filter(v => v.name.trim()).length} sets` : 'Common'} />
+              <CardBody>
+                <div style={{ display: 'flex', gap: 0, background: '#F8FAFC', border: '1px solid #E9EDF2', borderRadius: 8, padding: 3, marginBottom: 16, width: 'fit-content' }}>
+                  {[{ id: 'upload', label: '⬆️  Upload Excel' }, { id: 'manual', label: '✏️  Enter manually' }].map(em => (
+                    <button key={em.id} type="button" onClick={() => setEntryMode(em.id)}
+                      style={{ padding: '6px 16px', borderRadius: 6, border: 'none', fontSize: 12.5, fontWeight: entryMode === em.id ? 600 : 400, color: entryMode === em.id ? '#2563EB' : '#9CA3AF', background: entryMode === em.id ? '#fff' : 'transparent', cursor: 'pointer', boxShadow: entryMode === em.id ? '0 1px 3px rgba(0,0,0,.07)' : 'none', transition: 'all .15s' }}>
+                      {em.label}
+                    </button>
+                  ))}
+                </div>
+
+                {entryMode === 'upload' && (
+                  <>
+                    <Banner type="blue">
+                      <span>📋</span>
+                      <span>
+                        Download the template, fill in KRAs and KPIs{scope === 'by-attribute' ? ` per ${attrLabel}` : ''} with a <strong>Perspective</strong> column (required for BSC), then upload.
+                      </span>
+                    </Banner>
+                    <div style={{ border: '2px dashed #E2E8F0', borderRadius: 12, padding: '24px', textAlign: 'center' }}>
+                      <div style={{ fontSize: 26, marginBottom: 10 }}>📊</div>
+                      <div style={{ fontSize: 14, fontWeight: 600, color: '#0D1117', marginBottom: 4 }}>
+                        Goal library template{scope === 'by-attribute' ? ` · by ${attrLabel}` : ''}
+                      </div>
+                      <div style={{ fontSize: 12, color: '#9CA3AF', marginBottom: 8 }}>
+                        Columns: {scope === 'by-attribute' ? `${attrLabel} · ` : ''}Perspective · KRA Name · KRA Weight % · KPI Name · KPI Weight %
+                      </div>
+                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, justifyContent: 'center', marginBottom: 16 }}>
+                        {[...(scope === 'by-attribute' ? [attrLabel] : []), 'Perspective', 'KRA Name', 'KRA Weight %', 'KPI Name', 'KPI Weight %'].map(c => (
+                          <span key={c} style={{ padding: '2px 9px', borderRadius: 20, fontSize: 11.5, background: c === 'Perspective' || c === attrLabel ? '#EFF4FF' : '#F0FDF4', color: c === 'Perspective' || c === attrLabel ? '#2563EB' : '#16A34A', border: `1px solid ${c === 'Perspective' || c === attrLabel ? '#BFCFFE' : '#bbf7d0'}`, fontWeight: 500 }}>{c}</span>
+                        ))}
+                      </div>
+                      <div style={{ display: 'flex', gap: 10, justifyContent: 'center' }}>
+                        <button style={{ padding: '8px 18px', background: '#2563EB', color: '#fff', border: 'none', borderRadius: 8, fontSize: 13, fontWeight: 500, cursor: 'pointer' }}>⬇️ Download Template</button>
+                        <button style={{ padding: '8px 18px', border: '1.5px solid #E2E8F0', borderRadius: 8, fontSize: 13, cursor: 'pointer', background: '#fff' }}>⬆️ Upload Filled Sheet</button>
+                      </div>
+                    </div>
+                  </>
+                )}
+
+                {entryMode === 'manual' && (
+                  <ManualGoalEntry config={config} perspectives={config.perspectives || []} />
+                )}
+              </CardBody>
+            </Card>
+          )}
+        </>
+      )}
+
+      {/* PATH B ─────────────────────────────────────────────────────────── */}
+      {mode === 'employee-self' && (
+        <>
+          <Card>
+            <CardHead title="Do you want to limit the number of goals?" badge="Step 2" />
+            <CardBody>
+              <TogRow
+                label="Set goal count limits"
+                desc="Define a minimum and maximum number of goals each employee can set."
+                on={limitEnabled}
+                onChange={v => update('goalLimitEnabled', v)}
+                last
+              />
+            </CardBody>
+          </Card>
+
+          {limitEnabled && (
+            <Card>
+              <CardHead title="Should limits be the same for all employees?" badge="Step 3" />
+              <CardBody>
+                {choiceToggle([
+                  { id: 'common', icon: '⚖️', title: 'Same limit for all', desc: 'One global min / max applies to every employee.' },
+                  { id: 'by-attribute', icon: '🗂️', title: 'Differs by attribute', desc: 'Different groups can have different goal count limits.' },
+                ], limitScope, v => update('goalLimitScope', v))}
+              </CardBody>
+            </Card>
+          )}
+
+          {limitEnabled && limitScope === 'common' && (
+            <Card>
+              <CardHead title="Goal count limits" />
+              <CardBody>
+                <Grid2>
+                  <Field label="Minimum goals" hint="Must set at least this many">
+                    <input style={inputStyle} type="number" min={1} value={config.goalLimitMin} onChange={e => update('goalLimitMin', Number(e.target.value))} />
+                  </Field>
+                  <Field label="Maximum goals" hint="Cannot exceed this many">
+                    <input style={inputStyle} type="number" min={1} value={config.goalLimitMax} onChange={e => update('goalLimitMax', Number(e.target.value))} />
+                  </Field>
+                </Grid2>
+              </CardBody>
+            </Card>
+          )}
+
+          {limitEnabled && limitScope === 'by-attribute' && (
+            <Card>
+              <CardHead title="Limits by attribute" />
+              <CardBody>
+                <Field label="Limit by attribute" hint="Each unique value can have its own min / max">
+                  <select style={{ ...selectStyle, maxWidth: 260 }} value={config.goalLimitAttr} onChange={e => update('goalLimitAttr', e.target.value)}>
+                    {GOAL_SEGMENT_OPTIONS.map(o => <option key={o}>{o}</option>)}
                   </select>
                 </Field>
-              </Grid2>
-              <Banner type="blue">
-                <span>📋</span>
-                <span>
-                  A separate KRA library for each <strong>{segmentLabel}</strong> value will be configured via the Goal Library admin section (or uploaded via Excel at the end of this wizard).
-                </span>
-              </Banner>
-            </div>
-          )}
-
-          {config.goalLibraryMode === 'shared' && (
-            <Banner type="blue">
-              <span>📋</span>
-              <span>One shared KRA library applies to all employees. You will upload or build it via the Goal Library section after completing this wizard.</span>
-            </Banner>
-          )}
-        </CardBody>
-      </Card>
-
-      {/* ── B: PRE-FILL DEPTH ────────────────────────────────────────── */}
-      <Card>
-        <CardHead title="B  —  How much structure does HR pre-fill?" />
-        <CardBody>
-          <div style={{ fontSize: 12, color: '#6B7280', lineHeight: 1.55, marginBottom: 14 }}>
-            The more HR pre-fills, the less work employees have to do during goal setting. Choose the right depth for your org's readiness.
-          </div>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-            {PREFILL_DEPTH_OPTIONS.map(opt => {
-              const isSelected = config.goalPreFillDepth === opt.id;
-              return (
-                <button
-                  key={opt.id}
-                  type="button"
-                  onClick={() => update('goalPreFillDepth', opt.id)}
-                  style={{
-                    display: 'flex', alignItems: 'center', gap: 14, textAlign: 'left',
-                    border: `1.5px solid ${isSelected ? '#2563EB' : '#E9EDF2'}`,
-                    borderRadius: 9, padding: '12px 14px', cursor: 'pointer',
-                    background: isSelected ? '#EFF4FF' : '#fff', transition: 'all .16s', appearance: 'none',
-                  }}
-                >
-                  <div style={{
-                    width: 34, height: 34, borderRadius: 8, flexShrink: 0,
-                    display: 'flex', alignItems: 'center', justifyContent: 'center',
-                    fontSize: 15, fontWeight: 700,
-                    background: isSelected ? '#2563EB' : '#F1F3F5',
-                    color: isSelected ? '#fff' : '#9CA3AF',
-                  }}>{opt.step}</div>
-                  <div style={{ flex: 1 }}>
-                    <div style={{ fontSize: 13, fontWeight: 600, color: '#0D1117', marginBottom: 2 }}>{opt.label}</div>
-                    <div style={{ fontSize: 11.5, color: '#6B7280' }}>{opt.desc}</div>
+                <div style={{ marginTop: 16 }}>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 80px 80px 28px', gap: '6px 10px', alignItems: 'center', marginBottom: 6 }}>
+                    <div style={{ fontSize: 10.5, fontWeight: 700, color: '#9CA3AF', textTransform: 'uppercase' }}>{config.goalLimitAttr || 'Attribute'} value</div>
+                    <div style={{ fontSize: 10.5, fontWeight: 700, color: '#9CA3AF', textTransform: 'uppercase' }}>Min</div>
+                    <div style={{ fontSize: 10.5, fontWeight: 700, color: '#9CA3AF', textTransform: 'uppercase' }}>Max</div>
+                    <div />
                   </div>
-                  {isSelected && (
-                    <div style={{ width: 18, height: 18, borderRadius: '50%', background: '#2563EB', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#fff', fontSize: 9, fontWeight: 700, flexShrink: 0 }}>✓</div>
-                  )}
-                </button>
-              );
-            })}
+                  {(config.goalLimitValues || []).map(v => (
+                    <div key={v.id} style={{ display: 'grid', gridTemplateColumns: '1fr 80px 80px 28px', gap: '6px 10px', alignItems: 'center', padding: '6px 0', borderBottom: '1px solid #F1F3F5' }}>
+                      <input style={inputStyle} placeholder="e.g. Finance" value={v.name} onChange={e => updateLimitValue(v.id, 'name', e.target.value)} />
+                      <input style={{ ...inputStyle, textAlign: 'center' }} type="number" min={1} value={v.min} onChange={e => updateLimitValue(v.id, 'min', Number(e.target.value))} />
+                      <input style={{ ...inputStyle, textAlign: 'center' }} type="number" min={1} value={v.max} onChange={e => updateLimitValue(v.id, 'max', Number(e.target.value))} />
+                      <button onClick={() => removeLimitValue(v.id)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#DC2626', fontSize: 15, padding: 0, lineHeight: 1 }}>✕</button>
+                    </div>
+                  ))}
+                  <button onClick={addLimitValue} style={{ marginTop: 10, fontSize: 13, color: '#2563EB', background: 'none', border: '1.5px dashed #BFCFFE', borderRadius: 8, padding: '6px 14px', cursor: 'pointer', fontWeight: 500 }}>
+                    + Add {config.goalLimitAttr || 'attribute'} value
+                  </button>
+                </div>
+              </CardBody>
+            </Card>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+/* ── STEP 4: EMPLOYEE UPLOAD ─────────────────────────────────────────────── */
+function StepEmployeeUpload({ config }) {
+  const needsAttrCol =
+    (config.goalCreationMode === 'admin-library' && config.goalLibraryScope === 'by-attribute') ||
+    (config.goalCreationMode === 'employee-self' && config.goalLimitEnabled && config.goalLimitScope === 'by-attribute');
+  const attrName = config.goalCreationMode === 'admin-library'
+    ? (config.goalSegmentAttr || 'Department')
+    : (config.goalLimitAttr || 'Department');
+
+  const cols = [
+    'Employee Code', 'Employee Name', 'Email ID',
+    ...(needsAttrCol ? [attrName] : []),
+    'Department', 'Designation', 'Grade / Band',
+    'Reporting Manager Code', 'Reporting Manager Email',
+  ];
+
+  return (
+    <div>
+      <SectionHead title="Employee upload" sub="Upload your employee list with manager mapping. The system creates employee records and sends invite emails." />
+
+      {needsAttrCol && (
+        <Banner type="blue">
+          <span>ℹ️</span>
+          <span>Include a <strong>{attrName}</strong> column — the system uses this to assign each employee to the correct goal set.</span>
+        </Banner>
+      )}
+
+      <Card>
+        <CardHead title="Upload template" />
+        <CardBody>
+          <div style={{ fontSize: 12, fontWeight: 600, color: '#374151', textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: 10 }}>Columns in the template</div>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 20 }}>
+            {cols.map(c => (
+              <span key={c} style={{ padding: '3px 10px', borderRadius: 20, fontSize: 12, background: c === attrName && needsAttrCol ? '#EFF4FF' : '#F0FDF4', color: c === attrName && needsAttrCol ? '#2563EB' : '#16A34A', border: `1px solid ${c === attrName && needsAttrCol ? '#BFCFFE' : '#bbf7d0'}`, fontWeight: 500 }}>{c}</span>
+            ))}
+          </div>
+          <div style={{ border: '2px dashed #E2E8F0', borderRadius: 12, padding: '28px', textAlign: 'center' }}>
+            <div style={{ fontSize: 26, marginBottom: 10 }}>👥</div>
+            <div style={{ fontSize: 14, fontWeight: 600, color: '#0D1117', marginBottom: 4 }}>Employee + Manager upload</div>
+            <div style={{ fontSize: 12, color: '#9CA3AF', marginBottom: 16 }}>Download the template, fill in employee details and manager assignments, then upload.</div>
+            <div style={{ display: 'flex', gap: 10, justifyContent: 'center' }}>
+              <button style={{ padding: '8px 18px', background: '#2563EB', color: '#fff', border: 'none', borderRadius: 8, fontSize: 13, fontWeight: 500, cursor: 'pointer' }}>⬇️ Download Template</button>
+              <button style={{ padding: '8px 18px', border: '1.5px solid #E2E8F0', borderRadius: 8, fontSize: 13, cursor: 'pointer', background: '#fff' }}>⬆️ Upload Employee File</button>
+            </div>
           </div>
         </CardBody>
       </Card>
 
+      <Card>
+        <CardHead title="Post-upload actions" />
+        <CardBody>
+          {[
+            { label: 'Auto-send invite email to employees', desc: 'Each employee gets a login link and goal-setting instructions' },
+            { label: 'Send manager summary email', desc: 'Each manager gets a list of their reportees and pending actions' },
+            { label: 'Pre-populate employee portal with assigned goals', desc: 'Employees see pre-loaded KRAs as soon as they log in (if library is set)' },
+          ].map((t, i, arr) => (
+            <TogRow key={t.label} label={t.label} desc={t.desc} last={i === arr.length - 1} on={true} onChange={() => {}} />
+          ))}
+        </CardBody>
+      </Card>
     </div>
   );
 }
@@ -1456,13 +2205,15 @@ function StepExport() {
 ══════════════════════════════════════════════════════════════════════════ */
 const INITIAL = {
   // Framework
-  frameworkId: 'bsc', primaryId: 'Department', secondaryId: 'None', kraMode: 'Pre-assigned by HR (locked)',
+  frameworkId: 'bsc',
   perspectives: [
-    { id: 1, name: 'Financial',          weight: 25, color: '#2563EB', objective: '' },
-    { id: 2, name: 'Customer',           weight: 25, color: '#16A34A', objective: '' },
-    { id: 3, name: 'Internal Processes', weight: 25, color: '#D97706', objective: '' },
-    { id: 4, name: 'Learning & Growth',  weight: 25, color: '#7C3AED', objective: '' },
+    { id: 1, name: 'Financial',          weight: 25, color: '#2563EB', selected: false },
+    { id: 2, name: 'Customer',           weight: 25, color: '#16A34A', selected: false },
+    { id: 3, name: 'Internal Processes', weight: 25, color: '#D97706', selected: false },
+    { id: 4, name: 'Learning & Growth',  weight: 25, color: '#7C3AED', selected: false },
   ],
+  perspectivesConfirmed: false,
+  lastDeletedPerspective: null,
   // Modules
   enabledModules: ['kpi', 'persp', 'goals', 'comp', 'quest', 'bell', 'showfinal', 'showself'],
   // Hierarchy
@@ -1472,27 +2223,23 @@ const INITIAL = {
   finalRatingOwner: 'Weighted average of all levels',
   // Scale
   scalePoints: 5, scaleDisplay: 'Number + label', ratingAppliesAt: 'KPI level — rolled up',
-  // Goals — library mode
-  goalLibraryMode: 'shared',
-  goalSegmentBy: 'Department',
-  goalSegmentFallback: 'merged',
-  goalPreFillDepth: 'kras-only',
-  // Goals — employee permissions
-  employeeCanAddGoals: true,
-  maxEmployeeAddedGoals: 2,
-  employeeGoalApproval: 'manager',
-  managerCanAddGoals: true,
-  managerApproveKRA: true,
-  // Goals — limits
-  kraLimitsPerAttribute: false,
-  minKRAs: 3,
-  maxKRAs: 6,
-  maxKPIsPerKRA: 4,
-  minKPIWeight: 5,
-  weightageOwnership: 'hr-fixed',
-  minKRAWeight: 5,
-  maxKRAWeight: 60,
-  // Goals — phase controls
+  // Goal creation flow
+  goalCreationMode: 'admin-library',   // 'admin-library' | 'employee-self'
+  goalLibraryScope: 'common',          // 'common' | 'by-attribute'
+  goalSegmentAttr: 'Department',
+  goalSegmentValues: [],               // [{ id, name }]
+  goalLimitEnabled: false,
+  goalLimitScope: 'common',            // 'common' | 'by-attribute'
+  goalLimitAttr: 'Department',
+  goalLimitValues: [],                 // [{ id, name, min, max }]
+  goalLimitMin: 3,
+  goalLimitMax: 8,
+  // Goals — legacy fields kept for non-BSC flows
+  goalLibraryMode: 'shared', goalSegmentBy: 'Department', goalSegmentFallback: 'merged', goalPreFillDepth: 'kras-only',
+  employeeCanAddGoals: true, maxEmployeeAddedGoals: 2, employeeGoalApproval: 'manager',
+  managerCanAddGoals: true, managerApproveKRA: true,
+  kraLimitsPerAttribute: false, minKRAs: 3, maxKRAs: 6, maxKPIsPerKRA: 4,
+  minKPIWeight: 5, weightageOwnership: 'hr-fixed', minKRAWeight: 5, maxKRAWeight: 60,
   freezeGoalSetting: true, managerUnlockGoals: true, freezeSelfEval: true,
   hrReopenSelf: true, midYearRevision: false,
   // Targets
@@ -1511,11 +2258,26 @@ function isStepComplete(stepId, config) {
     case 'framework':
       return !!config.frameworkId;
     case 'perspectives': {
-      const total = config.perspectives.reduce((s, p) => s + (Number(p.weight) || 0), 0);
-      return total === 100 && config.perspectives.length > 0 && config.perspectives.every(p => (p.name || '').trim() !== '');
+      const activePerspectives = config.perspectives.filter((perspective) => !isPerspectiveRowEmpty(perspective));
+      const selectedPerspectives = activePerspectives.filter((perspective) => perspective.selected);
+      const total = selectedPerspectives.reduce((sum, perspective) => sum + (Number(perspective.weight) || 0), 0);
+      return (
+        config.perspectivesConfirmed &&
+        selectedPerspectives.length > 0 &&
+        total === 100 &&
+        activePerspectives.every((perspective) => isPerspectiveRowComplete(perspective) && perspective.selected)
+      );
     }
-    case 'goals':
-      return !!config.goalLibraryMode && !!config.goalPreFillDepth;
+    case 'goals': {
+      if (!config.goalCreationMode) return false;
+      if (config.goalCreationMode === 'admin-library') {
+        if (!config.goalLibraryScope) return false;
+        if (config.goalLibraryScope === 'by-attribute' && (config.goalSegmentValues || []).filter(v => v.name.trim()).length === 0) return false;
+      }
+      return true;
+    }
+    case 'upload':
+      return false;
     case 'limits':
       return config.minKRAs > 0 && config.maxKRAs >= config.minKRAs && !!config.weightageOwnership;
     case 'hierarchy':
@@ -1535,9 +2297,10 @@ function isStepComplete(stepId, config) {
 }
 
 export default function PMSWizard() {
-  const [step, setStep]       = useState(0);
-  const [config, setConfig]   = useState(INITIAL);
-  const [visited, setVisited] = useState(new Set());
+  const persistedState = useMemo(() => loadWizardState(), []);
+  const [step, setStep]       = useState(() => persistedState && typeof persistedState.step === 'number' ? persistedState.step : 0);
+  const [config, setConfig]   = useState(() => persistedState?.config ? { ...INITIAL, ...persistedState.config } : INITIAL);
+  const [visited, setVisited] = useState(() => new Set(Array.isArray(persistedState?.visited) ? persistedState.visited : []));
   const workspace = useMemo(() => getWorkspaceContext(), []);
 
   const navSteps = getNavSteps(config.frameworkId);
@@ -1552,17 +2315,11 @@ export default function PMSWizard() {
       const next = { ...prev, [key]: val };
       if (key === 'frameworkId') {
         next.enabledModules = syncEnabledModules(val, prev.enabledModules);
+        next.perspectivesConfirmed = false;
+        next.lastDeletedPerspective = null;
       }
-      // Changing KRA assignment mode pre-applies sensible defaults downstream
-      if (key === 'kraMode') {
-        const mode = KRA_ASSIGNMENT_MODES.find(m => m.id === val);
-        if (mode) Object.assign(next, mode.syncConfig);
-      }
-      // Primary identifier drives goal library segmentation
-      if (key === 'primaryId') {
-        next.goalSegmentBy = val;
-        // Clear secondary if it's now the same as primary
-        if (prev.secondaryId === val) next.secondaryId = 'None';
+      if (key === 'perspectives') {
+        next.perspectivesConfirmed = false;
       }
       return next;
     });
@@ -1573,6 +2330,7 @@ export default function PMSWizard() {
 
   // Next button: mark current step as visited, then advance
   function next() {
+    if (navSteps[step]?.id === 'perspectives' && !isStepComplete('perspectives', config)) return;
     if (step < totalSteps - 1) {
       setVisited(prev => { const s = new Set(prev); s.add(step); return s; });
       setStep(step + 1);
@@ -1581,32 +2339,51 @@ export default function PMSWizard() {
   function back() { if (step > 0) setStep(step - 1); }
 
   const stepComponents = (() => {
-    const comps = [
-      <StepFramework config={config} update={update} />,
-    ];
     if (config.frameworkId === 'bsc') {
-      comps.push(<StepPerspectives config={config} update={update} />);
+      return [
+        <StepFramework      key="framework"    config={config} update={update} />,
+        <StepPerspectives   key="perspectives" config={config} update={update} />,
+        <StepGoalLibrary    key="goals"        config={config} update={update} />,
+        <StepEmployeeUpload key="upload"       config={config} update={update} />,
+      ];
     }
-    comps.push(
-      <StepGoalLibrary  config={config} update={update} />,
-      <StepLimitsRules  config={config} update={update} />,
-      <StepHierarchy    config={config} update={update} />,
-      <StepScale        config={config} update={update} />,
-    );
+    const comps = [
+      <StepFramework   key="framework" config={config} update={update} />,
+      <StepGoalLibrary key="goals"     config={config} update={update} />,
+      <StepLimitsRules key="limits"    config={config} update={update} />,
+      <StepHierarchy   key="hierarchy" config={config} update={update} />,
+      <StepScale       key="scale"     config={config} update={update} />,
+    ];
     if (config.frameworkId !== 'kra') {
-      comps.push(<StepTargets config={config} update={update} />);
+      comps.push(<StepTargets key="targets" config={config} update={update} />);
     }
     comps.push(
-      <StepCompetencies config={config} update={update} />,
-      <StepBellCurve    config={config} update={update} />,
-      <StepPhases       config={config} update={update} />,
-      <StepExport />,
+      <StepCompetencies key="competencies" config={config} update={update} />,
+      <StepBellCurve    key="bellcurve"    config={config} update={update} />,
+      <StepPhases       key="phases"       config={config} update={update} />,
+      <StepExport       key="export" />,
     );
     return comps;
   })();
 
   const completedCount = navSteps.filter((s, i) => visited.has(i) && isStepComplete(s.id, config)).length;
   const pct = Math.round((completedCount / totalSteps) * 100);
+  const currentStepId = navSteps[step]?.id;
+  const canProceed = currentStepId === 'perspectives' ? isStepComplete('perspectives', config) : true;
+
+  useEffect(() => {
+    const normalizedStep = Math.min(step, Math.max(navSteps.length - 1, 0));
+    if (normalizedStep !== step) {
+      setStep(normalizedStep);
+      return;
+    }
+
+    saveWizardState(workspace.orgKey, {
+      step: normalizedStep,
+      config,
+      visited: [...visited],
+    });
+  }, [config, navSteps.length, step, visited, workspace.orgKey]);
 
   return (
     <div style={{ display: 'flex', minHeight: '100vh', fontFamily: "'Geist','Inter','Segoe UI',Arial,sans-serif", fontSize: 14, color: '#0D1117', background: '#F8FAFC' }}>
@@ -1751,7 +2528,7 @@ export default function PMSWizard() {
                 ← Back
               </button>
             )}
-            <button onClick={next} style={{ padding: '9px 22px', background: step === totalSteps - 1 ? '#16A34A' : '#2563EB', color: '#fff', border: 'none', borderRadius: 9, fontSize: 13.5, fontWeight: 600, cursor: 'pointer', fontFamily: 'inherit' }}>
+            <button onClick={next} disabled={!canProceed} style={{ padding: '9px 22px', background: !canProceed ? '#CBD5E1' : step === totalSteps - 1 ? '#16A34A' : '#2563EB', color: '#fff', border: 'none', borderRadius: 9, fontSize: 13.5, fontWeight: 600, cursor: !canProceed ? 'not-allowed' : 'pointer', fontFamily: 'inherit' }}>
               {step === totalSteps - 1 ? '🚀 Launch' : `Next: ${navSteps[step + 1]?.label || ''} →`}
             </button>
           </div>
