@@ -1,20 +1,26 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import zaroLogo from '../images/final zaro logo.png';
-import { downloadGoalLibraryTemplate, parseGoalLibraryXlsx, downloadEmployeeTemplate, parseEmployeeXlsx, validateGoalLibraryData, downloadErrorReport, goalLibraryTemplateMeta, employeeTemplateMeta, validateEmployeeData } from './templateUtils';
+import { downloadGoalLibraryTemplate, parseGoalLibraryXlsx, downloadEmployeeTemplate, parseEmployeeXlsx, validateGoalLibraryData, downloadErrorReport, goalLibraryTemplateMeta, employeeTemplateMeta, validateEmployeeData, downloadAttributeValuesTemplate, parseAttributeValuesXlsx, downloadGoalLibraryBulkTemplate, parseGoalLibraryBulkXlsx } from './templateUtils';
 
 /* ─── CONSTANTS ──────────────────────────────────────────────────────────── */
 function getNavSteps(config) {
   const frameworkId = typeof config === 'string' ? config : config?.frameworkId;
-  const hasLibrary  = typeof config === 'object' && config?.goalCreationMode === 'admin-library';
+  const hasLibrary  = typeof config === 'object' && (
+    config.goalGroups?.length > 0
+      ? groupsNeedingDataUpload(config).length > 0
+      : config?.goalCreationMode === 'admin-library'
+  );
   if (frameworkId === 'bsc') {
     const steps = [
-      { id: 'framework',    label: 'Performance Framework', desc: 'Choose framework' },
-      { id: 'perspectives', label: 'BSC Perspectives',      desc: 'Strategy layers & weights' },
-      { id: 'goals',        label: 'Goal Library',           desc: 'How goals are created' },
+      { id: 'framework',      label: 'Performance Framework', desc: 'Choose framework' },
+      { id: 'perspectives',   label: 'BSC Perspectives',      desc: 'Strategy layers & weights' },
+      { id: 'groups',         label: 'Groups & Strategy',     desc: 'Who gets what goal approach' },
+      { id: 'goal_libraries', label: 'Goal Libraries',        desc: 'Build or upload KRA libraries' },
+      { id: 'limits',         label: 'Goal Limits',           desc: 'KRA/KPI count & weight rules' },
+      { id: 'emp_settings',   label: 'Employee Settings',     desc: 'Code format & manager hierarchy' },
+      { id: 'upload',         label: 'Employee Upload',       desc: 'Upload employees & managers' },
+      { id: 'summary',        label: 'Summary & Launch',      desc: 'Review & go live' },
     ];
-    if (hasLibrary) steps.push({ id: 'kra_library', label: 'KRA Library',  desc: 'Build & upload goal library' });
-    steps.push({ id: 'emp_settings', label: 'Employee Settings', desc: 'Code format & manager hierarchy' });
-    steps.push({ id: 'upload', label: 'Employee Upload', desc: 'Upload employees & managers' });
     return steps;
   }
   const steps = [
@@ -277,6 +283,74 @@ function getEmployeeUploadMessage(result) {
 function isGoalLibraryValid(config) {
   if (!config.goalLibraryData) return false;
   return validateGoalLibraryData(config.goalLibraryData, config).length === 0;
+}
+
+/* ─── NEW GOAL GROUPS VALIDATION ─────────────────────────────────────────── */
+
+function isGoalGroupsValid(config) {
+  const groups = config.goalGroups;
+  if (!groups || groups.length === 0) return false;
+  // Each group must have at least one mode
+  if (!groups.every(g => g.modes && g.modes.length > 0)) return false;
+  // By-group strategy: groups (except the last "default" group) must have segmentValues
+  if (config.goalGroupStrategy === 'by-group' && groups.length > 1) {
+    const nonDefault = groups.slice(0, -1);
+    if (!nonDefault.every(g => g.segmentValues && g.segmentValues.length > 0)) return false;
+  }
+  return true;
+}
+
+function getGoalGroupsSnapshot(config) {
+  return JSON.stringify({
+    strategy: config.goalGroupStrategy || 'uniform',
+    groupAttr: config.goalGroupAttr || 'Department',
+    groups: (config.goalGroups || []).map(g => ({
+      id: g.id,
+      name: g.name,
+      segmentValues: [...(g.segmentValues || [])].sort(),
+      modes: [...(g.modes || [])].sort(),
+      prefillEditability: g.modes?.includes('prefill') ? (g.prefillEditability || 'add-kpis') : null,
+      goalLimitsEnabled: !!g.goalLimitsEnabled,
+      goalMin: g.goalLimitsEnabled ? (g.goalMin || 3) : null,
+      goalMax: g.goalLimitsEnabled ? (g.goalMax || 8) : null,
+      kraWeightsEnabled: g.kraWeightsEnabled !== false,
+      kpiWeightsEnabled: !!g.kpiWeightsEnabled,
+    })),
+  });
+}
+
+function getNewGroupsSnapshot(config) {
+  return JSON.stringify({
+    groups: (config.goalGroups || []).map(g => ({
+      id: g.id,
+      name: g.name,
+      segmentAttr: g.segmentAttr || null,
+      segmentValues: [...(g.segmentValues || [])].sort(),
+      mode: g.mode || 'scratch',
+      hasLibrary: !!g.hasLibrary,
+      libraryId: g.libraryId || null,
+      libraryAssignments: (g.libraryAssignments || [])
+        .map(a => ({ slotKey: a.slotKey, label: a.label, libraryId: a.libraryId || null }))
+        .sort((a, b) => String(a.slotKey).localeCompare(String(b.slotKey))),
+      prefillEditability: g.mode === 'prefill' ? (g.prefillEditability || 'add-kpis') : null,
+    })),
+  });
+}
+
+function groupsNeedingDataUpload(config) {
+  return (config.goalGroups || []).filter(g =>
+    g.modes?.includes('prefill') || g.modes?.includes('library')
+  );
+}
+
+function isGoalGroupDataValid(config) {
+  const needsData = groupsNeedingDataUpload(config);
+  if (needsData.length === 0) return true;
+  return needsData.every(g => {
+    if (g.modes?.includes('prefill') && (!g.prefillData || g.prefillData.length === 0)) return false;
+    if (g.modes?.includes('library') && (!g.libraryData || g.libraryData.length === 0)) return false;
+    return true;
+  });
 }
 
 function getFrameworkSnapshot(config) {
@@ -914,7 +988,7 @@ function StepPerspectives({ config, update }) {
   const [cleanupMessage, setCleanupMessage] = useState('');
   const isLocked = !!config.perspectivesConfirmed;
   const deletedPerspective = config.lastDeletedPerspective;
-  const activePerspectives = config.perspectives.filter((perspective) => !isPerspectiveRowEmpty(perspective));
+  const activePerspectives = (config.perspectives || []).filter((perspective) => !isPerspectiveRowEmpty(perspective));
   const incompletePerspective = activePerspectives.find((perspective) => !isPerspectiveRowComplete(perspective));
   const total = activePerspectives.reduce((s, p) => s + (Number(p.weight) || 0), 0);
   const isValid = activePerspectives.length > 0 && total === 100 && !incompletePerspective;
@@ -925,7 +999,7 @@ function StepPerspectives({ config, update }) {
     setReviewOpen(false);
     setReviewMessage('');
     setCleanupMessage('');
-    update('perspectives', config.perspectives.map((x, j) => {
+    update('perspectives', (config.perspectives || []).map((x, j) => {
       if (j !== index) return x;
       const next = { ...x, [field]: value };
       if (field === 'nameOption') {
@@ -945,7 +1019,7 @@ function StepPerspectives({ config, update }) {
 
   function isOptionTakenByOtherSelectedPerspective(index, option) {
     const normalizedOption = normalizePerspectiveName(option);
-    return config.perspectives.some((perspective, perspectiveIndex) => (
+    return (config.perspectives || []).some((perspective, perspectiveIndex) => (
       perspectiveIndex !== index &&
       normalizePerspectiveName(getPerspectiveDisplayName(perspective)) === normalizedOption
     ));
@@ -1107,8 +1181,8 @@ function StepPerspectives({ config, update }) {
             <div style={{ fontSize: 10.5, fontWeight: 700, color: '#9CA3AF', textTransform: 'uppercase', letterSpacing: '0.06em' }}>Weight</div>
             <div />
           </div>
-          {config.perspectives.map((p, i) => (
-            <div key={p.id} style={{ display: 'grid', gridTemplateColumns: '14px 1fr 90px 28px', gap: '8px 12px', alignItems: 'center', padding: '10px 0', borderBottom: i < config.perspectives.length - 1 ? '1px solid #F1F3F5' : 'none' }}>
+          {(config.perspectives || []).map((p, i) => (
+            <div key={p.id} style={{ display: 'grid', gridTemplateColumns: '14px 1fr 90px 28px', gap: '8px 12px', alignItems: 'center', padding: '10px 0', borderBottom: i < (config.perspectives || []).length - 1 ? '1px solid #F1F3F5' : 'none' }}>
               <div style={{ width: 14, height: 14, borderRadius: '50%', background: p.color || PERSPECTIVE_COLORS[i % PERSPECTIVE_COLORS.length], flexShrink: 0 }} />
               <div style={{ display: 'grid', gap: 8 }}>
                 <select
@@ -1149,7 +1223,7 @@ function StepPerspectives({ config, update }) {
                 />
                 <span style={{ fontSize: 12, color: '#9CA3AF', flexShrink: 0 }}>%</span>
               </div>
-              {config.perspectives.length > 1 ? (
+              {(config.perspectives || []).length > 1 ? (
                 <button
                   onClick={() => deletePerspective(i)}
                   disabled={isLocked}
@@ -1230,10 +1304,12 @@ function StepPerspectives({ config, update }) {
           ) : null}
         </CardBody>
       </Card>
-      <div style={{ marginTop: 18, padding: '14px 16px', borderRadius: 10, background: perspectivesApplied ? '#F0FDF4' : isValid ? '#EFF6FF' : '#FFF7ED', border: `1.5px solid ${perspectivesApplied ? '#86EFAC' : isValid ? '#BFDBFE' : '#FED7AA'}`, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16 }}>
-        <div style={{ fontSize: 13, color: perspectivesApplied ? '#15803D' : isValid ? '#1E40AF' : '#92400E' }}>
+      <div style={{ marginTop: 18, padding: '14px 16px', borderRadius: 10, background: perspectivesApplied ? '#F0FDF4' : reviewOpen ? '#EFF6FF' : isValid ? '#EFF6FF' : '#FFF7ED', border: `1.5px solid ${perspectivesApplied ? '#86EFAC' : reviewOpen ? '#BFDBFE' : isValid ? '#BFDBFE' : '#FED7AA'}`, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16 }}>
+        <div style={{ fontSize: 13, color: perspectivesApplied ? '#15803D' : reviewOpen ? '#1E40AF' : isValid ? '#1E40AF' : '#92400E' }}>
           {perspectivesApplied
             ? 'Perspective structure confirmed — make changes above to reconfigure.'
+            : reviewOpen
+              ? 'Final perspective set is ready. Lock it above to continue.'
             : isValid
               ? 'Review the perspective structure above, then apply changes to continue.'
               : 'Complete and balance the perspective structure above before applying changes.'}
@@ -1248,7 +1324,7 @@ function StepPerspectives({ config, update }) {
               Unlock structure
             </button>
           ) : null}
-          {!perspectivesApplied ? (
+          {!perspectivesApplied && !reviewOpen ? (
             <button
               type="button"
               disabled={!isValid || isLocked}
@@ -1279,9 +1355,9 @@ function StepModules({ config, update }) {
   const toggle = (id) => {
     const moduleState = getFrameworkModuleState(config.frameworkId, id);
     if (moduleState.forcedOn || moduleState.forcedOff) return;
-    const next = config.enabledModules.includes(id)
-      ? config.enabledModules.filter(m => m !== id)
-      : [...config.enabledModules, id];
+    const next = (config.enabledModules || []).includes(id)
+      ? (config.enabledModules || []).filter(m => m !== id)
+      : [...(config.enabledModules || []), id];
     update('enabledModules', next);
   };
   return (
@@ -1298,7 +1374,7 @@ function StepModules({ config, update }) {
         <CardBody>
           {MODULES_LIST.map((m, i) => {
             const moduleState = getFrameworkModuleState(config.frameworkId, m.id);
-            const isOn = m.core || moduleState.forcedOn || config.enabledModules.includes(m.id);
+            const isOn = m.core || moduleState.forcedOn || (config.enabledModules || []).includes(m.id);
             const isDisabled = m.core || moduleState.forcedOn || moduleState.forcedOff;
             return (
               <div
@@ -1337,9 +1413,9 @@ function StepHierarchy({ config, update }) {
     { id: 'sub',   label: 'Subordinate feedback',      desc: 'Team members rate manager — managers only' },
   ];
   const toggle = (id) => {
-    const next = config.ratingLevels.includes(id)
-      ? config.ratingLevels.filter(l => l !== id)
-      : [...config.ratingLevels, id];
+    const next = (config.ratingLevels || []).includes(id)
+      ? (config.ratingLevels || []).filter(l => l !== id)
+      : [...(config.ratingLevels || []), id];
     update('ratingLevels', next);
   };
   return (
@@ -1358,7 +1434,7 @@ function StepHierarchy({ config, update }) {
                 <div style={{ fontSize: 13, fontWeight: 500 }}>{l.label}</div>
                 <div style={{ fontSize: 11.5, color: '#9CA3AF' }}>{l.desc}</div>
               </div>
-              <Toggle on={config.ratingLevels.includes(l.id)} onChange={() => toggle(l.id)} />
+              <Toggle on={(config.ratingLevels || []).includes(l.id)} onChange={() => toggle(l.id)} />
             </div>
           ))}
         </CardBody>
@@ -1772,6 +1848,285 @@ function SegmentValueInput({ attrKey, existingValues, onAdd }) {
   );
 }
 
+function AttributeSheetControls({ attrLabel, values, onImported }) {
+  const fileRef = useRef(null);
+  const wrapRef = useRef(null);
+  const [phase, setPhase] = useState('idle');
+  const [message, setMessage] = useState('');
+  const [open, setOpen] = useState(false);
+
+  useEffect(() => {
+    if (!open) return;
+
+    function handlePointerDown(event) {
+      if (wrapRef.current && !wrapRef.current.contains(event.target)) {
+        setOpen(false);
+      }
+    }
+
+    document.addEventListener('mousedown', handlePointerDown);
+    return () => document.removeEventListener('mousedown', handlePointerDown);
+  }, [open]);
+
+  async function handleDownload() {
+    setMessage('');
+    setPhase('idle');
+    await downloadAttributeValuesTemplate(attrLabel, values);
+  }
+
+  async function handleUpload(event) {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    setPhase('parsing');
+    setMessage('');
+    try {
+      const result = await parseAttributeValuesXlsx(file, attrLabel);
+      onImported(result.values);
+      setPhase('done');
+      setMessage(`${result.count} ${attrLabel.toLowerCase()} values imported.`);
+      setOpen(false);
+    } catch (err) {
+      setPhase('error');
+      setMessage(err?.message || 'Could not import values from the uploaded sheet.');
+    } finally {
+      event.target.value = '';
+    }
+  }
+
+  return (
+    <div ref={wrapRef} style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 6 }}>
+      <input
+        ref={fileRef}
+        type="file"
+        accept=".xlsx,.xls"
+        onChange={handleUpload}
+        style={{ display: 'none' }}
+      />
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+        <button
+          type="button"
+          onClick={() => setOpen(prev => !prev)}
+          style={{
+            fontSize: 12.5,
+            color: phase === 'parsing' ? '#94A3B8' : '#2563EB',
+            background: open ? '#FFFFFF' : '#F8FAFC',
+            border: '1px solid #D7E3F4',
+            borderRadius: 12,
+            padding: '7px 13px',
+            minWidth: 108,
+            cursor: 'pointer',
+            fontWeight: 700,
+            fontFamily: 'inherit',
+            transform: `translateX(${open ? -8 : 0}px)`,
+            transition: 'all .18s ease',
+            boxShadow: open ? '0 10px 24px rgba(15,23,42,.08)' : 'none',
+          }}
+        >
+          {phase === 'parsing' ? 'Uploading…' : 'Upload Sheet'}
+        </button>
+        <button
+          type="button"
+          onClick={handleDownload}
+          title="Download sheet"
+          aria-label="Download sheet"
+          style={{
+            width: open ? 34 : 0,
+            opacity: open ? 1 : 0,
+            overflow: 'hidden',
+            padding: open ? '7px 0' : '7px 0',
+            border: open ? '1px solid #D6E4FF' : '1px solid transparent',
+            background: '#FFFFFF',
+            color: '#2563EB',
+            borderRadius: 10,
+            cursor: open ? 'pointer' : 'default',
+            fontSize: 17,
+            lineHeight: 1,
+            transform: `translateX(${open ? 0 : -8}px)`,
+            transition: 'all .18s ease',
+            pointerEvents: open ? 'auto' : 'none',
+            boxShadow: open ? '0 4px 12px rgba(37,99,235,.10)' : 'none',
+            fontFamily: 'inherit',
+          }}
+        >
+          ⬇
+        </button>
+        <button
+          type="button"
+          onClick={() => fileRef.current?.click()}
+          title="Upload sheet"
+          aria-label="Upload sheet"
+          disabled={!open || phase === 'parsing'}
+          style={{
+            width: open ? 34 : 0,
+            opacity: open ? 1 : 0,
+            overflow: 'hidden',
+            padding: open ? '7px 0' : '7px 0',
+            border: open ? '1px solid #D6E4FF' : '1px solid transparent',
+            background: '#F8FBFF',
+            color: phase === 'parsing' ? '#94A3B8' : '#2563EB',
+            borderRadius: 10,
+            cursor: !open || phase === 'parsing' ? 'default' : 'pointer',
+            fontSize: 17,
+            lineHeight: 1,
+            transform: `translateX(${open ? 0 : -8}px)`,
+            transition: 'all .18s ease',
+            pointerEvents: open ? 'auto' : 'none',
+            boxShadow: open ? '0 4px 12px rgba(37,99,235,.10)' : 'none',
+            fontFamily: 'inherit',
+          }}
+        >
+          ⬆
+        </button>
+      </div>
+      {message ? (
+        <div style={{ fontSize: 11.5, color: phase === 'error' ? '#B91C1C' : '#64748B' }}>
+          {message}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function GoalLibrarySheetControls({ config, existingLibraries, onImported }) {
+  const fileRef = useRef(null);
+  const wrapRef = useRef(null);
+  const [phase, setPhase] = useState('idle');
+  const [message, setMessage] = useState('');
+  const [open, setOpen] = useState(false);
+
+  useEffect(() => {
+    if (!open) return;
+
+    function handlePointerDown(event) {
+      if (wrapRef.current && !wrapRef.current.contains(event.target)) {
+        setOpen(false);
+      }
+    }
+
+    document.addEventListener('mousedown', handlePointerDown);
+    return () => document.removeEventListener('mousedown', handlePointerDown);
+  }, [open]);
+
+  async function handleDownload() {
+    setMessage('');
+    setPhase('idle');
+    await downloadGoalLibraryBulkTemplate(config);
+  }
+
+  async function handleUpload(event) {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    setPhase('parsing');
+    setMessage('');
+    try {
+      const result = await parseGoalLibraryBulkXlsx(file);
+      const importedNames = new Set(
+        (result.libraries || []).map(library => String(library.name || '').trim().toLowerCase()).filter(Boolean)
+      );
+      const retained = (existingLibraries || []).filter(
+        library => !importedNames.has(String(library.name || '').trim().toLowerCase())
+      );
+      onImported([...retained, ...(result.libraries || [])]);
+      setPhase('done');
+      setMessage(`${result.count} librar${result.count === 1 ? 'y' : 'ies'} imported.`);
+      setOpen(false);
+    } catch (err) {
+      setPhase('error');
+      setMessage(err?.message || 'Could not import libraries from the uploaded sheet.');
+    } finally {
+      event.target.value = '';
+    }
+  }
+
+  return (
+    <div ref={wrapRef} style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 6 }}>
+      <input
+        ref={fileRef}
+        type="file"
+        accept=".xlsx,.xls"
+        onChange={handleUpload}
+        style={{ display: 'none' }}
+      />
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+        <button
+          type="button"
+          onClick={() => setOpen(prev => !prev)}
+          style={{
+            fontSize: 12.5,
+            color: phase === 'parsing' ? '#94A3B8' : '#2563EB',
+            background: open ? '#FFFFFF' : '#F8FBFF',
+            border: '1px solid #BFDBFE',
+            borderRadius: 10,
+            padding: '6px 12px',
+            minWidth: 108,
+            cursor: 'pointer',
+            fontWeight: 600,
+            fontFamily: 'inherit',
+            transform: `translateX(${open ? -8 : 0}px)`,
+            transition: 'all .18s ease',
+            boxShadow: open ? '0 6px 16px rgba(37,99,235,.10)' : 'none',
+          }}
+        >
+          {phase === 'parsing' ? 'Uploading…' : 'Upload Sheet'}
+        </button>
+        <button
+          type="button"
+          onClick={handleDownload}
+          title="Download sheet"
+          aria-label="Download sheet"
+          style={{
+            width: open ? 34 : 0,
+            opacity: open ? 1 : 0,
+            overflow: 'hidden',
+            padding: '7px 0',
+            border: open ? '1px solid #D7E3F4' : '1px solid transparent',
+            background: '#F8FAFC',
+            borderRadius: 12,
+            color: '#2563EB',
+            cursor: open ? 'pointer' : 'default',
+            transition: 'all .18s ease',
+            fontSize: 16,
+            fontWeight: 700,
+            lineHeight: 1,
+            boxShadow: open ? '0 8px 18px rgba(15,23,42,.08)' : 'none',
+          }}
+        >
+          ⬇
+        </button>
+        <button
+          type="button"
+          onClick={() => fileRef.current?.click()}
+          title="Upload sheet"
+          aria-label="Upload sheet"
+          style={{
+            width: open ? 34 : 0,
+            opacity: open ? 1 : 0,
+            overflow: 'hidden',
+            padding: '7px 0',
+            border: open ? '1px solid #D7E3F4' : '1px solid transparent',
+            background: '#F8FAFC',
+            borderRadius: 12,
+            color: '#2563EB',
+            cursor: open ? 'pointer' : 'default',
+            transition: 'all .18s ease',
+            fontSize: 16,
+            fontWeight: 700,
+            lineHeight: 1,
+            boxShadow: open ? '0 8px 18px rgba(15,23,42,.08)' : 'none',
+          }}
+        >
+          ⬆
+        </button>
+      </div>
+      {message ? (
+        <div style={{ fontSize: 12, color: phase === 'error' ? '#DC2626' : '#16A34A' }}>
+          {message}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function MagicText({ text }) {
   return (
     <span
@@ -2078,7 +2433,1481 @@ function ManualGoalEntry({ config, perspectives, update }) {
   );
 }
 
+/* ─────────────────────────────────────────────────────────────────────────────
+   GOAL CREATION STRATEGY STEP
+   New 3-mode system: prefill | library | free (can combine, per group)
+───────────────────────────────────────────────────────────────────────────── */
+
+const GOAL_MODES = [
+  {
+    id: 'free',
+    icon: '✏️',
+    title: 'Free Creation',
+    desc: 'Employee creates all goals from a blank canvas. No library or pre-fill.',
+    color: '#D97706',
+    bg: '#FFFBEB',
+    border: '#FDE68A',
+  },
+  {
+    id: 'library',
+    icon: '📚',
+    title: 'Reference Library',
+    desc: 'A browsable panel on the employee page. They drag-drop KRAs into their goal plan.',
+    color: '#7C3AED',
+    bg: '#F5F3FF',
+    border: '#DDD6FE',
+  },
+  {
+    id: 'prefill',
+    icon: '📋',
+    title: 'Pre-fill Goals',
+    desc: 'Admin assigns KRAs/KPIs that appear ready-made in the employee workspace.',
+    color: '#2563EB',
+    bg: '#EFF6FF',
+    border: '#BFDBFE',
+  },
+];
+
+const SEG_ATTRS = ['Company', 'Department', 'Grade', 'Band', 'Role', 'Location', 'Division', 'Business Unit'];
+
+function makeDefaultGroup(overrides = {}) {
+  return {
+    id: `grp_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+    name: 'All Employees',
+    segmentAttr: null,
+    segmentValues: [],
+    libraryAssignments: [],
+    modes: ['free'],
+    prefillData: [],
+    prefillEditability: 'add-kpis',
+    libraryData: [],
+    goalLimitsEnabled: false,
+    goalMin: 3,
+    goalMax: 8,
+    kraWeightsEnabled: true,
+    kpiWeightsEnabled: false,
+    ...overrides,
+  };
+}
+
+function GoalGroupCard({ group, index, isDefault, isOnlyGroup, segAttr, onUpdate, onDelete }) {
+  const hasPrefill = group.modes?.includes('prefill');
+  const hasLibrary = group.modes?.includes('library');
+  const needsDataUpload = hasPrefill || hasLibrary;
+
+  function toggleMode(modeId) {
+    const current = group.modes || [];
+    const next = current.includes(modeId) ? current.filter(m => m !== modeId) : [...current, modeId];
+    if (next.length === 0) return; // at least one mode required
+    onUpdate({ modes: next });
+  }
+
+  const S = { // shared styles
+    sectionTitle: { fontSize: 11, fontWeight: 700, color: '#64748B', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 10 },
+    input: { width: '100%', border: '1px solid #D1D5DB', borderRadius: 6, padding: '7px 10px', fontSize: 13, outline: 'none', boxSizing: 'border-box' },
+    row: { display: 'flex', gap: 10, alignItems: 'center' },
+    chip: (active, color) => ({
+      display: 'inline-flex', alignItems: 'center', gap: 5,
+      padding: '4px 10px', borderRadius: 20, fontSize: 11.5, fontWeight: 600, cursor: 'pointer', userSelect: 'none',
+      border: `1.5px solid ${active ? color : '#D1D5DB'}`,
+      background: active ? '#EFF6FF' : '#F9FAFB',
+      color: active ? color : '#6B7280',
+    }),
+    select: { border: '1px solid #D1D5DB', borderRadius: 6, padding: '7px 10px', fontSize: 13, outline: 'none', background: '#fff' },
+  };
+
+  return (
+    <div style={{ background: '#fff', border: '1.5px solid #E2E8F0', borderRadius: 12, marginBottom: 10, overflow: 'hidden' }}>
+      {/* Card header */}
+      <div style={{ padding: '14px 20px', borderBottom: '1px solid #F1F5F9', display: 'flex', alignItems: 'center', justifyContent: 'space-between', background: isDefault ? '#FAFBFF' : '#fff' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          <div style={{ width: 28, height: 28, borderRadius: 8, background: isDefault ? '#EFF6FF' : '#F1F5F9', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 14, fontWeight: 700, color: '#2563EB' }}>
+            {isDefault ? '★' : String(index + 1)}
+          </div>
+          <input
+            value={group.name}
+            onChange={e => onUpdate({ name: e.target.value })}
+            style={{ fontSize: 14, fontWeight: 700, color: '#111827', border: 'none', outline: 'none', background: 'transparent', padding: '2px 0', minWidth: 120 }}
+            placeholder="Group name"
+          />
+          {isDefault && <span style={{ fontSize: 11, color: '#9CA3AF', background: '#F1F5F9', padding: '2px 8px', borderRadius: 10 }}>Default — catches unmatched employees</span>}
+        </div>
+        {!isDefault && !isOnlyGroup && (
+          <button
+            type="button" onClick={onDelete}
+            style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#DC2626', fontSize: 13, padding: '4px 8px', borderRadius: 6, lineHeight: 1 }}
+          >✕ Remove</button>
+        )}
+      </div>
+
+      <div style={{ padding: '16px 20px' }}>
+        {/* Segment filter — shown for non-catch-all groups when multiple groups exist */}
+        {!isDefault && !isOnlyGroup && (
+          <div style={{ marginBottom: 16, padding: '12px 16px', background: '#F8FAFC', borderRadius: 8, border: '1px solid #E9EEF5' }}>
+            <div style={S.sectionTitle}>Select Employees By</div>
+            <div style={{ marginBottom: 10 }}>
+              <div style={{ fontSize: 11.5, color: '#6B7280', marginBottom: 6 }}>Attribute</div>
+              <SegmentAttributeInput
+                value={group.segmentAttr || ''}
+                onChange={v => onUpdate({ segmentAttr: v })}
+              />
+            </div>
+            <div>
+              <div style={{ fontSize: 11.5, color: '#6B7280', marginBottom: 6 }}>Values</div>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
+                {(group.segmentValues || []).map((v, i) => (
+                  <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 5, background: '#EFF4FF', border: '1.5px solid #BFCFFE', borderRadius: 8, padding: '4px 10px' }}>
+                    <span style={{ fontSize: 13, color: '#1e40af', fontWeight: 500 }}>{v}</span>
+                    <button
+                      type="button"
+                      onClick={() => onUpdate({ segmentValues: (group.segmentValues || []).filter((_, j) => j !== i) })}
+                      style={{ border: 'none', background: 'transparent', color: '#94A3B8', cursor: 'pointer', padding: 0, fontSize: 13, lineHeight: 1 }}
+                    >×</button>
+                  </div>
+                ))}
+                <SegmentValueInput
+                  attrKey={group.segmentAttr || 'Department'}
+                  existingValues={group.segmentValues || []}
+                  onAdd={v => onUpdate({ segmentValues: [...(group.segmentValues || []), v] })}
+                />
+              </div>
+            </div>
+            <div style={{ fontSize: 11.5, color: '#6B7280', marginTop: 8 }}>
+              Employees whose <strong>{group.segmentAttr || 'attribute'}</strong> matches these values will follow this group's configuration.
+            </div>
+          </div>
+        )}
+
+        {/* Mode selection */}
+        <div style={{ marginBottom: 16 }}>
+          <div style={S.sectionTitle}>Goal Creation Modes</div>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 10 }}>
+            {GOAL_MODES.map(mode => {
+              const active = group.modes?.includes(mode.id);
+              return (
+                <div
+                  key={mode.id}
+                  onClick={() => toggleMode(mode.id)}
+                  style={{
+                    padding: '12px 14px', borderRadius: 10, cursor: 'pointer', userSelect: 'none',
+                    border: `2px solid ${active ? mode.color : '#E2E8F0'}`,
+                    background: active ? mode.bg : '#FAFAFA',
+                    transition: 'all .12s',
+                  }}
+                >
+                  <div style={{ fontSize: 20, marginBottom: 4 }}>{mode.icon}</div>
+                  <div style={{ fontWeight: 700, fontSize: 13, color: active ? mode.color : '#374151', marginBottom: 3 }}>{mode.title}</div>
+                  <div style={{ fontSize: 11, color: '#6B7280', lineHeight: 1.4 }}>{mode.desc}</div>
+                  <div style={{ marginTop: 8 }}>
+                    <span style={S.chip(active, mode.color)}>{active ? '✓ Enabled' : '+ Enable'}</span>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+          {group.modes?.length === 0 && (
+            <div style={{ fontSize: 12, color: '#DC2626', marginTop: 6 }}>Select at least one mode.</div>
+          )}
+        </div>
+
+        {/* Data upload notice */}
+        {needsDataUpload && (
+          <div style={{ padding: '10px 14px', background: '#FFFBEB', border: '1px solid #FDE68A', borderRadius: 8, marginBottom: 14, fontSize: 12.5, color: '#92400E' }}>
+            📤 <strong>{hasPrefill && hasLibrary ? 'Pre-fill data + Library data' : hasPrefill ? 'Pre-fill data' : 'Library data'}</strong> will need to be uploaded in the next step (KRA Data Upload).
+          </div>
+        )}
+
+        {/* Pre-fill settings */}
+        {hasPrefill && (
+          <div style={{ padding: '12px 16px', background: '#EFF6FF', borderRadius: 8, marginBottom: 12, border: '1px solid #BFDBFE' }}>
+            <div style={S.sectionTitle}>Pre-fill Settings</div>
+            <div style={{ ...S.row, marginBottom: 10 }}>
+              <label style={{ fontSize: 13, color: '#374151', minWidth: 200 }}>Employees can edit pre-filled goals?</label>
+              <select
+                value={group.prefillEditability || 'add-kpis'}
+                onChange={e => onUpdate({ prefillEditability: e.target.value })}
+                style={S.select}
+              >
+                <option value="locked">🔒 Frozen — view and submit as-is</option>
+                <option value="add-kpis">✏️ Can add extra KPIs to existing KRAs</option>
+                <option value="edit-freely">🔓 Can freely edit and add anything</option>
+              </select>
+            </div>
+            {/* Library-as-reference note when goals are frozen */}
+            {(group.prefillEditability === 'locked' || !group.prefillEditability) && hasLibrary && (
+              <div style={{ padding: '8px 12px', background: '#F5F3FF', border: '1px solid #DDD6FE', borderRadius: 6, marginBottom: 10, fontSize: 12, color: '#6D28D9' }}>
+                📚 <strong>Goal Library will appear as a read-only reference panel</strong> — employees can browse and view KRAs from the library for context, but since goals are frozen, they cannot add from it.
+              </div>
+            )}
+            {(group.prefillEditability === 'add-kpis' || group.prefillEditability === 'edit-freely') && hasLibrary && (
+              <div style={{ padding: '8px 12px', background: '#F5F3FF', border: '1px solid #DDD6FE', borderRadius: 6, marginBottom: 10, fontSize: 12, color: '#6D28D9' }}>
+                📚 <strong>Goal Library will appear as an interactive panel</strong> — employees can browse and pull KRAs from it in addition to their pre-filled goals.
+              </div>
+            )}
+            <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, color: '#374151', cursor: 'pointer' }}>
+              <input type="checkbox" checked={!!group.kpiWeightsEnabled} onChange={e => onUpdate({ kpiWeightsEnabled: e.target.checked })} />
+              Include KPI weights in pre-filled data
+            </label>
+          </div>
+        )}
+
+        {/* Goal limits + weights */}
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+          {/* Goal limits */}
+          <div style={{ padding: '12px 16px', background: '#F8FAFC', borderRadius: 8, border: '1px solid #E9EEF5' }}>
+            <div style={S.sectionTitle}>Goal Count Limits</div>
+            <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, cursor: 'pointer', marginBottom: 8 }}>
+              <input type="checkbox" checked={!!group.goalLimitsEnabled} onChange={e => onUpdate({ goalLimitsEnabled: e.target.checked })} />
+              Set min / max KRA limits
+            </label>
+            {group.goalLimitsEnabled && (
+              <div style={{ ...S.row, gap: 16 }}>
+                <div>
+                  <div style={{ fontSize: 11.5, color: '#6B7280', marginBottom: 3 }}>Min KRAs</div>
+                  <input type="number" min={1} value={group.goalMin || 3} onChange={e => onUpdate({ goalMin: Math.max(1, Number(e.target.value)) })}
+                    style={{ ...S.input, width: 70 }} />
+                </div>
+                <div>
+                  <div style={{ fontSize: 11.5, color: '#6B7280', marginBottom: 3 }}>Max KRAs</div>
+                  <input type="number" min={1} value={group.goalMax || 8} onChange={e => onUpdate({ goalMax: Math.max(1, Number(e.target.value)) })}
+                    style={{ ...S.input, width: 70 }} />
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Weights */}
+          <div style={{ padding: '12px 16px', background: '#F8FAFC', borderRadius: 8, border: '1px solid #E9EEF5' }}>
+            <div style={S.sectionTitle}>Weightage</div>
+            <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, cursor: 'pointer', marginBottom: 8 }}>
+              <input type="checkbox" checked={group.kraWeightsEnabled !== false} onChange={e => onUpdate({ kraWeightsEnabled: e.target.checked })} />
+              KRA weights required
+            </label>
+            {!hasPrefill && (
+              <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, cursor: 'pointer' }}>
+                <input type="checkbox" checked={!!group.kpiWeightsEnabled} onChange={e => onUpdate({ kpiWeightsEnabled: e.target.checked })} />
+                KPI weights required
+              </label>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ─── STEP GROUPS ────────────────────────────────────────────────────────── */
+function GroupStrategyCard({ group, index, totalGroups, onUpdate, onDelete }) {
+  const isOnly = totalGroups === 1;
+  const hasNoFilter = !group.segmentAttr && !(group.segmentValues || []).length;
+  const S = {
+    sectionLabel: { fontSize: 11, fontWeight: 700, color: '#64748B', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 8 },
+  };
+
+  return (
+    <div style={{ background: '#fff', border: '1.5px solid #E2E8F0', borderRadius: 14, marginBottom: 12, overflow: 'hidden' }}>
+      {/* Header */}
+      <div style={{ padding: '14px 20px', borderBottom: '1px solid #F1F5F9', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          <div style={{ width: 30, height: 30, borderRadius: 9, background: '#F1F5F9', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 13, fontWeight: 700, color: '#2563EB' }}>
+            {index + 1}
+          </div>
+          <input
+            value={group.name}
+            onChange={e => onUpdate({ name: e.target.value })}
+            style={{ fontSize: 14, fontWeight: 700, color: '#111827', border: 'none', outline: 'none', background: 'transparent', padding: '2px 0', minWidth: 120, fontFamily: 'inherit' }}
+            placeholder="Group name"
+          />
+          {!isOnly && hasNoFilter && (
+            <span style={{ fontSize: 11, color: '#9CA3AF', background: '#F8FAFC', border: '1px solid #E2E8F0', padding: '2px 8px', borderRadius: 10 }}>Matches all unassigned employees</span>
+          )}
+        </div>
+        {!isOnly && (
+          <button type="button" onClick={onDelete} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#DC2626', fontSize: 12.5, padding: '4px 8px', borderRadius: 6, fontFamily: 'inherit' }}>
+            ✕ Remove
+          </button>
+        )}
+      </div>
+
+      <div style={{ padding: '16px 20px' }}>
+        {/* Segment filter — always visible, optional to fill */}
+        <div style={{ marginBottom: 16, padding: '12px 16px', background: '#F8FAFC', borderRadius: 8, border: '1px solid #E9EEF5' }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+            <div style={S.sectionLabel}>Select Employees By</div>
+            {hasNoFilter && <span style={{ fontSize: 11, color: '#9CA3AF', fontStyle: 'italic' }}>Leave blank to match all employees</span>}
+          </div>
+          <div style={{ marginBottom: 8 }}>
+            <SegmentAttributeInput value={group.segmentAttr || ''} onChange={v => onUpdate({ segmentAttr: v })} />
+          </div>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center' }}>
+            {(group.segmentValues || []).map((v, i) => (
+              <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 4, background: '#EFF4FF', border: '1.5px solid #BFCFFE', borderRadius: 8, padding: '3px 10px' }}>
+                <span style={{ fontSize: 12.5, color: '#1e40af', fontWeight: 500 }}>{v}</span>
+                <button type="button" onClick={() => onUpdate({ segmentValues: group.segmentValues.filter((_, j) => j !== i) })} style={{ border: 'none', background: 'transparent', color: '#94A3B8', cursor: 'pointer', padding: 0, fontSize: 13, lineHeight: 1, marginLeft: 2 }}>×</button>
+              </div>
+            ))}
+          </div>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', gap: 12, marginTop: 10, flexWrap: 'wrap' }}>
+            <SegmentValueInput
+              attrKey={group.segmentAttr || 'Department'}
+              existingValues={group.segmentValues || []}
+              onAdd={v => onUpdate({ segmentValues: [...(group.segmentValues || []), v] })}
+            />
+            <AttributeSheetControls
+              attrLabel={group.segmentAttr || 'Department'}
+              values={group.segmentValues || []}
+              onImported={(importedValues) => onUpdate({ segmentValues: importedValues })}
+            />
+          </div>
+          {group.segmentAttr && (group.segmentValues || []).length > 0 && (
+            <div style={{ fontSize: 11.5, color: '#9CA3AF', marginTop: 6 }}>
+              Employees where <strong style={{ color: '#374151' }}>{group.segmentAttr}</strong> = {group.segmentValues.join(', ')} land in this group.
+            </div>
+          )}
+        </div>
+
+        {/* Mode picker - 2 cards */}
+        <div style={{ marginBottom: 16 }}>
+          <div style={S.sectionLabel}>Goal Creation Mode</div>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+            {[
+              { id: 'scratch', icon: '✏️', title: 'Scratch', desc: 'Employee builds goals from a blank canvas.' },
+              { id: 'prefill', icon: '📋', title: 'Prefill',  desc: 'Admin pre-assigns KRAs that appear ready-made.' },
+            ].map(opt => {
+              const active = group.mode === opt.id;
+              return (
+                <div key={opt.id} onClick={() => onUpdate({ mode: opt.id })} style={{
+                  padding: '14px 16px', borderRadius: 10, cursor: 'pointer',
+                  border: `2px solid ${active ? '#2563EB' : '#E2E8F0'}`,
+                  background: active ? '#EFF6FF' : '#FAFAFA',
+                  transition: 'all .12s', userSelect: 'none',
+                }}>
+                  <div style={{ fontSize: 20, marginBottom: 5 }}>{opt.icon}</div>
+                  <div style={{ fontWeight: 700, fontSize: 13.5, color: active ? '#1D4ED8' : '#374151', marginBottom: 3 }}>{opt.title}</div>
+                  <div style={{ fontSize: 12, color: '#6B7280', lineHeight: 1.4 }}>{opt.desc}</div>
+                  {active && <div style={{ marginTop: 8, display: 'inline-block', fontSize: 11, color: '#2563EB', fontWeight: 700, background: '#DBEAFE', padding: '2px 8px', borderRadius: 20 }}>✓ Selected</div>}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* Prefill editability */}
+        {group.mode === 'prefill' && (
+          <div style={{ marginBottom: 16, padding: '12px 16px', background: '#F8FAFC', borderRadius: 8, border: '1px solid #E2E8F0' }}>
+            <div style={S.sectionLabel}>Employee Can Edit Pre-filled Goals?</div>
+            <div style={{ display: 'flex', gap: 8 }}>
+              {[
+                { id: 'locked',      label: '🔒 Locked',        sub: 'View only' },
+                { id: 'add-kpis',    label: '✏️ Add KPIs',      sub: 'Can add KPIs to KRAs' },
+                { id: 'edit-freely', label: '🔓 Edit Freely',   sub: 'Full control' },
+              ].map(opt => (
+                <button key={opt.id} type="button" onClick={() => onUpdate({ prefillEditability: opt.id })} style={{
+                  flex: 1, padding: '8px 10px', borderRadius: 8, cursor: 'pointer', textAlign: 'left',
+                  border: `1.5px solid ${group.prefillEditability === opt.id ? '#2563EB' : '#E2E8F0'}`,
+                  background: group.prefillEditability === opt.id ? '#EFF6FF' : '#fff',
+                  fontFamily: 'inherit',
+                }}>
+                  <div style={{ fontSize: 12.5, fontWeight: 600, color: group.prefillEditability === opt.id ? '#1D4ED8' : '#374151' }}>{opt.label}</div>
+                  <div style={{ fontSize: 11, color: '#9CA3AF', marginTop: 2 }}>{opt.sub}</div>
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Goal Library toggle */}
+        <label style={{ display: 'flex', alignItems: 'flex-start', gap: 12, cursor: 'pointer', padding: '12px 14px', background: '#F8FAFC', borderRadius: 8, border: `1.5px solid ${group.hasLibrary ? '#7C3AED' : '#E2E8F0'}`, userSelect: 'none', transition: 'border-color .15s' }}>
+          <input
+            type="checkbox"
+            checked={!!group.hasLibrary}
+            onChange={e => onUpdate({ hasLibrary: e.target.checked })}
+            style={{ width: 16, height: 16, accentColor: '#7C3AED', cursor: 'pointer', marginTop: 2, flexShrink: 0 }}
+          />
+          <div>
+            <div style={{ fontWeight: 600, fontSize: 13, color: '#374151' }}>📚 Include Goal Library</div>
+            <div style={{ fontSize: 12, color: '#6B7280', marginTop: 2, lineHeight: 1.5 }}>
+              {group.mode === 'prefill'
+                ? 'Adds a read-only reference panel alongside pre-filled goals. Employees can browse the library for context.'
+                : 'Adds a browsable side panel. Employees can pull KRAs from the library into their goal plan.'}
+            </div>
+          </div>
+        </label>
+      </div>
+    </div>
+  );
+}
+
+function StepGroups({ config, update }) {
+  const groups = config.goalGroups || [];
+
+  const isValid = groups.length > 0 && groups.every(g => g.mode);
+  const isApplied = isValid && config.goalGroupsAppliedSnapshot === getNewGroupsSnapshot(config);
+
+  function updateGroup(id, changes) {
+    update('goalGroups', groups.map(g => g.id === id ? { ...g, ...changes } : g));
+    update('goalGroupsAppliedSnapshot', null);
+  }
+
+  function removeGroup(id) {
+    update('goalGroups', groups.filter(g => g.id !== id));
+    update('goalGroupsAppliedSnapshot', null);
+  }
+
+  function addGroup() {
+    const newGroup = {
+      id: `grp_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`,
+      name: `Group ${groups.length + 1}`,
+      segmentAttr: '',
+      segmentValues: [],
+      libraryAssignments: [],
+      mode: 'scratch',
+      hasLibrary: false,
+      libraryId: null,
+      prefillEditability: 'add-kpis',
+    };
+    update('goalGroups', [...groups, newGroup]);
+    update('goalGroupsAppliedSnapshot', null);
+  }
+
+  return (
+    <div style={{ maxWidth: 820, margin: '0 auto', paddingBottom: 40 }}>
+      <div style={{ marginBottom: 28 }}>
+        <div style={{ fontSize: 11, fontWeight: 700, color: '#94A3B8', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 6 }}>Groups & Strategy</div>
+        <h2 style={{ margin: 0, fontSize: 22, fontWeight: 800, color: '#0F172A' }}>Who gets what goal approach?</h2>
+        <p style={{ margin: '8px 0 0', fontSize: 14, color: '#64748B', lineHeight: 1.6 }}>
+          Define employee groups and choose how each group will create goals. Use <strong>Company</strong> as the attribute if everyone follows the same approach.
+        </p>
+      </div>
+
+      {groups.map((group, idx) => (
+        <GroupStrategyCard
+          key={group.id}
+          group={group}
+          index={idx}
+          totalGroups={groups.length}
+          onUpdate={changes => updateGroup(group.id, changes)}
+          onDelete={() => removeGroup(group.id)}
+        />
+      ))}
+
+      <button type="button" onClick={addGroup} style={{
+        display: 'flex', alignItems: 'center', gap: 8,
+        padding: '11px 18px', border: '1.5px dashed #93C5FD', borderRadius: 10,
+        background: '#F0F7FF', color: '#2563EB', fontWeight: 600, fontSize: 13,
+        cursor: 'pointer', marginBottom: 24, width: '100%', justifyContent: 'center', fontFamily: 'inherit',
+      }}>
+        + Add Employee Group
+      </button>
+
+      <StepStatusBar
+        applied={isApplied}
+        valid={isValid}
+        appliedMessage="Groups confirmed — configure Goal Libraries next."
+        pendingMessage={groups.length === 0 ? 'Add at least one group.' : !groups.every(g => g.mode) ? 'Set a mode for every group.' : 'Review and confirm to proceed.'}
+        buttonLabel="Confirm Groups"
+        onApply={() => update('goalGroupsAppliedSnapshot', getNewGroupsSnapshot(config))}
+      />
+    </div>
+  );
+}
+
+/* ─── STEP GOAL LIBRARIES ────────────────────────────────────────────────── */
+const LIBRARY_BOARD_COLORS = [
+  { bar: '#2563EB', soft: '#EFF6FF', text: '#1D4ED8' },
+  { bar: '#7C3AED', soft: '#F5F3FF', text: '#6D28D9' },
+  { bar: '#16A34A', soft: '#F0FDF4', text: '#15803D' },
+  { bar: '#EA580C', soft: '#FFF7ED', text: '#C2410C' },
+  { bar: '#DC2626', soft: '#FEF2F2', text: '#B91C1C' },
+];
+
+const DEFAULT_LIBRARY_SLOT_KEY = '__default__';
+
+function getExpectedLibrarySlots(group) {
+  const values = [...new Set((group?.segmentValues || []).map(v => String(v || '').trim()).filter(Boolean))];
+  if (values.length === 0) {
+    return [{ slotKey: DEFAULT_LIBRARY_SLOT_KEY, label: group?.name || 'All Employees' }];
+  }
+  return values.map(value => ({ slotKey: value, label: value }));
+}
+
+function getGroupLibraryAssignments(group) {
+  const expected = getExpectedLibrarySlots(group);
+  const existing = group?.libraryAssignments || [];
+  return expected.map(slot => {
+    const match = existing.find(assignment => assignment.slotKey === slot.slotKey);
+    const fallbackLibraryId = expected.length === 1 ? (group?.libraryId || null) : null;
+    return {
+      ...slot,
+      libraryId: match?.libraryId ?? fallbackLibraryId,
+    };
+  });
+}
+
+function setGroupLibraryAssignments(groups, groupId, nextAssignments) {
+  return groups.map(group => {
+    if (group.id !== groupId) return group;
+    return {
+      ...group,
+      libraryAssignments: nextAssignments,
+      libraryId: nextAssignments.find(assignment => assignment.libraryId)?.libraryId || null,
+    };
+  });
+}
+
+function getGroupLibraryLabel(group) {
+  if (!group) return 'All groups';
+  const attr = group.segmentAttr || 'Company';
+  const values = (group.segmentValues || []).filter(Boolean);
+  if (values.length === 0) return group.name || 'All employees';
+  if (values.length === 1) return values[0];
+  return `${attr}: ${values[0]} +${values.length - 1}`;
+}
+
+function LibraryCard({ library, groupLabel, assignedText, accent, active = false, onSelect, onEdit, onDelete, selectionHint, empty = false }) {
+  const kraCount = (library.perspectives || []).reduce((sum, perspective) => sum + (perspective.kras || []).length, 0);
+  const kpiCount = (library.perspectives || []).reduce((sum, perspective) => (
+    sum + (perspective.kras || []).reduce((nested, kra) => nested + (kra.kpis || []).length, 0)
+  ), 0);
+
+  return (
+    <div style={{
+      background: '#fff',
+      border: `1px solid ${active ? accent.bar : '#E5E7EB'}`,
+      borderRadius: 28,
+      overflow: 'hidden',
+      boxShadow: active ? '0 18px 34px rgba(15,23,42,.08)' : '0 10px 24px rgba(15,23,42,.04)',
+      transition: 'all .18s ease',
+      cursor: onSelect ? 'pointer' : 'default',
+      minHeight: 250,
+      display: 'flex',
+      flexDirection: 'column',
+    }}>
+      <div onClick={onSelect} style={{ background: accent.soft, color: accent.text, padding: '14px 16px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, borderBottom: `1px solid ${active ? accent.bar : '#EEF2F7'}` }}>
+        <div style={{ fontSize: 13, fontWeight: 800, letterSpacing: '0.01em', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+          {groupLabel}
+        </div>
+        {assignedText ? (
+          <span style={{ fontSize: 11.5, fontWeight: 700, padding: '4px 10px', borderRadius: 999, background: '#FFFFFF', color: accent.text, border: '1px solid rgba(148,163,184,.18)' }}>
+            {assignedText}
+          </span>
+        ) : null}
+      </div>
+
+      <div onClick={onSelect} style={{ padding: '20px 20px 16px', display: 'flex', flex: 1, flexDirection: 'column', justifyContent: 'space-between' }}>
+        {empty ? (
+          <>
+            <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', flex: 1 }}>
+              <div style={{ width: 98, height: 98, borderRadius: '50%', border: '1.5px solid #D7E3F4', background: '#FFFFFF', display: 'flex', alignItems: 'center', justifyContent: 'center', color: accent.text, fontSize: 54, lineHeight: 1 }}>
+                +
+              </div>
+            </div>
+            <div style={{ display: 'flex', alignItems: 'flex-end', justifyContent: 'space-between', gap: 10 }}>
+              <div style={{ fontSize: 11.5, color: '#9CA3AF', lineHeight: 1.5, maxWidth: 150 }}>
+                {selectionHint || 'Create a library for this value'}
+              </div>
+              <button
+                type="button"
+                onClick={(event) => { event.stopPropagation(); onEdit?.(); }}
+                style={{
+                  padding: '8px 16px',
+                  borderRadius: 14,
+                  border: '1px solid #D6E4FF',
+                  background: '#F8FAFC',
+                  color: '#2563EB',
+                  fontWeight: 700,
+                  fontSize: 13,
+                  cursor: 'pointer',
+                  fontFamily: 'inherit',
+                }}
+              >
+                Create
+              </button>
+            </div>
+          </>
+        ) : (
+          <>
+        <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12, marginBottom: 16 }}>
+          <div>
+            <div style={{ fontSize: 15, fontWeight: 800, color: '#111827', marginBottom: 6 }}>{library.name}</div>
+            <div style={{ fontSize: 12.5, color: '#6B7280', lineHeight: 1.5 }}>
+              {library.type === 'kra-kpi' ? 'KRA + KPI' : 'KRA only'} · {kraCount} KRAs · {kpiCount} KPIs
+            </div>
+          </div>
+          {onDelete ? (
+            <button
+              type="button"
+              onClick={(event) => { event.stopPropagation(); onDelete?.(); }}
+              style={{ border: 'none', background: 'transparent', color: '#DC2626', fontSize: 18, lineHeight: 1, cursor: 'pointer', padding: '2px 4px', fontFamily: 'inherit' }}
+            >
+              ×
+            </button>
+          ) : null}
+        </div>
+
+        <div style={{ display: 'flex', alignItems: 'flex-end', justifyContent: 'space-between', gap: 10, marginTop: 'auto' }}>
+          <div style={{ fontSize: 11.5, color: active ? accent.text : '#9CA3AF', lineHeight: 1.5, maxWidth: 150 }}>
+            {selectionHint || (active ? 'Currently assigned' : 'Click card to use it')}
+          </div>
+          <button
+            type="button"
+            onClick={(event) => { event.stopPropagation(); onEdit?.(); }}
+            style={{
+              padding: '8px 16px',
+              borderRadius: 14,
+              border: `1px solid ${active ? accent.bar : '#D6E4FF'}`,
+              background: active ? accent.soft : '#F8FAFC',
+              color: active ? accent.text : '#2563EB',
+              fontWeight: 700,
+              fontSize: 13,
+              cursor: 'pointer',
+              fontFamily: 'inherit',
+            }}
+          >
+            Edit
+          </button>
+        </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function AddLibraryModal({ config, initialLibrary = null, fixedName = '', onSave, onClose }) {
+  const defaultPersp = (config.perspectives || []).filter(p => p.name && p.weight).map(p => ({
+    id: `lp_${Date.now()}_${Math.random().toString(36).slice(2,5)}`,
+    name: p.name,
+    weight: p.weight,
+    kras: [],
+  }));
+
+  const seedPerspectives = initialLibrary?.perspectives?.length
+    ? initialLibrary.perspectives.map(perspective => ({
+        ...perspective,
+        kras: (perspective.kras || []).map(kra => ({
+          ...kra,
+          kpis: (kra.kpis || []).map(kpi => ({ ...kpi })),
+        })),
+      }))
+    : (defaultPersp.length > 0 ? defaultPersp : [
+        { id: `lp_${Date.now()}`, name: 'Financial', weight: 25, kras: [] },
+      ]);
+
+  const [name, setName] = useState(initialLibrary?.name || fixedName || '');
+  const [type, setType] = useState(initialLibrary?.type || 'kra-kpi');
+  const [weightType, setWeightType] = useState(initialLibrary?.weightType || 'suggested');
+  const [perspectives, setPerspectives] = useState(seedPerspectives);
+
+  function addKRA(perspId) {
+    setPerspectives(ps => ps.map(p => p.id === perspId ? {
+      ...p,
+      kras: [...(p.kras || []), { id: `kra_${Date.now()}_${Math.random().toString(36).slice(2,5)}`, name: '', desc: '', suggestedWeight: 0, kpis: [] }]
+    } : p));
+  }
+
+  function updateKRA(perspId, kraId, changes) {
+    setPerspectives(ps => ps.map(p => p.id === perspId ? {
+      ...p,
+      kras: p.kras.map(k => k.id === kraId ? { ...k, ...changes } : k)
+    } : p));
+  }
+
+  function removeKRA(perspId, kraId) {
+    setPerspectives(ps => ps.map(p => p.id === perspId ? { ...p, kras: p.kras.filter(k => k.id !== kraId) } : p));
+  }
+
+  function addKPI(perspId, kraId) {
+    setPerspectives(ps => ps.map(p => p.id === perspId ? {
+      ...p,
+      kras: p.kras.map(k => k.id === kraId ? {
+        ...k,
+        kpis: [...(k.kpis || []), { id: `kpi_${Date.now()}_${Math.random().toString(36).slice(2,5)}`, name: '', desc: '', weight: 0 }]
+      } : k)
+    } : p));
+  }
+
+  function updateKPI(perspId, kraId, kpiId, changes) {
+    setPerspectives(ps => ps.map(p => p.id === perspId ? {
+      ...p,
+      kras: p.kras.map(k => k.id === kraId ? {
+        ...k,
+        kpis: k.kpis.map(kp => kp.id === kpiId ? { ...kp, ...changes } : kp)
+      } : k)
+    } : p));
+  }
+
+  function removeKPI(perspId, kraId, kpiId) {
+    setPerspectives(ps => ps.map(p => p.id === perspId ? {
+      ...p,
+      kras: p.kras.map(k => k.id === kraId ? { ...k, kpis: k.kpis.filter(kp => kp.id !== kpiId) } : k)
+    } : p));
+  }
+
+  function addPerspective() {
+    setPerspectives(ps => [...ps, { id: `lp_${Date.now()}`, name: '', weight: 0, kras: [] }]);
+  }
+
+  const resolvedName = fixedName || name;
+  const canSave = resolvedName.trim() && perspectives.some(p => (p.kras || []).some(k => k.name.trim()));
+
+  const inputStyle = { border: '1px solid #E2E8F0', borderRadius: 6, padding: '6px 10px', fontSize: 13, outline: 'none', fontFamily: 'inherit', background: '#fff' };
+
+  return (
+    <div style={{ position: 'fixed', inset: 0, zIndex: 2000, background: 'rgba(0,0,0,0.4)', display: 'flex', alignItems: 'flex-start', justifyContent: 'center', padding: '40px 20px', overflowY: 'auto' }}>
+      <div style={{ background: '#fff', borderRadius: 16, width: '100%', maxWidth: 760, boxShadow: '0 20px 60px rgba(0,0,0,.18)', overflow: 'hidden' }}>
+        {/* Modal header */}
+        <div style={{ padding: '20px 24px', borderBottom: '1px solid #E9EDF2', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+          <div style={{ fontSize: 16, fontWeight: 700, color: '#0F172A' }}>{initialLibrary ? 'Edit Goal Library' : 'New Goal Library'}</div>
+          <button type="button" onClick={onClose} style={{ background: 'none', border: 'none', fontSize: 20, cursor: 'pointer', color: '#94A3B8', lineHeight: 1 }}>×</button>
+        </div>
+
+        <div style={{ padding: '24px', maxHeight: '70vh', overflowY: 'auto' }}>
+          {/* Name + type */}
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 14, marginBottom: 20 }}>
+            <div style={{ gridColumn: '1/-1' }}>
+              <label style={{ fontSize: 11.5, fontWeight: 600, color: '#64748B', display: 'block', marginBottom: 5 }}>Library Name *</label>
+              {fixedName ? (
+                <div style={{ ...inputStyle, width: '100%', boxSizing: 'border-box', background: '#F8FAFC', color: '#334155', fontWeight: 700 }}>
+                  {fixedName}
+                </div>
+              ) : (
+                <input value={name} onChange={e => setName(e.target.value)} placeholder="e.g. Engineering Goals 2025" style={{ ...inputStyle, width: '100%', boxSizing: 'border-box' }} />
+              )}
+            </div>
+            <div>
+              <label style={{ fontSize: 11.5, fontWeight: 600, color: '#64748B', display: 'block', marginBottom: 5 }}>Type</label>
+              <select value={type} onChange={e => setType(e.target.value)} style={{ ...inputStyle, width: '100%' }}>
+                <option value="kra-kpi">KRA + KPI</option>
+                <option value="kra-only">KRA only</option>
+              </select>
+            </div>
+            <div>
+              <label style={{ fontSize: 11.5, fontWeight: 600, color: '#64748B', display: 'block', marginBottom: 5 }}>Weights</label>
+              <select value={weightType} onChange={e => setWeightType(e.target.value)} style={{ ...inputStyle, width: '100%' }}>
+                <option value="suggested">Suggested (employee can adjust)</option>
+                <option value="fixed">Fixed (locked)</option>
+                <option value="none">None</option>
+              </select>
+            </div>
+          </div>
+
+          {/* Perspectives + KRAs */}
+          {perspectives.map((persp, pi) => (
+            <div key={persp.id} style={{ border: '1.5px solid #E2E8F0', borderRadius: 10, marginBottom: 14, overflow: 'hidden' }}>
+              <div style={{ padding: '10px 14px', background: '#F8FAFC', borderBottom: '1px solid #E9EDF2', display: 'flex', alignItems: 'center', gap: 10 }}>
+                <div style={{ width: 8, height: 8, borderRadius: '50%', background: '#2563EB', flexShrink: 0 }} />
+                <input value={persp.name} onChange={e => setPerspectives(ps => ps.map((p, i) => i === pi ? { ...p, name: e.target.value } : p))} placeholder="Perspective name" style={{ ...inputStyle, flex: 1, border: 'none', background: 'transparent', padding: '0', fontWeight: 600 }} />
+                <span style={{ fontSize: 12, color: '#9CA3AF' }}>Weight</span>
+                <input type="number" value={persp.weight || ''} onChange={e => setPerspectives(ps => ps.map((p, i) => i === pi ? { ...p, weight: Number(e.target.value) } : p))} style={{ ...inputStyle, width: 60, textAlign: 'center' }} placeholder="%" />
+                <span style={{ fontSize: 12, color: '#9CA3AF' }}>%</span>
+              </div>
+              <div style={{ padding: '10px 14px' }}>
+                {(persp.kras || []).map((kra) => (
+                  <div key={kra.id} style={{ marginBottom: 8, border: '1px solid #F1F5F9', borderRadius: 8, padding: '10px 12px' }}>
+                    <div style={{ display: 'flex', gap: 8, marginBottom: type === 'kra-kpi' ? 6 : 0 }}>
+                      <input value={kra.name} onChange={e => updateKRA(persp.id, kra.id, { name: e.target.value })} placeholder="KRA name" style={{ ...inputStyle, flex: 1 }} />
+                      {weightType !== 'none' && (
+                        <>
+                          <input type="number" value={kra.suggestedWeight || ''} onChange={e => updateKRA(persp.id, kra.id, { suggestedWeight: Number(e.target.value) })} style={{ ...inputStyle, width: 60, textAlign: 'center' }} placeholder="%" />
+                          <span style={{ fontSize: 12, color: '#9CA3AF', alignSelf: 'center' }}>%</span>
+                        </>
+                      )}
+                      <button type="button" onClick={() => removeKRA(persp.id, kra.id)} style={{ background: 'none', border: 'none', color: '#DC2626', cursor: 'pointer', fontSize: 16, lineHeight: 1, padding: '0 4px' }}>×</button>
+                    </div>
+                    {type === 'kra-kpi' && (
+                      <div style={{ paddingLeft: 16 }}>
+                        {(kra.kpis || []).map(kpi => (
+                          <div key={kpi.id} style={{ display: 'flex', gap: 8, marginBottom: 4, alignItems: 'center' }}>
+                            <div style={{ width: 4, height: 4, borderRadius: '50%', background: '#CBD5E1', flexShrink: 0 }} />
+                            <input value={kpi.name} onChange={e => updateKPI(persp.id, kra.id, kpi.id, { name: e.target.value })} placeholder="KPI name" style={{ ...inputStyle, flex: 1, fontSize: 12 }} />
+                            {weightType !== 'none' && (
+                              <>
+                                <input type="number" value={kpi.weight || ''} onChange={e => updateKPI(persp.id, kra.id, kpi.id, { weight: Number(e.target.value) })} style={{ ...inputStyle, width: 55, textAlign: 'center', fontSize: 12 }} placeholder="%" />
+                                <span style={{ fontSize: 12, color: '#9CA3AF' }}>%</span>
+                              </>
+                            )}
+                            <button type="button" onClick={() => removeKPI(persp.id, kra.id, kpi.id)} style={{ background: 'none', border: 'none', color: '#DC2626', cursor: 'pointer', fontSize: 14, lineHeight: 1 }}>×</button>
+                          </div>
+                        ))}
+                        <button type="button" onClick={() => addKPI(persp.id, kra.id)} style={{ fontSize: 11.5, color: '#7C3AED', background: 'none', border: 'none', cursor: 'pointer', padding: '2px 0 2px 6px', fontFamily: 'inherit' }}>+ Add KPI</button>
+                      </div>
+                    )}
+                  </div>
+                ))}
+                <button type="button" onClick={() => addKRA(persp.id)} style={{ fontSize: 12.5, color: '#2563EB', background: 'none', border: 'none', cursor: 'pointer', fontWeight: 600, padding: '4px 0', fontFamily: 'inherit' }}>+ Add KRA</button>
+              </div>
+            </div>
+          ))}
+
+          <button type="button" onClick={addPerspective} style={{ fontSize: 12.5, color: '#64748B', background: 'none', border: '1px dashed #CBD5E1', borderRadius: 7, cursor: 'pointer', padding: '6px 14px', fontFamily: 'inherit', width: '100%' }}>
+            + Add Perspective
+          </button>
+        </div>
+
+        <div style={{ padding: '16px 24px', borderTop: '1px solid #E9EDF2', display: 'flex', justifyContent: 'flex-end', gap: 10 }}>
+          <button type="button" onClick={onClose} style={{ padding: '9px 20px', border: '1px solid #E2E8F0', borderRadius: 8, background: '#fff', fontSize: 13, cursor: 'pointer', fontFamily: 'inherit' }}>Cancel</button>
+          <button type="button" disabled={!canSave} onClick={() => {
+            onSave({
+              id: initialLibrary?.id || `lib_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+              name: resolvedName.trim(),
+              type,
+              weightType,
+              perspectives,
+            });
+          }} style={{ padding: '9px 22px', background: canSave ? '#2563EB' : '#CBD5E1', color: '#fff', border: 'none', borderRadius: 8, fontSize: 13, fontWeight: 600, cursor: canSave ? 'pointer' : 'not-allowed', fontFamily: 'inherit' }}>
+            {initialLibrary ? 'Save Changes' : 'Save Library'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function StepGoalLibraries({ config, update }) {
+  const libraries = config.goalLibraries || [];
+  const groups = config.goalGroups || [];
+  const groupsNeedingLib = groups.filter(g => g.hasLibrary);
+  const [showAddModal, setShowAddModal] = useState(false);
+  const [editingLibraryId, setEditingLibraryId] = useState(null);
+  const [showAllGroups, setShowAllGroups] = useState(false);
+  const [selectedGroupId, setSelectedGroupId] = useState(groupsNeedingLib[0]?.id || '');
+  const [editingSlot, setEditingSlot] = useState(null);
+
+  const groupsWithAssignments = groupsNeedingLib.map(group => ({
+    ...group,
+    libraryAssignments: getGroupLibraryAssignments(group),
+  }));
+  const isValid = groupsWithAssignments.length === 0 || groupsWithAssignments.every(group =>
+    group.libraryAssignments.every(assignment => assignment.libraryId && libraries.some(library => library.id === assignment.libraryId))
+  );
+  const isApplied = !!config.goalLibrariesAppliedSnapshot && isValid;
+
+  useEffect(() => {
+    if (showAllGroups) return;
+    if (!groupsWithAssignments.some(group => group.id === selectedGroupId)) {
+      setSelectedGroupId(groupsWithAssignments[0]?.id || '');
+    }
+  }, [groupsWithAssignments, selectedGroupId, showAllGroups]);
+
+  const selectedGroup = groupsWithAssignments.find(group => group.id === selectedGroupId) || groupsWithAssignments[0] || null;
+  const selectedGroupIndex = Math.max(0, groupsWithAssignments.findIndex(group => group.id === selectedGroup?.id));
+  const editingLibrary = libraries.find(library => library.id === editingLibraryId) || null;
+  const boardSlots = (showAllGroups ? groupsWithAssignments : (selectedGroup ? [selectedGroup] : []))
+    .flatMap((group, groupIndex) =>
+      group.libraryAssignments.map((assignment, assignmentIndex) => ({
+        group,
+        assignment,
+        accent: LIBRARY_BOARD_COLORS[(groupIndex + assignmentIndex + Math.max(selectedGroupIndex, 0)) % LIBRARY_BOARD_COLORS.length],
+        library: libraries.find(library => library.id === assignment.libraryId) || null,
+      }))
+    );
+
+  function saveLibrary(lib) {
+    const exists = libraries.some(existing => existing.id === lib.id);
+    const nextLibraries = exists
+      ? libraries.map(existing => existing.id === lib.id ? lib : existing)
+      : [...libraries, lib];
+    update('goalLibraries', nextLibraries);
+    if (editingSlot) {
+      const currentAssignments = getGroupLibraryAssignments(editingSlot.group);
+      const nextAssignments = currentAssignments.map(assignment =>
+        assignment.slotKey === editingSlot.assignment.slotKey
+          ? { ...assignment, libraryId: lib.id }
+          : assignment
+      );
+      update('goalGroups', setGroupLibraryAssignments(groups, editingSlot.group.id, nextAssignments));
+    }
+    update('goalLibrariesAppliedSnapshot', null);
+    setShowAddModal(false);
+    setEditingLibraryId(null);
+    setEditingSlot(null);
+  }
+
+  function deleteLibrary(id) {
+    update('goalLibraries', libraries.filter(l => l.id !== id));
+    update('goalGroups', groups.map(group => ({
+      ...group,
+      libraryId: group.libraryId === id ? null : group.libraryId,
+      libraryAssignments: getGroupLibraryAssignments(group).map(assignment =>
+        assignment.libraryId === id ? { ...assignment, libraryId: null } : assignment
+      ),
+    })));
+    update('goalLibrariesAppliedSnapshot', null);
+  }
+
+  function openSlotEditor(group, assignment, libraryId = null) {
+    setEditingSlot({ group, assignment });
+    setEditingLibraryId(libraryId);
+    setShowAddModal(true);
+  }
+
+  function handleImportedLibraries(nextLibraries) {
+    let nextGroups = [...groups];
+    const libraryByName = new Map(
+      nextLibraries.map(library => [String(library.name || '').trim().toLowerCase(), library.id])
+    );
+
+    groupsWithAssignments.forEach(group => {
+      const nextAssignments = group.libraryAssignments.map(assignment => ({
+        ...assignment,
+        libraryId: assignment.libraryId || libraryByName.get(String(assignment.label || '').trim().toLowerCase()) || null,
+      }));
+      nextGroups = setGroupLibraryAssignments(nextGroups, group.id, nextAssignments);
+    });
+
+    update('goalLibraries', nextLibraries);
+    update('goalGroups', nextGroups);
+    update('goalLibrariesAppliedSnapshot', null);
+  }
+
+  return (
+    <div style={{ maxWidth: 1180, margin: '0 auto', paddingBottom: 40 }}>
+      {showAddModal && (
+        <AddLibraryModal
+          config={config}
+          initialLibrary={editingLibrary}
+          fixedName={editingSlot?.assignment?.label || ''}
+          onSave={saveLibrary}
+          onClose={() => {
+            setShowAddModal(false);
+            setEditingLibraryId(null);
+            setEditingSlot(null);
+          }}
+        />
+      )}
+
+      <div style={{ marginBottom: 28 }}>
+        <div style={{ fontSize: 11, fontWeight: 700, color: '#94A3B8', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 6 }}>Goal Libraries</div>
+        <h2 style={{ margin: 0, fontSize: 22, fontWeight: 800, color: '#0F172A' }}>Build your KRA libraries</h2>
+        <p style={{ margin: '8px 0 0', fontSize: 14, color: '#64748B', lineHeight: 1.6, maxWidth: 820 }}>
+          Each attribute value becomes its own goal-library card automatically. Switch groups on the right, then create or edit the library for each value.
+        </p>
+      </div>
+
+      <div style={{ background: 'linear-gradient(180deg, #FFFFFF 0%, #FCFDFE 100%)', border: '1px solid #E2E8F0', borderRadius: 34, padding: 30, marginBottom: 22, boxShadow: '0 20px 45px rgba(15,23,42,.05)' }}>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 220px', gap: 24, alignItems: 'stretch' }}>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: 18 }}>
+            {boardSlots.map((slot, index) => {
+              const { group, assignment, library } = slot;
+              const accent = slot.accent || LIBRARY_BOARD_COLORS[(selectedGroupIndex + index) % LIBRARY_BOARD_COLORS.length];
+              const groupLabel = group.segmentAttr ? `${group.segmentAttr}` : group.name;
+              return (
+                <LibraryCard
+                  key={`${group.id}:${assignment.slotKey}`}
+                  library={library || { name: assignment.label, type: 'kra-kpi', perspectives: [] }}
+                  groupLabel={assignment.label}
+                  assignedText={showAllGroups ? groupLabel : (library ? 'Configured' : 'Pending')}
+                  accent={accent}
+                  active={!!library}
+                  empty={!library}
+                  onSelect={() => openSlotEditor(group, assignment, library?.id || null)}
+                  onEdit={() => openSlotEditor(group, assignment, library?.id || null)}
+                  onDelete={library ? () => deleteLibrary(library.id) : null}
+                  selectionHint={
+                    library
+                      ? `${group.name}${group.segmentAttr ? ` · ${group.segmentAttr}` : ''}`
+                      : `Create library for ${assignment.label}`
+                  }
+                />
+              );
+            })}
+
+            {boardSlots.length === 0 && (
+              <div style={{ gridColumn: '1 / -1', minHeight: 220, borderRadius: 24, border: '1px dashed #D7E3F4', background: '#FAFCFF', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '24px 28px', textAlign: 'center' }}>
+                <div>
+                  <div style={{ fontSize: 15.5, fontWeight: 700, color: '#374151', marginBottom: 6 }}>No cards yet</div>
+                  <div style={{ fontSize: 13.5, color: '#94A3B8', lineHeight: 1.6 }}>
+                    Add employee values in Groups & Strategy first. Each value will appear here as a card automatically.
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+
+          <div style={{ display: 'flex', flexDirection: 'column', justifyContent: 'space-between', gap: 18 }}>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+              {groupsWithAssignments.map((group, index) => {
+                const active = !showAllGroups && selectedGroup?.id === group.id;
+                return (
+                  <button
+                    key={group.id}
+                    type="button"
+                    onClick={() => { setShowAllGroups(false); setSelectedGroupId(group.id); }}
+                    style={{
+                      borderRadius: 16,
+                      border: `1px solid ${active ? '#FCA5A5' : '#E2E8F0'}`,
+                      background: active ? '#FFF5F5' : '#FFFFFF',
+                      color: active ? '#DC2626' : '#334155',
+                      padding: '12px 16px',
+                      fontSize: 14,
+                      fontWeight: 700,
+                      cursor: 'pointer',
+                      fontFamily: 'inherit',
+                      boxShadow: active ? '0 10px 22px rgba(248,113,113,.08)' : 'none',
+                    }}
+                  >
+                    {group.name || `Group ${index + 1}`}
+                  </button>
+                );
+              })}
+
+              <button
+                type="button"
+                onClick={() => setShowAllGroups(true)}
+                style={{
+                  borderRadius: 16,
+                  border: `1px solid ${showAllGroups ? '#93C5FD' : '#E2E8F0'}`,
+                  background: showAllGroups ? '#EFF6FF' : '#FFFFFF',
+                  color: showAllGroups ? '#2563EB' : '#334155',
+                  padding: '12px 16px',
+                  fontSize: 14,
+                  fontWeight: 700,
+                  cursor: 'pointer',
+                  fontFamily: 'inherit',
+                  boxShadow: showAllGroups ? '0 10px 22px rgba(37,99,235,.08)' : 'none',
+                }}
+              >
+                View all
+              </button>
+            </div>
+
+            <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+              <GoalLibrarySheetControls
+                config={config}
+                existingLibraries={libraries}
+                onImported={handleImportedLibraries}
+              />
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <StepStatusBar
+        applied={isApplied}
+        valid={isValid}
+        appliedMessage="Libraries configured — proceed to Goal Limits."
+        pendingMessage={groupsWithAssignments.length > 0 && !isValid ? 'Open each card and configure a library for every attribute value.' : 'Click confirm to proceed.'}
+        buttonLabel="Confirm Libraries"
+        onApply={() => update('goalLibrariesAppliedSnapshot', `confirmed_${Date.now()}`)}
+      />
+    </div>
+  );
+}
+
+/* ─── STEP LIMITS (BSC) ──────────────────────────────────────────────────── */
+function LimitField({ label, value, onChange, placeholder }) {
+  return (
+    <div>
+      <div style={{ fontSize: 11, color: '#9CA3AF', marginBottom: 4 }}>{label}</div>
+      <input
+        type="number"
+        value={value ?? ''}
+        onChange={e => onChange(e.target.value === '' ? null : Number(e.target.value))}
+        placeholder={placeholder || '—'}
+        min={0}
+        style={{ width: '100%', border: '1px solid #E2E8F0', borderRadius: 6, padding: '7px 10px', fontSize: 13, outline: 'none', fontFamily: 'inherit', boxSizing: 'border-box' }}
+      />
+    </div>
+  );
+}
+
+function StepLimits({ config, update }) {
+  const enabled = !!config.limitsEnabled;
+  const groups = config.goalGroups || [];
+  const rules = config.limitsRules || [];
+  const hasKPIs = groups.some(g => g.mode === 'prefill') || (config.goalLibraries || []).some(l => l.type === 'kra-kpi');
+  const isApplied = !!config.limitsAppliedSnapshot;
+
+  function getRuleForGroup(groupId) {
+    return rules.find(r => r.groupId === groupId) || {};
+  }
+
+  function updateRule(groupId, changes) {
+    const existing = rules.find(r => r.groupId === groupId);
+    if (existing) {
+      update('limitsRules', rules.map(r => r.groupId === groupId ? { ...r, ...changes } : r));
+    } else {
+      update('limitsRules', [...rules, { groupId, ...changes }]);
+    }
+    update('limitsAppliedSnapshot', null);
+  }
+
+  return (
+    <div style={{ maxWidth: 820, margin: '0 auto', paddingBottom: 40 }}>
+      <div style={{ marginBottom: 28 }}>
+        <div style={{ fontSize: 11, fontWeight: 700, color: '#94A3B8', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 6 }}>Goal Limits</div>
+        <h2 style={{ margin: 0, fontSize: 22, fontWeight: 800, color: '#0F172A' }}>KRA/KPI count & weight rules</h2>
+        <p style={{ margin: '8px 0 0', fontSize: 14, color: '#64748B', lineHeight: 1.6 }}>
+          Optionally restrict how many KRAs/KPIs employees can set and what weight ranges are allowed.
+        </p>
+      </div>
+
+      {/* Master toggle */}
+      <div style={{ background: '#fff', border: `1.5px solid ${enabled ? '#2563EB' : '#E2E8F0'}`, borderRadius: 12, padding: '18px 22px', marginBottom: 22, transition: 'border-color .15s' }}>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 14, cursor: 'pointer', userSelect: 'none' }}>
+          <input type="checkbox" checked={enabled} onChange={e => { update('limitsEnabled', e.target.checked); update('limitsAppliedSnapshot', null); }} style={{ width: 18, height: 18, accentColor: '#2563EB', cursor: 'pointer', flexShrink: 0 }} />
+          <div>
+            <div style={{ fontSize: 14, fontWeight: 700, color: '#0F172A' }}>Enable Goal Limits</div>
+            <div style={{ fontSize: 12.5, color: '#6B7280', marginTop: 2 }}>Employees will be constrained by the rules you define per group. Leave blank = no limit on that dimension.</div>
+          </div>
+        </label>
+      </div>
+
+      {enabled && groups.map(group => {
+        const rule = getRuleForGroup(group.id);
+        return (
+          <div key={group.id} style={{ background: '#fff', border: '1.5px solid #E2E8F0', borderRadius: 12, marginBottom: 14, overflow: 'hidden' }}>
+            <div style={{ padding: '13px 20px', borderBottom: '1px solid #F1F5F9', background: '#FAFBFF', display: 'flex', alignItems: 'center', gap: 10 }}>
+              <div style={{ fontSize: 13, fontWeight: 700, color: '#0F172A' }}>{group.name}</div>
+              <span style={{ fontSize: 11.5, color: '#9CA3AF', background: '#F1F5F9', padding: '2px 8px', borderRadius: 10 }}>
+                {group.mode === 'prefill' ? '📋 Prefill' : '✏️ Scratch'}{group.hasLibrary ? ' + Library' : ''}
+              </span>
+            </div>
+            <div style={{ padding: '16px 20px' }}>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12, marginBottom: 14 }}>
+                <LimitField label="Min KRAs (total)" value={rule.minKRAs} onChange={v => updateRule(group.id, { minKRAs: v })} />
+                <LimitField label="Max KRAs (total)" value={rule.maxKRAs} onChange={v => updateRule(group.id, { maxKRAs: v })} />
+                <LimitField label="Min KRAs / Perspective" value={rule.minKRAsPerPersp} onChange={v => updateRule(group.id, { minKRAsPerPersp: v })} />
+                <LimitField label="Max KRAs / Perspective" value={rule.maxKRAsPerPersp} onChange={v => updateRule(group.id, { maxKRAsPerPersp: v })} />
+              </div>
+              {hasKPIs && (
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12, marginBottom: 14 }}>
+                  <LimitField label="Min KPIs / KRA" value={rule.minKPIsPerKRA} onChange={v => updateRule(group.id, { minKPIsPerKRA: v })} />
+                  <LimitField label="Max KPIs / KRA" value={rule.maxKPIsPerKRA} onChange={v => updateRule(group.id, { maxKPIsPerKRA: v })} />
+                </div>
+              )}
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12 }}>
+                <LimitField label="Min KRA weight %" value={rule.minKRAWeight} onChange={v => updateRule(group.id, { minKRAWeight: v })} />
+                <LimitField label="Max KRA weight %" value={rule.maxKRAWeight} onChange={v => updateRule(group.id, { maxKRAWeight: v })} />
+                {hasKPIs && <>
+                  <LimitField label="Min KPI weight %" value={rule.minKPIWeight} onChange={v => updateRule(group.id, { minKPIWeight: v })} />
+                  <LimitField label="Max KPI weight %" value={rule.maxKPIWeight} onChange={v => updateRule(group.id, { maxKPIWeight: v })} />
+                </>}
+              </div>
+            </div>
+          </div>
+        );
+      })}
+
+      <StepStatusBar
+        applied={isApplied}
+        valid={true}
+        appliedMessage={enabled ? "Limits confirmed." : "No limits — employees can set any number of KRAs."}
+        pendingMessage="Confirm limits to proceed."
+        buttonLabel="Confirm Limits"
+        onApply={() => update('limitsAppliedSnapshot', `confirmed_${Date.now()}`)}
+      />
+    </div>
+  );
+}
+
+/* ─── STEP SUMMARY ───────────────────────────────────────────────────────── */
+function StepSummary({ config, onLaunched }) {
+  const groups = config.goalGroups || [];
+  const libraries = config.goalLibraries || [];
+  const employees = config.employeeUploadData?.employees || [];
+  const perspectives = (config.perspectives || []).filter(p => p.name && p.weight);
+  const fw = FRAMEWORKS.find(f => f.id === config.frameworkId);
+
+  const groupSummary = groups.map(g => {
+    const assignments = getGroupLibraryAssignments(g);
+    const configuredAssignments = assignments
+      .map(assignment => ({
+        ...assignment,
+        library: libraries.find(library => library.id === assignment.libraryId) || null,
+      }))
+      .filter(assignment => assignment.library);
+    return { ...g, configuredAssignments, assignmentCount: assignments.length };
+  });
+
+  const warnings = [];
+  const groupsNeedingLib = groups.filter(g => g.hasLibrary && getGroupLibraryAssignments(g).some(assignment => !assignment.libraryId));
+  if (groupsNeedingLib.length > 0) warnings.push(`${groupsNeedingLib.length} group(s) have Goal Library enabled but no library assigned.`);
+  if (employees.length === 0) warnings.push('No employees uploaded yet.');
+
+  return (
+    <div style={{ maxWidth: 820, margin: '0 auto', paddingBottom: 60 }}>
+      <div style={{ marginBottom: 28 }}>
+        <div style={{ fontSize: 11, fontWeight: 700, color: '#94A3B8', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 6 }}>Final Step</div>
+        <h2 style={{ margin: 0, fontSize: 22, fontWeight: 800, color: '#0F172A' }}>Review & Launch</h2>
+        <p style={{ margin: '8px 0 0', fontSize: 14, color: '#64748B', lineHeight: 1.6 }}>Review your complete configuration before going live.</p>
+      </div>
+
+      {/* Framework */}
+      <div style={{ background: '#fff', border: '1.5px solid #E2E8F0', borderRadius: 12, padding: '18px 22px', marginBottom: 14 }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: perspectives.length > 0 ? 14 : 0 }}>
+          <div style={{ fontSize: 13, fontWeight: 700, color: '#0F172A' }}>Performance Framework</div>
+          <span style={{ fontSize: 13, fontWeight: 600, color: '#2563EB', background: '#EFF6FF', padding: '3px 12px', borderRadius: 20 }}>{fw?.name || config.frameworkId}</span>
+        </div>
+        {perspectives.length > 0 && (
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+            {perspectives.map((p, i) => (
+              <div key={i} style={{ padding: '5px 12px', borderRadius: 20, background: '#F8FAFC', border: '1px solid #E2E8F0', fontSize: 12 }}>
+                <span style={{ fontWeight: 600, color: '#374151' }}>{p.name}</span>
+                <span style={{ color: '#9CA3AF', marginLeft: 6 }}>{p.weight}%</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Groups */}
+      <div style={{ background: '#fff', border: '1.5px solid #E2E8F0', borderRadius: 12, padding: '18px 22px', marginBottom: 14 }}>
+        <div style={{ fontSize: 13, fontWeight: 700, color: '#0F172A', marginBottom: 14 }}>Employee Groups ({groups.length})</div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          {groupSummary.map(g => (
+            <div key={g.id} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '10px 14px', background: '#F8FAFC', borderRadius: 8, border: '1px solid #E9EDF2' }}>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontSize: 13, fontWeight: 600, color: '#374151' }}>{g.name}</div>
+                {g.segmentAttr && g.segmentValues?.length > 0 && (
+                  <div style={{ fontSize: 12, color: '#9CA3AF', marginTop: 2 }}>{g.segmentAttr}: {g.segmentValues.join(', ')}</div>
+                )}
+              </div>
+              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+                <span style={{ fontSize: 11.5, fontWeight: 600, padding: '3px 10px', borderRadius: 20, background: g.mode === 'prefill' ? '#EFF6FF' : '#FFFBEB', color: g.mode === 'prefill' ? '#2563EB' : '#D97706', border: `1px solid ${g.mode === 'prefill' ? '#BFDBFE' : '#FDE68A'}` }}>
+                  {g.mode === 'prefill' ? '📋 Prefill' : '✏️ Scratch'}
+                </span>
+                {g.hasLibrary && (
+                  <span style={{ fontSize: 11.5, fontWeight: 600, padding: '3px 10px', borderRadius: 20, background: '#F5F3FF', color: '#7C3AED', border: '1px solid #DDD6FE' }}>
+                    📚 {g.configuredAssignments.length}/{g.assignmentCount} configured
+                  </span>
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Libraries */}
+      {libraries.length > 0 && (
+        <div style={{ background: '#fff', border: '1.5px solid #E2E8F0', borderRadius: 12, padding: '18px 22px', marginBottom: 14 }}>
+          <div style={{ fontSize: 13, fontWeight: 700, color: '#0F172A', marginBottom: 12 }}>Goal Libraries ({libraries.length})</div>
+          <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+            {libraries.map(lib => {
+              const kraCount = (lib.perspectives || []).reduce((s, p) => s + (p.kras || []).length, 0);
+              return (
+                <div key={lib.id} style={{ padding: '10px 14px', background: '#F8FAFC', border: '1px solid #E9EDF2', borderRadius: 9 }}>
+                  <div style={{ fontSize: 13, fontWeight: 600, color: '#374151' }}>📚 {lib.name}</div>
+                  <div style={{ fontSize: 11.5, color: '#9CA3AF', marginTop: 2 }}>{kraCount} KRAs · {lib.type === 'kra-kpi' ? 'KRA+KPI' : 'KRA only'}</div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* Limits */}
+      <div style={{ background: '#fff', border: '1.5px solid #E2E8F0', borderRadius: 12, padding: '18px 22px', marginBottom: 14 }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+          <div style={{ fontSize: 13, fontWeight: 700, color: '#0F172A' }}>Goal Limits</div>
+          <span style={{ fontSize: 12.5, fontWeight: 600, color: config.limitsEnabled ? '#16A34A' : '#9CA3AF' }}>
+            {config.limitsEnabled ? '✓ Enabled' : 'Disabled'}
+          </span>
+        </div>
+      </div>
+
+      {/* Employees */}
+      <div style={{ background: '#fff', border: '1.5px solid #E2E8F0', borderRadius: 12, padding: '18px 22px', marginBottom: 20 }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+          <div style={{ fontSize: 13, fontWeight: 700, color: '#0F172A' }}>Employees</div>
+          <span style={{ fontSize: 20, fontWeight: 800, color: employees.length > 0 ? '#2563EB' : '#9CA3AF' }}>{employees.length}</span>
+        </div>
+      </div>
+
+      {/* Warnings */}
+      {warnings.length > 0 && (
+        <div style={{ background: '#FFFBEB', border: '1.5px solid #FDE68A', borderRadius: 10, padding: '14px 18px', marginBottom: 20 }}>
+          <div style={{ fontSize: 12.5, fontWeight: 700, color: '#92400E', marginBottom: 6 }}>⚠️ Warnings</div>
+          {warnings.map((w, i) => <div key={i} style={{ fontSize: 12.5, color: '#78350F', marginBottom: 3 }}>· {w}</div>)}
+        </div>
+      )}
+
+      {/* Launch */}
+      <div style={{ background: 'linear-gradient(135deg,#1E293B,#0F172A)', borderRadius: 14, padding: '28px 32px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+        <div>
+          <div style={{ fontSize: 16, fontWeight: 800, color: '#fff', marginBottom: 4 }}>Ready to go live?</div>
+          <div style={{ fontSize: 13, color: '#94A3B8' }}>This will activate the appraisal cycle for all employees.</div>
+        </div>
+        <button
+          type="button"
+          onClick={onLaunched}
+          style={{ padding: '12px 28px', background: '#16A34A', color: '#fff', border: 'none', borderRadius: 10, fontSize: 14, fontWeight: 700, cursor: 'pointer', fontFamily: 'inherit', boxShadow: '0 4px 14px rgba(22,163,74,.4)' }}
+        >
+          🚀 Launch Cycle
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function StepGoalLibrary({ config, update }) {
+  const groups   = config.goalGroups || [];
+  const strategy = config.goalGroupStrategy || 'uniform';
+  const segAttr  = config.goalGroupAttr || 'Department';
+
+  const isValid   = isGoalGroupsValid(config);
+  const isApplied = isValid && config.goalGroupsAppliedSnapshot === getGoalGroupsSnapshot(config);
+
+  function setStrategy(nextStrategy) {
+    update('goalGroupStrategy', nextStrategy);
+    if (nextStrategy === 'uniform') {
+      // Merge to single default group, preserving first group's settings
+      const first = groups[0] || {};
+      update('goalGroups', [makeDefaultGroup({
+        id: first.id || 'grp_default',
+        name: 'All Employees',
+        segmentAttr: null,
+        segmentValues: [],
+        modes: first.modes || ['free'],
+        prefillData: first.prefillData || [],
+        prefillEditability: first.prefillEditability || 'add-kpis',
+        libraryData: first.libraryData || [],
+        goalLimitsEnabled: first.goalLimitsEnabled || false,
+        goalMin: first.goalMin || 3,
+        goalMax: first.goalMax || 8,
+        kraWeightsEnabled: first.kraWeightsEnabled !== false,
+        kpiWeightsEnabled: first.kpiWeightsEnabled || false,
+      })]);
+    } else if (groups.length === 0) {
+      // Add default group
+      update('goalGroups', [makeDefaultGroup()]);
+    }
+  }
+
+  function updateGroup(id, changes) {
+    update('goalGroups', groups.map(g => g.id === id ? { ...g, ...changes } : g));
+    update('goalGroupsAppliedSnapshot', null); // mark as dirty
+  }
+
+  function removeGroup(id) {
+    update('goalGroups', groups.filter(g => g.id !== id));
+    update('goalGroupsAppliedSnapshot', null);
+  }
+
+  function addGroup() {
+    const last = groups[groups.length - 1];
+    const isLastDefault = !last?.segmentValues?.length;
+    const newGroup = makeDefaultGroup({
+      name: `Group ${groups.length}`,
+      segmentAttr: segAttr,
+      segmentValues: [],
+      modes: ['free'],
+    });
+    if (isLastDefault) {
+      // Insert before the default (last) group
+      update('goalGroups', [...groups.slice(0, -1), newGroup, last]);
+    } else {
+      update('goalGroups', [...groups, newGroup]);
+    }
+    update('goalGroupsAppliedSnapshot', null);
+  }
+
+  function applyConfig() {
+    // Compute legacy fields for backward compat
+    const hasAnyPrefill = groups.some(g => g.modes?.includes('prefill'));
+    const hasAnyLibrary = groups.some(g => g.modes?.includes('library'));
+    const hasAnyFree    = groups.some(g => g.modes?.includes('free'));
+
+    // Write legacy goalCreationMode so old code paths still work
+    if (hasAnyPrefill && !hasAnyFree && !hasAnyLibrary) {
+      update('goalCreationMode', 'admin-library');
+    } else if (!hasAnyPrefill && !hasAnyLibrary) {
+      update('goalCreationMode', 'employee-self');
+    } else {
+      update('goalCreationMode', 'mixed');
+    }
+
+    // Build legacy goalLibraryData from prefillData of the first/only group
+    if (hasAnyPrefill) {
+      const prefillGroups = groups.filter(g => g.modes?.includes('prefill'));
+      if (prefillGroups.length === 1) {
+        const g = prefillGroups[0];
+        update('goalLibraryData', { byAttr: false, attrLabel: null, data: g.prefillData || [] });
+      } else {
+        // Multiple prefill groups: build byAttr structure
+        const data = {};
+        prefillGroups.forEach(g => {
+          (g.segmentValues || []).forEach(v => { data[v] = g.prefillData || []; });
+        });
+        update('goalLibraryData', { byAttr: true, attrLabel: segAttr, data });
+      }
+    }
+
+    update('goalKpiMode', groups[0]?.kpiWeightsEnabled ? 'kra-kpi' : 'kra-only');
+    update('goalEmployeeEdit', groups[0]?.prefillEditability || 'add-kpis');
+    update('goalGroupsAppliedSnapshot', getGoalGroupsSnapshot(config));
+    update('goalsAppliedSnapshot', 'migrated-to-groups'); // mark old snapshot as done too
+  }
+
+  const needsDataCount = groupsNeedingDataUpload(config).length;
+
+  return (
+    <div style={{ maxWidth: 860, margin: '0 auto', paddingBottom: 40 }}>
+      {/* Page header */}
+      <div style={{ marginBottom: 24 }}>
+        <div style={{ fontSize: 12, fontWeight: 700, color: '#94A3B8', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 6 }}>Goals Step</div>
+        <h2 style={{ margin: 0, fontSize: 22, fontWeight: 800, color: '#0F172A' }}>Goal Creation Strategy</h2>
+        <p style={{ margin: '8px 0 0', fontSize: 14, color: '#64748B', lineHeight: 1.6 }}>
+          Define how employees create and manage their goals. You can mix and match three modes — and configure different groups of employees differently.
+        </p>
+      </div>
+
+      {/* Group cards */}
+      {groups.length === 0 && (
+        <div style={{ padding: '30px', textAlign: 'center', color: '#94A3B8', border: '1.5px dashed #E2E8F0', borderRadius: 12, marginBottom: 14 }}>
+          No groups configured. Click &quot;+ Add Group&quot; below.
+        </div>
+      )}
+      {groups.map((group, idx) => (
+        <GoalGroupCard
+          key={group.id}
+          group={group}
+          index={idx}
+          isDefault={groups.length > 1 && idx === groups.length - 1}
+          isOnlyGroup={groups.length === 1}
+          segAttr={segAttr}
+          onUpdate={changes => updateGroup(group.id, changes)}
+          onDelete={() => removeGroup(group.id)}
+        />
+      ))}
+
+      <button
+        type="button"
+        onClick={addGroup}
+        style={{
+          display: 'flex', alignItems: 'center', gap: 8,
+          padding: '10px 18px', border: '1.5px dashed #93C5FD', borderRadius: 8,
+          background: '#F0F7FF', color: '#2563EB', fontWeight: 600, fontSize: 13,
+          cursor: 'pointer', marginBottom: 20, width: '100%', justifyContent: 'center',
+        }}
+      >
+        + Add Employee Group
+      </button>
+
+      {/* Summary */}
+      {needsDataCount > 0 && (
+        <div style={{ padding: '12px 18px', background: '#F0FDF4', border: '1px solid #BBF7D0', borderRadius: 8, marginBottom: 16, fontSize: 13, color: '#15803D' }}>
+          ✅ <strong>{needsDataCount} group{needsDataCount !== 1 ? 's' : ''}</strong> will require KRA data upload in the next step.
+          {' '}This includes pre-fill data and/or reference library content.
+        </div>
+      )}
+
+      {/* Apply button */}
+      <StepStatusBar
+        applied={isApplied}
+        valid={isValid}
+        appliedMessage="Goal strategy applied — proceed to next step."
+        pendingMessage={groups.length === 0 ? 'Add at least one employee group to continue.' : 'Review configuration and click Apply to proceed.'}
+        buttonLabel="Apply Goal Strategy"
+        onApply={applyConfig}
+      />
+    </div>
+  );
+}
+
+/* ── OLD StepGoalLibrary BODY BELOW — replaced above, keeping a placeholder to mark removal ── */
+function _OldStepGoalLibraryBody_REMOVED({ config, update }) {
   const [expandedNodes, setExpandedNodes] = useState([]);
   const [entryMode, setEntryMode] = useState('upload');
   const [editingSegValueId, setEditingSegValueId] = useState(null);
@@ -2256,6 +4085,22 @@ function StepGoalLibrary({ config, update }) {
                 />
               ) : null}
             </div>
+            {!segmentValuesConfirmed ? (
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap', marginBottom: 12 }}>
+                <div style={{ fontSize: 11.5, color: '#64748B' }}>
+                  Add values manually or import them from Excel.
+                </div>
+                <AttributeSheetControls
+                  attrLabel={attrLabel}
+                  values={(c.goalSegmentValues || []).map(v => v.name)}
+                  onImported={(importedValues) => {
+                    cancelSegValueEdit();
+                    update('goalSegmentValues', importedValues.map((name, index) => ({ id: Date.now() + index, name })));
+                    update('goalSegmentValuesConfirmed', false);
+                  }}
+                />
+              </div>
+            ) : null}
             {hasSegmentValues && (
               <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 4 }}>
                 <button
@@ -3054,6 +4899,139 @@ function goalEntryNodeDef(c, config, update, entryMode, setEntryMode, attrLabel)
   };
 }
 
+/* ── GROUP DATA UPLOAD PANEL (new groups system) ─────────────────────────── */
+function GroupDataUploadPanel({ group, config, update }) {
+  const [prefillImportOpen, setPrefillImportOpen] = useState(!group.prefillData?.length);
+  const [libraryImportOpen, setLibraryImportOpen] = useState(!group.libraryData?.length);
+  const [importPhase, setImportPhase] = useState({ prefill: 'idle', library: 'idle' });
+  const [importErrors, setImportErrors] = useState({ prefill: [], library: [] });
+
+  const hasPrefill = group.modes?.includes('prefill');
+  const hasLibrary = group.modes?.includes('library');
+
+  function updateGroupField(field, value) {
+    update('goalGroups', (config.goalGroups || []).map(g =>
+      g.id === group.id ? { ...g, [field]: value } : g
+    ));
+  }
+
+  async function handleImport(type, e) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    e.target.value = '';
+    setImportPhase(prev => ({ ...prev, [type]: 'parsing' }));
+    setImportErrors(prev => ({ ...prev, [type]: [] }));
+    try {
+      // Use a minimal config for parsing — no byAttr for per-group uploads
+      const fakeConfig = { ...config, goalLibraryScope: 'common', goalSegmentValues: [] };
+      const result = await parseGoalLibraryXlsx(file, fakeConfig);
+      const errs = validateGoalLibraryData(result, fakeConfig);
+      if (errs.length > 0) {
+        setImportErrors(prev => ({ ...prev, [type]: errs }));
+        setImportPhase(prev => ({ ...prev, [type]: 'error' }));
+      } else {
+        const field = type === 'prefill' ? 'prefillData' : 'libraryData';
+        updateGroupField(field, result.data || []);
+        setImportPhase(prev => ({ ...prev, [type]: 'idle' }));
+        if (type === 'prefill') setPrefillImportOpen(false);
+        else setLibraryImportOpen(false);
+      }
+    } catch (err) {
+      setImportErrors(prev => ({ ...prev, [type]: [{ field: 'parse', message: err.message }] }));
+      setImportPhase(prev => ({ ...prev, [type]: 'error' }));
+    }
+  }
+
+  const modeColor = { prefill: '#2563EB', library: '#7C3AED' };
+
+  function UploadSection({ type, label, data, importOpen, setImportOpen: setOpen }) {
+    const fileRef = useRef(null);
+    const color = modeColor[type];
+    const count = (data || []).length;
+    return (
+      <div style={{ padding: '16px 20px', borderTop: '1px solid #F1F5F9' }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
+          <div>
+            <div style={{ fontWeight: 700, fontSize: 13.5, color }}>{label}</div>
+            {count > 0 && <div style={{ fontSize: 12, color: '#16A34A', marginTop: 2 }}>✓ {count} KRA{count !== 1 ? 's' : ''} uploaded</div>}
+          </div>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button type="button" onClick={() => setOpen(o => !o)}
+              style={{ padding: '6px 14px', borderRadius: 6, border: `1.5px solid ${color}`, background: '#fff', color, fontWeight: 600, fontSize: 12.5, cursor: 'pointer' }}>
+              {importOpen ? 'Hide' : count > 0 ? 'Re-upload' : 'Upload Excel'}
+            </button>
+            {count > 0 && <span style={{ padding: '6px 12px', borderRadius: 6, background: '#F0FDF4', color: '#16A34A', fontSize: 12, fontWeight: 600 }}>✓ Ready</span>}
+          </div>
+        </div>
+        {importOpen && (
+          <div>
+            <input ref={fileRef} type="file" accept=".xlsx,.xls" style={{ display: 'none' }} onChange={e => handleImport(type, e)} />
+            <div
+              onClick={() => fileRef.current?.click()}
+              style={{ border: '2px dashed #CBD5E1', borderRadius: 8, padding: '24px', textAlign: 'center', cursor: 'pointer', background: '#F8FAFC' }}
+            >
+              <div style={{ fontSize: 28, marginBottom: 8 }}>📤</div>
+              <div style={{ fontWeight: 600, color: '#374151', marginBottom: 4 }}>Drop Excel file here or click to browse</div>
+              <div style={{ fontSize: 12, color: '#6B7280' }}>Upload a .xlsx file with KRA Name, KRA Weight, KPI Name, KPI Weight columns</div>
+            </div>
+            {importPhase[type] === 'parsing' && <div style={{ marginTop: 8, color: '#2563EB', fontSize: 13 }}>Parsing…</div>}
+            {importPhase[type] === 'error' && importErrors[type].length > 0 && (
+              <div style={{ marginTop: 8, padding: '10px 14px', background: '#FEF2F2', border: '1px solid #FECACA', borderRadius: 6 }}>
+                {importErrors[type].map((e, i) => <div key={i} style={{ fontSize: 12, color: '#DC2626' }}>• {e.message}</div>)}
+              </div>
+            )}
+          </div>
+        )}
+        {/* Show uploaded KRAs list */}
+        {!importOpen && count > 0 && (
+          <div style={{ background: '#F8FAFC', borderRadius: 8, border: '1px solid #E9EEF5', overflow: 'hidden' }}>
+            {(data || []).slice(0, 5).map((kra, i) => (
+              <div key={i} style={{ padding: '8px 14px', borderBottom: i < Math.min(count, 5) - 1 ? '1px solid #F1F5F9' : 'none', fontSize: 12.5, color: '#374151' }}>
+                <span style={{ fontWeight: 600 }}>{kra.name}</span>
+                {kra.weight && <span style={{ color: '#9CA3AF', marginLeft: 8 }}>{kra.weight}%</span>}
+                {kra.kpis?.length > 0 && <span style={{ color: '#9CA3AF', marginLeft: 8 }}>• {kra.kpis.length} KPI{kra.kpis.length !== 1 ? 's' : ''}</span>}
+              </div>
+            ))}
+            {count > 5 && <div style={{ padding: '8px 14px', fontSize: 12, color: '#9CA3AF' }}>+{count - 5} more KRAs…</div>}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ background: '#fff', border: '1.5px solid #E2E8F0', borderRadius: 12, marginBottom: 14, overflow: 'hidden' }}>
+      <div style={{ padding: '14px 20px', background: '#F8FAFC', borderBottom: '1px solid #E9EDF2', display: 'flex', alignItems: 'center', gap: 10 }}>
+        <div style={{ fontWeight: 700, fontSize: 14, color: '#0F172A' }}>{group.name}</div>
+        <div style={{ display: 'flex', gap: 6 }}>
+          {group.modes?.map(m => {
+            const mode = GOAL_MODES.find(gm => gm.id === m);
+            return mode ? <span key={m} style={{ fontSize: 11, padding: '2px 8px', borderRadius: 10, background: mode.bg, color: mode.color, fontWeight: 600 }}>{mode.icon} {mode.title}</span> : null;
+          })}
+        </div>
+      </div>
+      {hasPrefill && (
+        <UploadSection
+          type="prefill"
+          label="📋 Pre-fill Data — KRAs/KPIs that will appear ready-made in employee workspace"
+          data={group.prefillData}
+          importOpen={prefillImportOpen}
+          setImportOpen={setPrefillImportOpen}
+        />
+      )}
+      {hasLibrary && (
+        <UploadSection
+          type="library"
+          label="📚 Reference Library — KRAs available in the employee's browse panel"
+          data={group.libraryData}
+          importOpen={libraryImportOpen}
+          setImportOpen={setLibraryImportOpen}
+        />
+      )}
+    </div>
+  );
+}
+
 /* ── KRA LIBRARY PAGE ────────────────────────────────────────────────────── */
 /* helper: build a blank parsedData structure matching parseGoalLibraryXlsx output */
 function emptyLibraryData(config) {
@@ -3069,6 +5047,33 @@ function emptyLibraryData(config) {
 }
 
 function StepKRALibrary({ config, update }) {
+  // New groups system: show per-group upload panels
+  const usingGroups = (config.goalGroups || []).length > 0;
+  const groupsNeedData = usingGroups ? groupsNeedingDataUpload(config) : [];
+
+  if (usingGroups) {
+    return (
+      <div style={{ maxWidth: 900, margin: '0 auto' }}>
+        <div style={{ marginBottom: 24 }}>
+          <div style={{ fontSize: 12, fontWeight: 700, color: '#94A3B8', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 6 }}>KRA Data Upload</div>
+          <h2 style={{ margin: 0, fontSize: 22, fontWeight: 800, color: '#0F172A' }}>Upload KRA / Library Data</h2>
+          <p style={{ margin: '8px 0 0', fontSize: 14, color: '#64748B' }}>
+            Upload KRA data for each group that uses pre-fill or reference library. You can upload separate datasets per group.
+          </p>
+        </div>
+        {groupsNeedData.map(group => (
+          <GroupDataUploadPanel key={group.id} group={group} config={config} update={update} />
+        ))}
+        {groupsNeedData.length === 0 && (
+          <div style={{ padding: 30, textAlign: 'center', color: '#94A3B8' }}>
+            No groups require data upload (all groups use Free Creation only).
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  // Legacy path (old config without goalGroups)
   const hasKpis  = config.goalKpiMode === 'kra-kpi';
   const isByAttr = config.goalLibraryScope === 'by-attribute';
   const attrLabel = config.goalSegmentAttr || 'Department';
@@ -3749,9 +5754,9 @@ function StepTargets({ config, update }) {
 /* ── STEP 7: COMPETENCIES ──────────────────────────────────────────────── */
 function StepCompetencies({ config, update }) {
   const toggle = (c) => {
-    const next = config.selectedCompetencies.includes(c)
-      ? config.selectedCompetencies.filter(x => x !== c)
-      : [...config.selectedCompetencies, c];
+    const next = (config.selectedCompetencies || []).includes(c)
+      ? (config.selectedCompetencies || []).filter(x => x !== c)
+      : [...(config.selectedCompetencies || []), c];
     update('selectedCompetencies', next);
   };
   return (
@@ -3789,9 +5794,9 @@ function StepCompetencies({ config, update }) {
                   <button key={c} onClick={() => toggle(c)}
                     style={{
                       padding: '5px 13px', borderRadius: 20, fontSize: 12.5, fontWeight: 500, cursor: 'pointer', transition: 'all .15s',
-                      border: `1px solid ${config.selectedCompetencies.includes(c) ? '#2563EB' : '#E2E8F0'}`,
-                      background: config.selectedCompetencies.includes(c) ? '#EFF4FF' : '#fff',
-                      color: config.selectedCompetencies.includes(c) ? '#2563EB' : '#6B7280',
+                      border: `1px solid ${(config.selectedCompetencies || []).includes(c) ? '#2563EB' : '#E2E8F0'}`,
+                      background: (config.selectedCompetencies || []).includes(c) ? '#EFF4FF' : '#fff',
+                      color: (config.selectedCompetencies || []).includes(c) ? '#2563EB' : '#6B7280',
                     }}>
                     {c}
                   </button>
@@ -4068,7 +6073,7 @@ const INITIAL = {
   // Scale
   scalePoints: 5, scaleDisplay: 'Number + label', ratingAppliesAt: 'KPI level — rolled up',
   // Goal creation flow
-  goalCreationMode: 'admin-library',   // 'admin-library' | 'employee-self'
+  goalCreationMode: 'admin-library',   // 'admin-library' | 'employee-self' | 'mixed' (legacy + new)
   goalLibraryScope: 'common',          // 'common' | 'by-attribute'
   goalSegmentAttr: 'Department',
   goalSegmentValues: [],               // [{ id, name }]
@@ -4079,6 +6084,27 @@ const INITIAL = {
   goalLibraryData: null,
   goalLibraryAppliedSnapshot: null,
   employeeUploadData: null,
+  // New goal groups system
+  goalGroups: [
+    {
+      id: 'grp_default',
+      name: 'All Employees',
+      segmentAttr: null,
+      segmentValues: [],
+      mode: 'scratch',            // 'scratch' | 'prefill'
+      hasLibrary: false,
+      libraryId: null,
+      prefillEditability: 'add-kpis',
+    }
+  ],
+  goalGroupsAppliedSnapshot: null,
+  // Goal libraries (created/uploaded by admin)
+  goalLibraries: [],              // [{id, name, type, weightType, perspectives:[{name,weight,kras:[{id,name,desc,suggestedWeight,kpis:[{id,name,desc,weight}]}]}]}]
+  goalLibrariesAppliedSnapshot: null,
+  // Limits
+  limitsEnabled: false,
+  limitsRules: [],                // [{groupId, minKRAs, maxKRAs, minKRAsPerPersp, maxKRAsPerPersp, minKPIsPerKRA, maxKPIsPerKRA, minKRAWeight, maxKRAWeight, minKPIWeight, maxKPIWeight}]
+  limitsAppliedSnapshot: null,
   // Employee settings
   empCodeFormat: { type: 'free' },
   managerLevels: 1,
@@ -4108,13 +6134,30 @@ const INITIAL = {
   bellBands: [10, 20, 50, 15, 5],
 };
 
+/* Ensures critical array fields are never null/undefined when loading persisted state */
+function normalizeConfig(raw) {
+  const merged = { ...INITIAL, ...raw };
+  // Guarantee all fields that are accessed with .filter/.map/.includes/.length
+  // are always arrays — persisted state can store null for these if it was corrupted
+  if (!Array.isArray(merged.perspectives))     merged.perspectives     = INITIAL.perspectives;
+  if (!Array.isArray(merged.ratingLevels))     merged.ratingLevels     = INITIAL.ratingLevels;
+  if (!Array.isArray(merged.enabledModules))   merged.enabledModules   = INITIAL.enabledModules;
+  if (!Array.isArray(merged.bellBands))        merged.bellBands        = INITIAL.bellBands;
+  if (!Array.isArray(merged.goalGroups))       merged.goalGroups       = INITIAL.goalGroups;
+  if (!Array.isArray(merged.goalLibraries))    merged.goalLibraries    = INITIAL.goalLibraries;
+  if (!Array.isArray(merged.goalSegmentValues))merged.goalSegmentValues= INITIAL.goalSegmentValues;
+  if (!Array.isArray(merged.goalLimitValues))  merged.goalLimitValues  = INITIAL.goalLimitValues;
+  if (!Array.isArray(merged.selectedCompetencies)) merged.selectedCompetencies = INITIAL.selectedCompetencies;
+  return merged;
+}
+
 /* Returns true only when a step has genuinely valid / complete data */
 function isStepComplete(stepId, config) {
   switch (stepId) {
     case 'framework':
       return !!config.frameworkId && config.frameworkAppliedSnapshot === getFrameworkSnapshot(config);
     case 'perspectives': {
-      const activePerspectives = config.perspectives.filter((perspective) => !isPerspectiveRowEmpty(perspective));
+      const activePerspectives = (config.perspectives || []).filter((perspective) => !isPerspectiveRowEmpty(perspective));
       const total = activePerspectives.reduce((sum, perspective) => sum + (Number(perspective.weight) || 0), 0);
       return (
         activePerspectives.length > 0 &&
@@ -4124,17 +6167,41 @@ function isStepComplete(stepId, config) {
       );
     }
     case 'goals':
+      // Support both new (goalGroups) and old (goalCreationMode) config
+      if (config.goalGroups?.length > 0) {
+        return isGoalGroupsValid(config) && config.goalGroupsAppliedSnapshot === getGoalGroupsSnapshot(config);
+      }
       return isGoalSettingsValid(config) && config.goalsAppliedSnapshot === getGoalsSnapshot(config);
+    case 'groups':
+      return (config.goalGroups || []).length > 0 &&
+        (config.goalGroups || []).every(g => g.mode) &&
+        config.goalGroupsAppliedSnapshot === getNewGroupsSnapshot(config);
+    case 'goal_libraries': {
+      const groupsNeedingLib = (config.goalGroups || []).filter(g => g.hasLibrary);
+      if (groupsNeedingLib.length === 0) return !!config.goalLibrariesAppliedSnapshot;
+      return groupsNeedingLib.every(group =>
+        getGroupLibraryAssignments(group).every(assignment =>
+          assignment.libraryId && (config.goalLibraries || []).some(library => library.id === assignment.libraryId)
+        )
+      ) && !!config.goalLibrariesAppliedSnapshot;
+    }
     case 'kra_library':
+      // Support both new and old config
+      if (config.goalGroups?.length > 0) {
+        return isGoalGroupDataValid(config);
+      }
       return isGoalLibraryValid(config) && config.goalLibraryAppliedSnapshot === getGoalLibraryDataSnapshot(config.goalLibraryData);
     case 'emp_settings':
       return isEmployeeSettingsValid(config) && config.empSettingsAppliedSnapshot === getEmployeeSettingsSnapshot(config);
     case 'upload':
-      return false;
+      return !!config.employeeUploadData;
     case 'limits':
+      if (config.frameworkId === 'bsc') {
+        return !!config.limitsAppliedSnapshot;
+      }
       return config.minKRAs > 0 && config.maxKRAs >= config.minKRAs && !!config.weightageOwnership;
     case 'hierarchy':
-      return config.ratingLevels.length >= 1;
+      return (config.ratingLevels || []).length >= 1;
     case 'scale':
       return config.scalePoints > 0;
     case 'targets':
@@ -4142,6 +6209,8 @@ function isStepComplete(stepId, config) {
     case 'bellcurve':
     case 'phases':
       return true;
+    case 'summary':
+      return false; // completed when launched
     case 'export':
       return false; // only done when actually launched
     default:
@@ -4149,16 +6218,17 @@ function isStepComplete(stepId, config) {
   }
 }
 
-export default function PMSWizard() {
+export default function PMSWizard({ onLaunched }) {
   const persistedState = useMemo(() => loadWizardState(), []);
   const [step, setStep]       = useState(() => persistedState && typeof persistedState.step === 'number' ? persistedState.step : 0);
-  const [config, setConfig]   = useState(() => persistedState?.config ? { ...INITIAL, ...persistedState.config } : INITIAL);
+  const [config, setConfig]   = useState(() => persistedState?.config ? normalizeConfig(persistedState.config) : INITIAL);
   const [visited, setVisited] = useState(() => new Set(Array.isArray(persistedState?.visited) ? persistedState.visited : []));
   const [stepNotice, setStepNotice] = useState(null); // { message, type: 'warn'|'info' }
   const workspace = useMemo(() => getWorkspaceContext(), []);
 
-  const navSteps = getNavSteps(config);
+  const navSteps = useMemo(() => getNavSteps(config), [config]);
   const totalSteps = navSteps.length;
+  const safeStep = Math.min(step, Math.max(totalSteps - 1, 0));
 
   function canAccessStep(targetStep) {
     if (targetStep < 0 || targetStep >= navSteps.length) return false;
@@ -4250,23 +6320,22 @@ export default function PMSWizard() {
 
   const stepComponents = (() => {
     if (config.frameworkId === 'bsc') {
-      const comps = [
-        <StepFramework      key="framework"    config={config} update={update} />,
-        <StepPerspectives   key="perspectives" config={config} update={update} />,
-        <StepGoalLibrary    key="goals"        config={config} update={update} />,
+      return [
+        <StepFramework        key="framework"      config={config} update={update} />,
+        <StepPerspectives     key="perspectives"   config={config} update={update} />,
+        <StepGroups           key="groups"         config={config} update={update} />,
+        <StepGoalLibraries    key="goal_libraries" config={config} update={update} />,
+        <StepLimits           key="limits"         config={config} update={update} />,
+        <StepEmployeeSettings key="emp_settings"   config={config} update={update} />,
+        <StepEmployeeUpload   key="upload"         config={config} update={update} />,
+        <StepSummary          key="summary"        config={config} onLaunched={onLaunched} />,
       ];
-      if (config.goalCreationMode === 'admin-library') {
-        comps.push(<StepKRALibrary key="kra_library" config={config} update={update} />);
-      }
-      comps.push(<StepEmployeeSettings key="emp_settings" config={config} update={update} />);
-      comps.push(<StepEmployeeUpload key="upload" config={config} update={update} />);
-      return comps;
     }
     const comps = [
       <StepFramework   key="framework" config={config} update={update} />,
       <StepGoalLibrary key="goals"     config={config} update={update} />,
     ];
-    if (config.goalCreationMode === 'admin-library') {
+    if (config.goalGroups?.length > 0 ? groupsNeedingDataUpload(config).length > 0 : config.goalCreationMode === 'admin-library') {
       comps.push(<StepKRALibrary key="kra_library" config={config} update={update} />);
     }
     comps.push(
@@ -4288,15 +6357,15 @@ export default function PMSWizard() {
 
   const completedCount = navSteps.filter((s, i) => visited.has(i) && isStepComplete(s.id, config)).length;
   const pct = Math.round((completedCount / totalSteps) * 100);
-  const currentStepId = navSteps[step]?.id;
+  const currentStepId = navSteps[safeStep]?.id;
   const canProceed = isStepComplete(currentStepId, config);
 
   useEffect(() => {
     const firstIncompleteStep = navSteps.findIndex((navStep) => !isStepComplete(navStep.id, config));
-    if (firstIncompleteStep !== -1 && step > firstIncompleteStep) {
+    if (firstIncompleteStep !== -1 && safeStep > firstIncompleteStep) {
       setStep(firstIncompleteStep);
     }
-  }, [config, navSteps, step]);
+  }, [config, navSteps, safeStep]);
 
   useEffect(() => {
     const normalizedStep = Math.min(step, Math.max(navSteps.length - 1, 0));
@@ -4336,7 +6405,7 @@ export default function PMSWizard() {
         </div>
         <div style={{ padding: '10px 0', flex: 1 }}>
           {navSteps.map((s, i) => {
-            const isActive   = i === step;
+            const isActive   = i === safeStep;
             const wasVisited = visited.has(i);
             const isDone     = wasVisited && isStepComplete(s.id, config);
             const isInvalid  = wasVisited && !isStepComplete(s.id, config);
@@ -4410,13 +6479,13 @@ export default function PMSWizard() {
         {/* CONTENT */}
         <div style={{ flex: 1, overflowY: 'auto', padding: '28px 32px 100px' }}>
           <div style={{ marginBottom: 6, fontSize: 11, fontWeight: 700, letterSpacing: '0.1em', textTransform: 'uppercase', color: '#2563EB' }}>
-            Step {step + 1} of {totalSteps}
+            Step {safeStep + 1} of {totalSteps}
           </div>
-          {stepComponents[step]}
+          {stepComponents[safeStep]}
         </div>
 
         {/* CHANGES DETECTED STRIP — shown when revisiting a step and changes are pending */}
-        {visited.has(step) && !canProceed && (
+        {visited.has(safeStep) && !canProceed && (
           <div style={{ padding: '9px 32px', background: '#FEF3C7', borderTop: '1.5px solid #FDE68A', display: 'flex', alignItems: 'center', gap: 10 }}>
             <span style={{ fontSize: 12.5, color: '#78350F', fontWeight: 500 }}>
               You've made changes — confirm them below before continuing. Downstream steps that depend on this configuration will need to be completed again.
@@ -4427,18 +6496,129 @@ export default function PMSWizard() {
         {/* FOOTER NAV */}
         <div style={{ padding: '14px 32px', background: '#fff', borderTop: '1.5px solid #E9EDF2', display: 'flex', alignItems: 'center', justifyContent: 'space-between', position: 'sticky', bottom: 0 }}>
           <div style={{ fontSize: 13, color: '#9CA3AF' }}>
-            Step <strong style={{ color: '#2563EB' }}>{step + 1}</strong> of {totalSteps} — {navSteps[step].label}
+            Step <strong style={{ color: '#2563EB' }}>{safeStep + 1}</strong> of {totalSteps} — {navSteps[safeStep]?.label ?? ''}
           </div>
           <div style={{ display: 'flex', gap: 10 }}>
-            {step > 0 && (
+            {safeStep > 0 && (
               <button onClick={back} style={{ padding: '9px 20px', border: '1.5px solid #E2E8F0', borderRadius: 9, fontSize: 13.5, cursor: 'pointer', background: '#fff', fontFamily: 'inherit' }}>
                 ← Back
               </button>
             )}
-            <button onClick={next} disabled={!canProceed} style={{ padding: '9px 22px', background: !canProceed ? '#CBD5E1' : step === totalSteps - 1 ? '#16A34A' : '#2563EB', color: '#fff', border: 'none', borderRadius: 9, fontSize: 13.5, fontWeight: 600, cursor: !canProceed ? 'not-allowed' : 'pointer', fontFamily: 'inherit' }}>
-              {step === totalSteps - 1 ? '🚀 Launch' : `Next: ${navSteps[step + 1]?.label || ''} →`}
+            <button onClick={next} disabled={!canProceed} style={{ padding: '9px 22px', background: !canProceed ? '#CBD5E1' : safeStep === totalSteps - 1 ? '#16A34A' : '#2563EB', color: '#fff', border: 'none', borderRadius: 9, fontSize: 13.5, fontWeight: 600, cursor: !canProceed ? 'not-allowed' : 'pointer', fontFamily: 'inherit' }}>
+              {safeStep === totalSteps - 1 ? '🚀 Launch' : `Next: ${navSteps[safeStep + 1]?.label || ''} →`}
             </button>
           </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ── LAUNCH OVERVIEW MODAL ───────────────────────────────────────────────── */
+export function LaunchOverview({ config, workspace, onClose }) {
+  const fw = FRAMEWORKS.find(f => f.id === config?.frameworkId);
+  const employees = config?.employeeUploadData?.employees || [];
+  const groups = config?.goalGroups || [];
+  const hasNewGroups = groups.length > 0;
+
+  const groupSummary = hasNewGroups ? groups.map(g => ({
+    name: g.name,
+    modes: (g.modes || []).map(m => GOAL_MODES.find(gm => gm.id === m)?.title || m).join(' + '),
+    prefillCount: (g.prefillData || []).length,
+    libraryCount: (g.libraryData || []).length,
+    limits: g.goalLimitsEnabled ? `${g.goalMin}–${g.goalMax} KRAs` : 'No limits',
+  })) : [];
+
+  let credentialCount = 0;
+  try {
+    const raw = localStorage.getItem('zarohr_emp_credentials');
+    if (raw) credentialCount = Object.keys(JSON.parse(raw)).length;
+  } catch (_) {}
+
+  const SummaryRow = ({ label, value, highlight }) => (
+    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '9px 0', borderBottom: '1px solid #F1F5F9' }}>
+      <span style={{ fontSize: 13, color: '#6B7280' }}>{label}</span>
+      <span style={{ fontSize: 13, fontWeight: 600, color: highlight ? '#2563EB' : '#0F172A' }}>{value}</span>
+    </div>
+  );
+
+  return (
+    <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20 }}
+      onClick={e => e.target === e.currentTarget && onClose()}>
+      <div style={{ background: '#fff', borderRadius: 16, width: '100%', maxWidth: 640, maxHeight: '85vh', overflow: 'hidden', display: 'flex', flexDirection: 'column', boxShadow: '0 20px 60px rgba(0,0,0,0.2)' }}>
+        <div style={{ padding: '20px 24px', borderBottom: '1.5px solid #E9EDF2', display: 'flex', alignItems: 'center', justifyContent: 'space-between', background: 'linear-gradient(135deg,#1E293B,#0F172A)', color: '#fff' }}>
+          <div>
+            <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: '.1em', textTransform: 'uppercase', color: '#94A3B8', marginBottom: 4 }}>Config Overview</div>
+            <div style={{ fontSize: 18, fontWeight: 800 }}>{workspace?.orgName || 'Organization'}</div>
+          </div>
+          <button onClick={onClose} style={{ background: 'rgba(255,255,255,.12)', border: 'none', borderRadius: 8, color: '#fff', width: 32, height: 32, cursor: 'pointer', fontSize: 18, lineHeight: 1 }}>×</button>
+        </div>
+        <div style={{ overflowY: 'auto', padding: '20px 24px' }}>
+          <div style={{ marginBottom: 20 }}>
+            <div style={{ fontSize: 11, fontWeight: 700, color: '#94A3B8', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 10 }}>Framework</div>
+            <div style={{ padding: '12px 16px', background: '#F8FAFC', borderRadius: 8, border: '1px solid #E9EDF2' }}>
+              <SummaryRow label="Performance Framework" value={fw?.name || config?.frameworkId || 'Not set'} />
+              <SummaryRow label="Employees uploaded" value={employees.length > 0 ? `${employees.length} employees` : 'None'} highlight={employees.length > 0} />
+              {credentialCount > 0 && <SummaryRow label="Credentials generated" value={`${credentialCount} employees`} highlight />}
+            </div>
+          </div>
+          <div style={{ marginBottom: 20 }}>
+            <div style={{ fontSize: 11, fontWeight: 700, color: '#94A3B8', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 10 }}>Goal Creation Strategy</div>
+            {hasNewGroups ? (
+              <div>
+                <div style={{ fontSize: 12, color: '#6B7280', marginBottom: 8 }}>
+                  {config.goalGroupStrategy === 'by-group' ? `Segmented by ${config.goalGroupAttr || 'attribute'}` : 'Uniform for all employees'}
+                </div>
+                {groupSummary.map((g, i) => (
+                  <div key={i} style={{ padding: '10px 14px', background: '#F8FAFC', borderRadius: 8, border: '1px solid #E9EDF2', marginBottom: 8 }}>
+                    <div style={{ fontWeight: 700, fontSize: 13, color: '#0F172A', marginBottom: 4 }}>{g.name}</div>
+                    <div style={{ fontSize: 12, color: '#2563EB', fontWeight: 600, marginBottom: 4 }}>{g.modes}</div>
+                    <div style={{ fontSize: 12, color: '#6B7280', display: 'flex', gap: 16 }}>
+                      {g.prefillCount > 0 && <span>📋 {g.prefillCount} pre-fill KRAs</span>}
+                      {g.libraryCount > 0 && <span>📚 {g.libraryCount} library KRAs</span>}
+                      <span>⚖️ {g.limits}</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div style={{ padding: '12px 16px', background: '#F8FAFC', borderRadius: 8, border: '1px solid #E9EDF2' }}>
+                <SummaryRow label="Mode" value={config?.goalCreationMode === 'admin-library' ? 'Admin Library' : config?.goalCreationMode === 'employee-self' ? 'Employee Self-Create' : config?.goalCreationMode || 'Not set'} />
+              </div>
+            )}
+          </div>
+          {config?.frameworkId === 'bsc' && (
+            <div style={{ marginBottom: 20 }}>
+              <div style={{ fontSize: 11, fontWeight: 700, color: '#94A3B8', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 10 }}>BSC Perspectives</div>
+              <div style={{ padding: '12px 16px', background: '#F8FAFC', borderRadius: 8, border: '1px solid #E9EDF2' }}>
+                {(config.perspectives || []).filter(p => p.name && Number(p.weight) > 0).map((p, i) => (
+                  <div key={i} style={{ display: 'flex', justifyContent: 'space-between', padding: '7px 0', borderBottom: '1px solid #F1F5F9', fontSize: 13 }}>
+                    <span style={{ color: '#374151' }}>{p.name}</span>
+                    <span style={{ fontWeight: 600, color: p.color || '#2563EB' }}>{p.weight}%</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+          {employees.length > 0 && (
+            <div>
+              <div style={{ fontSize: 11, fontWeight: 700, color: '#94A3B8', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 10 }}>Employees ({employees.length})</div>
+              <div style={{ background: '#F8FAFC', borderRadius: 8, border: '1px solid #E9EDF2', overflow: 'hidden', maxHeight: 200, overflowY: 'auto' }}>
+                {employees.slice(0, 20).map((emp, i) => (
+                  <div key={i} style={{ padding: '8px 14px', borderBottom: '1px solid #F1F5F9', display: 'flex', justifyContent: 'space-between', fontSize: 12.5 }}>
+                    <span style={{ fontWeight: 600, color: '#0F172A' }}>{emp['Employee Name'] || emp['Employee Code']}</span>
+                    <span style={{ color: '#9CA3AF' }}>{emp['Employee Code']} · {emp['Designation'] || emp['Department'] || ''}</span>
+                  </div>
+                ))}
+                {employees.length > 20 && <div style={{ padding: '8px 14px', fontSize: 12, color: '#9CA3AF' }}>+{employees.length - 20} more…</div>}
+              </div>
+            </div>
+          )}
+        </div>
+        <div style={{ padding: '16px 24px', borderTop: '1.5px solid #E9EDF2', background: '#F8FAFC' }}>
+          <button onClick={onClose} style={{ width: '100%', padding: '10px', background: '#2563EB', color: '#fff', border: 'none', borderRadius: 8, fontSize: 14, fontWeight: 600, cursor: 'pointer' }}>
+            Close
+          </button>
         </div>
       </div>
     </div>

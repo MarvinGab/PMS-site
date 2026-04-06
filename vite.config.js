@@ -1,15 +1,23 @@
 import { defineConfig } from 'vite'
-import react from '@vitejs/plugin-react'
-import { resolve } from 'path'
+import react from '@vitejs/plugin-react-swc'
+import { fileURLToPath } from 'url'
+import { dirname, resolve } from 'path'
 
-// https://vite.dev/config/
+const __filename = fileURLToPath(import.meta.url)
+const __dirname = dirname(__filename)
+
 export default defineConfig({
+  base: './',
   plugins: [react()],
+  server: {
+    watch: {
+      ignored: ['**/.env', '**/.env.*'],
+    },
+  },
   build: {
     rollupOptions: {
       input: {
         main: resolve(__dirname, 'index.html'),
-        pms: resolve(__dirname, 'pms.html'),
       },
     },
   },
