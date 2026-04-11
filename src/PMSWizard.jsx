@@ -328,10 +328,6 @@ function getNewGroupsSnapshot(config) {
       segmentValues: [...(g.segmentValues || [])].sort(),
       mode: g.mode || 'scratch',
       hasLibrary: !!g.hasLibrary,
-      libraryId: g.libraryId || null,
-      libraryAssignments: (g.libraryAssignments || [])
-        .map(a => ({ slotKey: a.slotKey, label: a.label, libraryId: a.libraryId || null }))
-        .sort((a, b) => String(a.slotKey).localeCompare(String(b.slotKey))),
       prefillEditability: g.mode === 'prefill' ? (g.prefillEditability || 'add-kpis') : null,
     })),
   });
@@ -3003,9 +2999,7 @@ function LibraryCard({ library, groupLabel, assignedText, accent, active = false
               </div>
             </div>
             <div style={{ display: 'flex', alignItems: 'flex-end', justifyContent: 'space-between', gap: 10 }}>
-              <div style={{ fontSize: 11.5, color: '#9CA3AF', lineHeight: 1.5, maxWidth: 150 }}>
-                {selectionHint || 'Create a library for this value'}
-              </div>
+              <div />
               <button
                 type="button"
                 onClick={(event) => { event.stopPropagation(); onEdit?.(); }}
@@ -3079,79 +3073,320 @@ function AddLibraryModal({ config, initialLibrary = null, fixedName = '', onSave
     id: `lp_${Date.now()}_${Math.random().toString(36).slice(2,5)}`,
     name: p.name,
     weight: p.weight,
+    baseWeight: p.weight,
     kras: [],
   }));
 
   const seedPerspectives = initialLibrary?.perspectives?.length
     ? initialLibrary.perspectives.map(perspective => ({
         ...perspective,
+        baseWeight: perspective.baseWeight ?? perspective.weight ?? 0,
         kras: (perspective.kras || []).map(kra => ({
           ...kra,
           kpis: (kra.kpis || []).map(kpi => ({ ...kpi })),
         })),
       }))
     : (defaultPersp.length > 0 ? defaultPersp : [
-        { id: `lp_${Date.now()}`, name: 'Financial', weight: 25, kras: [] },
+        { id: `lp_${Date.now()}`, name: 'Financial', weight: 25, baseWeight: 25, kras: [] },
       ]);
 
   const [name, setName] = useState(initialLibrary?.name || fixedName || '');
   const [type, setType] = useState(initialLibrary?.type || 'kra-kpi');
   const [weightType, setWeightType] = useState(initialLibrary?.weightType || 'suggested');
   const [perspectives, setPerspectives] = useState(seedPerspectives);
+  const [openKraDescriptions, setOpenKraDescriptions] = useState({});
+  const [weightDrafts, setWeightDrafts] = useState({});
+  const [manualKraWeights, setManualKraWeights] = useState(() => {
+    const next = {};
+    (initialLibrary?.perspectives || []).forEach(perspective => {
+      (perspective.kras || []).forEach(kra => {
+        if (Number(kra.suggestedWeight) > 0) next[kra.id] = true;
+      });
+    });
+    return next;
+  });
+  const [manualKpiWeights, setManualKpiWeights] = useState(() => {
+    const next = {};
+    (initialLibrary?.perspectives || []).forEach(perspective => {
+      (perspective.kras || []).forEach(kra => {
+        (kra.kpis || []).forEach(kpi => {
+          if (Number(kpi.weight) > 0) next[kpi.id] = true;
+        });
+      });
+    });
+    return next;
+  });
+
+  function numericWeight(value) {
+    const numeric = Number(value);
+    return Number.isFinite(numeric) ? numeric : 0;
+  }
+
+  function roundWeight(value) {
+    return Math.round((numericWeight(value) + Number.EPSILON) * 100) / 100;
+  }
+
+  function distributeWeights(total, count) {
+    if (!count) return [];
+    const safeTotal = roundWeight(Math.max(total, 0));
+    if (count === 1) return [safeTotal];
+    const base = roundWeight(safeTotal / count);
+    const values = Array.from({ length: count }, () => base);
+    const consumed = roundWeight(base * (count - 1));
+    values[count - 1] = roundWeight(Math.max(safeTotal - consumed, 0));
+    return values;
+  }
+
+  function syncKpisToKra(kra, nextManualKpiWeights, kraIsManual) {
+    const currentKpis = kra.kpis || [];
+    if (!currentKpis.length) return { ...kra, kpis: currentKpis };
+
+    const manualSum = roundWeight(currentKpis.reduce((sum, kpi) => (
+      sum + (nextManualKpiWeights[kpi.id] ? numericWeight(kpi.weight) : 0)
+    ), 0));
+    const autoIndexes = currentKpis
+      .map((kpi, index) => (nextManualKpiWeights[kpi.id] ? null : index))
+      .filter(index => index !== null);
+    const remaining = roundWeight(Math.max(numericWeight(kra.suggestedWeight) - manualSum, 0));
+    const distributed = distributeWeights(remaining, autoIndexes.length);
+    const nextKpis = currentKpis.map((kpi, index) => {
+      const autoPosition = autoIndexes.indexOf(index);
+      if (autoPosition === -1) return { ...kpi, weight: roundWeight(kpi.weight) };
+      return { ...kpi, weight: distributed[autoPosition] ?? 0 };
+    });
+    const childTotal = roundWeight(nextKpis.reduce((sum, kpi) => sum + numericWeight(kpi.weight), 0));
+    const currentWeight = roundWeight(kra.suggestedWeight);
+    const nextWeight = !kraIsManual ? childTotal : (childTotal > currentWeight ? childTotal : currentWeight);
+    return {
+      ...kra,
+      suggestedWeight: nextWeight,
+      kpis: nextKpis,
+    };
+  }
+
+  function syncPerspectiveWeights(perspective, nextManualKraWeights, nextManualKpiWeights) {
+    let nextKras = (perspective.kras || []).map(kra => syncKpisToKra(kra, nextManualKpiWeights, !!nextManualKraWeights[kra.id]));
+    const baseWeight = roundWeight(perspective.baseWeight ?? perspective.weight);
+
+    const lockedKraIds = new Set(
+      nextKras
+        .filter(kra => nextManualKraWeights[kra.id] || (kra.kpis || []).length > 0)
+        .map(kra => kra.id)
+    );
+    const lockedTotal = roundWeight(nextKras.reduce((sum, kra) => (
+      sum + (lockedKraIds.has(kra.id) ? numericWeight(kra.suggestedWeight) : 0)
+    ), 0));
+    const autoIndexes = nextKras
+      .map((kra, index) => (lockedKraIds.has(kra.id) ? null : index))
+      .filter(index => index !== null);
+    const remaining = roundWeight(Math.max(baseWeight - lockedTotal, 0));
+    const distributed = distributeWeights(remaining, autoIndexes.length);
+
+    nextKras = nextKras.map((kra, index) => {
+      const autoPosition = autoIndexes.indexOf(index);
+      if (autoPosition === -1) return kra;
+      return { ...kra, suggestedWeight: distributed[autoPosition] ?? 0 };
+    });
+
+    const kraTotal = roundWeight(nextKras.reduce((sum, kra) => sum + numericWeight(kra.suggestedWeight), 0));
+    return {
+      ...perspective,
+      weight: kraTotal > baseWeight ? kraTotal : baseWeight,
+      kras: nextKras,
+    };
+  }
+
+  function updatePerspectiveTree(perspId, mutator, nextManualKraWeights = manualKraWeights, nextManualKpiWeights = manualKpiWeights) {
+    setPerspectives(current => current.map(perspective => {
+      if (perspective.id !== perspId) return perspective;
+      const mutated = typeof mutator === 'function' ? mutator(perspective) : perspective;
+      return syncPerspectiveWeights(mutated, nextManualKraWeights, nextManualKpiWeights);
+    }));
+  }
 
   function addKRA(perspId) {
-    setPerspectives(ps => ps.map(p => p.id === perspId ? {
-      ...p,
-      kras: [...(p.kras || []), { id: `kra_${Date.now()}_${Math.random().toString(36).slice(2,5)}`, name: '', desc: '', suggestedWeight: 0, kpis: [] }]
-    } : p));
+    updatePerspectiveTree(perspId, perspective => ({
+      ...perspective,
+      kras: [...(perspective.kras || []), { id: `kra_${Date.now()}_${Math.random().toString(36).slice(2,5)}`, name: '', desc: '', suggestedWeight: 0, kpis: [] }]
+    }));
   }
 
   function updateKRA(perspId, kraId, changes) {
-    setPerspectives(ps => ps.map(p => p.id === perspId ? {
-      ...p,
-      kras: p.kras.map(k => k.id === kraId ? { ...k, ...changes } : k)
-    } : p));
+    updatePerspectiveTree(perspId, perspective => ({
+      ...perspective,
+      kras: perspective.kras.map(k => k.id === kraId ? { ...k, ...changes } : k)
+    }));
   }
 
   function removeKRA(perspId, kraId) {
-    setPerspectives(ps => ps.map(p => p.id === perspId ? { ...p, kras: p.kras.filter(k => k.id !== kraId) } : p));
+    const nextManualKras = { ...manualKraWeights };
+    delete nextManualKras[kraId];
+    setManualKraWeights(nextManualKras);
+    updatePerspectiveTree(perspId, perspective => ({ ...perspective, kras: perspective.kras.filter(k => k.id !== kraId) }), nextManualKras, manualKpiWeights);
+    setOpenKraDescriptions(current => {
+      const next = { ...current };
+      delete next[kraId];
+      return next;
+    });
   }
 
   function addKPI(perspId, kraId) {
-    setPerspectives(ps => ps.map(p => p.id === perspId ? {
-      ...p,
-      kras: p.kras.map(k => k.id === kraId ? {
+    updatePerspectiveTree(perspId, perspective => ({
+      ...perspective,
+      kras: perspective.kras.map(k => k.id === kraId ? {
         ...k,
-        kpis: [...(k.kpis || []), { id: `kpi_${Date.now()}_${Math.random().toString(36).slice(2,5)}`, name: '', desc: '', weight: 0 }]
+        kpis: [...(k.kpis || []), { id: `kpi_${Date.now()}_${Math.random().toString(36).slice(2,5)}`, name: '', weight: 0 }]
       } : k)
-    } : p));
+    }));
   }
 
   function updateKPI(perspId, kraId, kpiId, changes) {
-    setPerspectives(ps => ps.map(p => p.id === perspId ? {
-      ...p,
-      kras: p.kras.map(k => k.id === kraId ? {
+    updatePerspectiveTree(perspId, perspective => ({
+      ...perspective,
+      kras: perspective.kras.map(k => k.id === kraId ? {
         ...k,
         kpis: k.kpis.map(kp => kp.id === kpiId ? { ...kp, ...changes } : kp)
       } : k)
-    } : p));
+    }));
   }
 
   function removeKPI(perspId, kraId, kpiId) {
-    setPerspectives(ps => ps.map(p => p.id === perspId ? {
-      ...p,
-      kras: p.kras.map(k => k.id === kraId ? { ...k, kpis: k.kpis.filter(kp => kp.id !== kpiId) } : k)
-    } : p));
+    const nextManualKpis = { ...manualKpiWeights };
+    delete nextManualKpis[kpiId];
+    setManualKpiWeights(nextManualKpis);
+    updatePerspectiveTree(perspId, perspective => ({
+      ...perspective,
+      kras: perspective.kras.map(k => k.id === kraId ? { ...k, kpis: k.kpis.filter(kp => kp.id !== kpiId) } : k)
+    }), manualKraWeights, nextManualKpis);
   }
 
-  function addPerspective() {
-    setPerspectives(ps => [...ps, { id: `lp_${Date.now()}`, name: '', weight: 0, kras: [] }]);
+  function handleKraWeightChange(kraId, rawValue) {
+    setWeightDrafts(current => ({ ...current, [`kra:${kraId}`]: rawValue }));
+  }
+
+  function handleKpiWeightChange(kpiId, rawValue) {
+    setWeightDrafts(current => ({ ...current, [`kpi:${kpiId}`]: rawValue }));
+  }
+
+  function clearWeightDraft(draftKey) {
+    setWeightDrafts(current => {
+      const next = { ...current };
+      delete next[draftKey];
+      return next;
+    });
+  }
+
+  function handleKraWeightBlur(perspId, kraId) {
+    const draftKey = `kra:${kraId}`;
+    if (!Object.prototype.hasOwnProperty.call(weightDrafts, draftKey)) return;
+    const rawValue = (weightDrafts[draftKey] ?? '').trim();
+    clearWeightDraft(draftKey);
+    const nextManualKras = { ...manualKraWeights };
+    if (!rawValue) {
+      delete nextManualKras[kraId];
+      setManualKraWeights(nextManualKras);
+      updatePerspectiveTree(
+        perspId,
+        perspective => ({
+          ...perspective,
+          kras: perspective.kras.map(kra => kra.id === kraId ? { ...kra, suggestedWeight: 0 } : kra),
+        }),
+        nextManualKras,
+        manualKpiWeights,
+      );
+      return;
+    }
+    nextManualKras[kraId] = true;
+    setManualKraWeights(nextManualKras);
+    updatePerspectiveTree(
+      perspId,
+      perspective => ({
+        ...perspective,
+        kras: perspective.kras.map(kra => kra.id === kraId ? { ...kra, suggestedWeight: roundWeight(rawValue) } : kra),
+      }),
+      nextManualKras,
+      manualKpiWeights,
+    );
+  }
+
+  function handleKpiWeightBlur(perspId, kraId, kpiId) {
+    const draftKey = `kpi:${kpiId}`;
+    if (!Object.prototype.hasOwnProperty.call(weightDrafts, draftKey)) return;
+    const rawValue = (weightDrafts[draftKey] ?? '').trim();
+    clearWeightDraft(draftKey);
+    const nextManualKpis = { ...manualKpiWeights };
+    if (!rawValue) {
+      delete nextManualKpis[kpiId];
+      setManualKpiWeights(nextManualKpis);
+      updatePerspectiveTree(
+        perspId,
+        perspective => ({
+          ...perspective,
+          kras: perspective.kras.map(kra => kra.id === kraId ? {
+            ...kra,
+            kpis: kra.kpis.map(kpi => kpi.id === kpiId ? { ...kpi, weight: 0 } : kpi),
+          } : kra),
+        }),
+        manualKraWeights,
+        nextManualKpis,
+      );
+      return;
+    }
+    nextManualKpis[kpiId] = true;
+    setManualKpiWeights(nextManualKpis);
+    updatePerspectiveTree(
+      perspId,
+      perspective => ({
+        ...perspective,
+        kras: perspective.kras.map(kra => kra.id === kraId ? {
+          ...kra,
+          kpis: kra.kpis.map(kpi => kpi.id === kpiId ? { ...kpi, weight: roundWeight(rawValue) } : kpi),
+        } : kra),
+      }),
+      manualKraWeights,
+      nextManualKpis,
+    );
+  }
+
+  function handlePerspectiveWeightChange(perspId, rawValue) {
+    setWeightDrafts(current => ({ ...current, [`persp:${perspId}`]: rawValue }));
+  }
+
+  function handlePerspectiveWeightBlur(perspId) {
+    const draftKey = `persp:${perspId}`;
+    if (!Object.prototype.hasOwnProperty.call(weightDrafts, draftKey)) return;
+    const rawValue = (weightDrafts[draftKey] ?? '').trim();
+    clearWeightDraft(draftKey);
+    const nextWeight = rawValue === '' ? 0 : roundWeight(rawValue);
+    updatePerspectiveTree(
+      perspId,
+      perspective => ({ ...perspective, weight: nextWeight, baseWeight: nextWeight }),
+      manualKraWeights,
+      manualKpiWeights,
+    );
+  }
+
+  function stripWeightsFromPerspectives(nextPerspectives) {
+    return (nextPerspectives || []).map(perspective => ({
+      ...perspective,
+      weight: 0,
+      baseWeight: 0,
+      kras: (perspective.kras || []).map(kra => ({
+        ...kra,
+        suggestedWeight: 0,
+        kpis: (kra.kpis || []).map(kpi => ({
+          ...kpi,
+          weight: 0,
+        })),
+      })),
+    }));
   }
 
   const resolvedName = fixedName || name;
   const canSave = resolvedName.trim() && perspectives.some(p => (p.kras || []).some(k => k.name.trim()));
 
   const inputStyle = { border: '1px solid #E2E8F0', borderRadius: 6, padding: '6px 10px', fontSize: 13, outline: 'none', fontFamily: 'inherit', background: '#fff' };
+  const textareaStyle = { ...inputStyle, width: '100%', boxSizing: 'border-box', resize: 'vertical', minHeight: 64, lineHeight: 1.45 };
 
   return (
     <div style={{ position: 'fixed', inset: 0, zIndex: 2000, background: 'rgba(0,0,0,0.4)', display: 'flex', alignItems: 'flex-start', justifyContent: 'center', padding: '40px 20px', overflowY: 'auto' }}>
@@ -3197,63 +3432,124 @@ function AddLibraryModal({ config, initialLibrary = null, fixedName = '', onSave
             <div key={persp.id} style={{ border: '1.5px solid #E2E8F0', borderRadius: 10, marginBottom: 14, overflow: 'hidden' }}>
               <div style={{ padding: '10px 14px', background: '#F8FAFC', borderBottom: '1px solid #E9EDF2', display: 'flex', alignItems: 'center', gap: 10 }}>
                 <div style={{ width: 8, height: 8, borderRadius: '50%', background: '#2563EB', flexShrink: 0 }} />
-                <input value={persp.name} onChange={e => setPerspectives(ps => ps.map((p, i) => i === pi ? { ...p, name: e.target.value } : p))} placeholder="Perspective name" style={{ ...inputStyle, flex: 1, border: 'none', background: 'transparent', padding: '0', fontWeight: 600 }} />
-                <span style={{ fontSize: 12, color: '#9CA3AF' }}>Weight</span>
-                <input type="number" value={persp.weight || ''} onChange={e => setPerspectives(ps => ps.map((p, i) => i === pi ? { ...p, weight: Number(e.target.value) } : p))} style={{ ...inputStyle, width: 60, textAlign: 'center' }} placeholder="%" />
-                <span style={{ fontSize: 12, color: '#9CA3AF' }}>%</span>
+                <div style={{ flex: 1, fontWeight: 600, color: '#0F172A', fontSize: 13 }}>
+                  {persp.name || `Perspective ${pi + 1}`}
+                </div>
+                {weightType !== 'none' && (
+                  <>
+                    <span style={{ fontSize: 12, color: '#9CA3AF' }}>Weight</span>
+                    <input
+                      type="number"
+                      value={Object.prototype.hasOwnProperty.call(weightDrafts, `persp:${persp.id}`) ? weightDrafts[`persp:${persp.id}`] : (persp.weight || '')}
+                      onChange={e => handlePerspectiveWeightChange(persp.id, e.target.value)}
+                      onBlur={() => handlePerspectiveWeightBlur(persp.id)}
+                      style={{ ...inputStyle, width: 60, textAlign: 'center' }}
+                      placeholder="%"
+                    />
+                    <span style={{ fontSize: 12, color: '#9CA3AF' }}>%</span>
+                  </>
+                )}
               </div>
               <div style={{ padding: '10px 14px' }}>
                 {(persp.kras || []).map((kra) => (
                   <div key={kra.id} style={{ marginBottom: 8, border: '1px solid #F1F5F9', borderRadius: 8, padding: '10px 12px' }}>
+                    {(() => {
+                      const descOpen = !!openKraDescriptions[kra.id];
+                      const hasDesc = !!String(kra.desc || '').trim();
+                      return (
+                        <>
                     <div style={{ display: 'flex', gap: 8, marginBottom: type === 'kra-kpi' ? 6 : 0 }}>
                       <input value={kra.name} onChange={e => updateKRA(persp.id, kra.id, { name: e.target.value })} placeholder="KRA name" style={{ ...inputStyle, flex: 1 }} />
                       {weightType !== 'none' && (
                         <>
-                          <input type="number" value={kra.suggestedWeight || ''} onChange={e => updateKRA(persp.id, kra.id, { suggestedWeight: Number(e.target.value) })} style={{ ...inputStyle, width: 60, textAlign: 'center' }} placeholder="%" />
+                          <input
+                            type="number"
+                            value={Object.prototype.hasOwnProperty.call(weightDrafts, `kra:${kra.id}`) ? weightDrafts[`kra:${kra.id}`] : (kra.suggestedWeight || '')}
+                            onChange={e => handleKraWeightChange(kra.id, e.target.value)}
+                            onBlur={() => handleKraWeightBlur(persp.id, kra.id)}
+                            style={{ ...inputStyle, width: 60, textAlign: 'center' }}
+                            placeholder="%"
+                          />
                           <span style={{ fontSize: 12, color: '#9CA3AF', alignSelf: 'center' }}>%</span>
                         </>
                       )}
                       <button type="button" onClick={() => removeKRA(persp.id, kra.id)} style={{ background: 'none', border: 'none', color: '#DC2626', cursor: 'pointer', fontSize: 16, lineHeight: 1, padding: '0 4px' }}>×</button>
                     </div>
+                    <div style={{ marginBottom: type === 'kra-kpi' ? 8 : 0 }}>
+                      <button
+                        type="button"
+                        onClick={() => setOpenKraDescriptions(current => ({ ...current, [kra.id]: !descOpen }))}
+                        style={{
+                          background: 'none',
+                          border: 'none',
+                          padding: 0,
+                          marginBottom: descOpen ? 6 : 0,
+                          color: hasDesc ? '#2563EB' : '#94A3B8',
+                          fontSize: 12,
+                          fontWeight: 600,
+                          cursor: 'pointer',
+                          fontFamily: 'inherit',
+                        }}
+                      >
+                        {descOpen ? 'Hide KRA description' : hasDesc ? 'Edit KRA description' : '+ Add KRA description'}
+                      </button>
+                      {descOpen ? (
+                        <textarea
+                          value={kra.desc || ''}
+                          onChange={e => updateKRA(persp.id, kra.id, { desc: e.target.value })}
+                          placeholder="KRA description (optional)"
+                          style={textareaStyle}
+                        />
+                      ) : null}
+                    </div>
                     {type === 'kra-kpi' && (
                       <div style={{ paddingLeft: 16 }}>
                         {(kra.kpis || []).map(kpi => (
-                          <div key={kpi.id} style={{ display: 'flex', gap: 8, marginBottom: 4, alignItems: 'center' }}>
-                            <div style={{ width: 4, height: 4, borderRadius: '50%', background: '#CBD5E1', flexShrink: 0 }} />
-                            <input value={kpi.name} onChange={e => updateKPI(persp.id, kra.id, kpi.id, { name: e.target.value })} placeholder="KPI name" style={{ ...inputStyle, flex: 1, fontSize: 12 }} />
-                            {weightType !== 'none' && (
-                              <>
-                                <input type="number" value={kpi.weight || ''} onChange={e => updateKPI(persp.id, kra.id, kpi.id, { weight: Number(e.target.value) })} style={{ ...inputStyle, width: 55, textAlign: 'center', fontSize: 12 }} placeholder="%" />
-                                <span style={{ fontSize: 12, color: '#9CA3AF' }}>%</span>
-                              </>
-                            )}
-                            <button type="button" onClick={() => removeKPI(persp.id, kra.id, kpi.id)} style={{ background: 'none', border: 'none', color: '#DC2626', cursor: 'pointer', fontSize: 14, lineHeight: 1 }}>×</button>
+                          <div key={kpi.id} style={{ marginBottom: 8 }}>
+                            <div style={{ display: 'flex', gap: 8, marginBottom: 4, alignItems: 'center' }}>
+                              <div style={{ width: 4, height: 4, borderRadius: '50%', background: '#CBD5E1', flexShrink: 0 }} />
+                              <input value={kpi.name} onChange={e => updateKPI(persp.id, kra.id, kpi.id, { name: e.target.value })} placeholder="KPI name" style={{ ...inputStyle, flex: 1, fontSize: 12 }} />
+                              {weightType !== 'none' && (
+                                <>
+                                  <input
+                                    type="number"
+                                    value={Object.prototype.hasOwnProperty.call(weightDrafts, `kpi:${kpi.id}`) ? weightDrafts[`kpi:${kpi.id}`] : (kpi.weight || '')}
+                                    onChange={e => handleKpiWeightChange(kpi.id, e.target.value)}
+                                    onBlur={() => handleKpiWeightBlur(persp.id, kra.id, kpi.id)}
+                                    style={{ ...inputStyle, width: 55, textAlign: 'center', fontSize: 12 }}
+                                    placeholder="%"
+                                  />
+                                  <span style={{ fontSize: 12, color: '#9CA3AF' }}>%</span>
+                                </>
+                              )}
+                              <button type="button" onClick={() => removeKPI(persp.id, kra.id, kpi.id)} style={{ background: 'none', border: 'none', color: '#DC2626', cursor: 'pointer', fontSize: 14, lineHeight: 1 }}>×</button>
+                            </div>
                           </div>
                         ))}
                         <button type="button" onClick={() => addKPI(persp.id, kra.id)} style={{ fontSize: 11.5, color: '#7C3AED', background: 'none', border: 'none', cursor: 'pointer', padding: '2px 0 2px 6px', fontFamily: 'inherit' }}>+ Add KPI</button>
                       </div>
                     )}
+                        </>
+                      );
+                    })()}
                   </div>
                 ))}
                 <button type="button" onClick={() => addKRA(persp.id)} style={{ fontSize: 12.5, color: '#2563EB', background: 'none', border: 'none', cursor: 'pointer', fontWeight: 600, padding: '4px 0', fontFamily: 'inherit' }}>+ Add KRA</button>
               </div>
             </div>
           ))}
-
-          <button type="button" onClick={addPerspective} style={{ fontSize: 12.5, color: '#64748B', background: 'none', border: '1px dashed #CBD5E1', borderRadius: 7, cursor: 'pointer', padding: '6px 14px', fontFamily: 'inherit', width: '100%' }}>
-            + Add Perspective
-          </button>
         </div>
 
         <div style={{ padding: '16px 24px', borderTop: '1px solid #E9EDF2', display: 'flex', justifyContent: 'flex-end', gap: 10 }}>
           <button type="button" onClick={onClose} style={{ padding: '9px 20px', border: '1px solid #E2E8F0', borderRadius: 8, background: '#fff', fontSize: 13, cursor: 'pointer', fontFamily: 'inherit' }}>Cancel</button>
           <button type="button" disabled={!canSave} onClick={() => {
+            const nextPerspectives = weightType === 'none' ? stripWeightsFromPerspectives(perspectives) : perspectives;
             onSave({
               id: initialLibrary?.id || `lib_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
               name: resolvedName.trim(),
               type,
               weightType,
-              perspectives,
+              perspectives: nextPerspectives.map(({ baseWeight, ...perspective }) => perspective),
             });
           }} style={{ padding: '9px 22px', background: canSave ? '#2563EB' : '#CBD5E1', color: '#fff', border: 'none', borderRadius: 8, fontSize: 13, fontWeight: 600, cursor: canSave ? 'pointer' : 'not-allowed', fontFamily: 'inherit' }}>
             {initialLibrary ? 'Save Changes' : 'Save Library'}
@@ -3397,7 +3693,7 @@ function StepGoalLibraries({ config, update }) {
                   key={`${group.id}:${assignment.slotKey}`}
                   library={library || { name: assignment.label, type: 'kra-kpi', perspectives: [] }}
                   groupLabel={assignment.label}
-                  assignedText={showAllGroups ? groupLabel : (library ? 'Configured' : 'Pending')}
+                  assignedText={showAllGroups ? (group.name || 'Group') : (group.segmentAttr || (library ? 'Configured' : 'Pending'))}
                   accent={accent}
                   active={!!library}
                   empty={!library}

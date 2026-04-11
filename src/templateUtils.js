@@ -315,7 +315,7 @@ export async function downloadAttributeValuesTemplate(attrLabel, values = []) {
 
 /* ── BULK GOAL LIBRARY TEMPLATE ──────────────────────────────────────────── */
 // Generates a ready-to-use Excel template for uploading multiple goal libraries at once.
-// Columns: Library Name | Perspective | Persp. Weight % | KRA Name | KRA Description | KRA Weight % | KPI Name | KPI Description | KPI Weight %
+// Columns: Library Name | Perspective | Persp. Weight % | KRA Name | KRA Description | KRA Weight % | KPI Name | KPI Weight %
 export async function downloadGoalLibraryBulkTemplate(configOrPerspectives = []) {
   const { default: ExcelJS } = await getExcelJS();
   const wb = makeWorkbook(ExcelJS);
@@ -350,10 +350,9 @@ export async function downloadGoalLibraryBulkTemplate(configOrPerspectives = [])
     'KRA Description',
     'KRA Weight %',
     'KPI Name',
-    'KPI Description',
     'KPI Weight %',
   ];
-  const colWidths = [24, 22, 18, 30, 36, 14, 30, 36, 14];
+  const colWidths = [24, 22, 18, 30, 36, 14, 30, 14];
   const n = headers.length;
 
   // ── Sheet 1: Libraries ──────────────────────────────────────────────────
@@ -372,18 +371,18 @@ export async function downloadGoalLibraryBulkTemplate(configOrPerspectives = [])
 
   // Example rows — Library 1 (KRA + KPI)
   const ex1 = [
-    [exampleLibraryOne, p1, '30', 'Revenue Growth',    'Grow quarterly revenue',         '50', 'Monthly ARR',          'Monthly recurring revenue vs target', '60'],
-    [exampleLibraryOne, p1, '30', 'Revenue Growth',    'Grow quarterly revenue',         '50', 'New Client Wins',      'New enterprise clients acquired',     '40'],
-    [exampleLibraryOne, p2, '25', 'NPS Score',         'Net promoter score improvement', '100','Survey Response Rate', 'Quarterly NPS survey completion',     '100'],
-    [exampleLibraryOne, p3, '25', 'Delivery Quality',  'On-time delivery of sprints',    '100','Sprint Velocity',      'Story points delivered per sprint',   '50'],
-    [exampleLibraryOne, p3, '25', 'Delivery Quality',  'On-time delivery of sprints',    '100','Bug Escape Rate',      'Defects found in production',         '50'],
+    [exampleLibraryOne, p1, '30', 'Revenue Growth',    'Grow quarterly revenue',         '50', 'Monthly ARR',          '60'],
+    [exampleLibraryOne, p1, '30', 'Revenue Growth',    'Grow quarterly revenue',         '50', 'New Client Wins',      '40'],
+    [exampleLibraryOne, p2, '25', 'NPS Score',         'Net promoter score improvement', '100','Survey Response Rate', '100'],
+    [exampleLibraryOne, p3, '25', 'Delivery Quality',  'On-time delivery of sprints',    '100','Sprint Velocity',      '50'],
+    [exampleLibraryOne, p3, '25', 'Delivery Quality',  'On-time delivery of sprints',    '100','Bug Escape Rate',      '50'],
   ];
   // Example rows — Library 2 (KRA only)
   const ex2 = [
-    [exampleLibraryTwo, p1, '40', 'Quota Achievement',  'Hit individual revenue targets',  '60', '', '', ''],
-    [exampleLibraryTwo, p1, '40', 'Pipeline Growth',    'Expand active sales pipeline',    '40', '', '', ''],
-    [exampleLibraryTwo, p2, '35', 'Customer Retention', 'Retain existing client base',     '100','', '', ''],
-    [exampleLibraryTwo, p3, '25', 'Process Compliance', 'Follow sales process standards',  '100','', '', ''],
+    [exampleLibraryTwo, p1, '40', 'Quota Achievement',  'Hit individual revenue targets',  '60', '', ''],
+    [exampleLibraryTwo, p1, '40', 'Pipeline Growth',    'Expand active sales pipeline',    '40', '', ''],
+    [exampleLibraryTwo, p2, '35', 'Customer Retention', 'Retain existing client base',     '100','', ''],
+    [exampleLibraryTwo, p3, '25', 'Process Compliance', 'Follow sales process standards',  '100','', ''],
   ];
 
   let exRowIndex = 0;
@@ -449,7 +448,6 @@ export async function downloadGoalLibraryBulkTemplate(configOrPerspectives = [])
     ['KRA Description',     'Optional: a brief description of the KRA.'],
     ['KRA Weight %',        'Weight of this KRA within its Perspective (must total 100 per perspective).'],
     ['KPI Name',            'Key Performance Indicator under this KRA. Leave blank for KRA-only libraries.'],
-    ['KPI Description',     'Optional: brief description of the KPI.'],
     ['KPI Weight %',        'Weight of this KPI within its KRA (must total 100 per KRA).'],
   ]);
 
@@ -499,7 +497,6 @@ export function parseGoalLibraryBulkXlsx(file) {
         const idxKraDesc = headers.indexOf('kra description');
         const idxKraWeight = headers.indexOf('kra weight %');
         const idxKpiName = headers.indexOf('kpi name');
-        const idxKpiDesc = headers.indexOf('kpi description');
         const idxKpiWeight = headers.indexOf('kpi weight %');
 
         if (idxLibrary === -1 || idxPersp === -1 || idxKraName === -1) {
@@ -598,7 +595,6 @@ export function parseGoalLibraryBulkXlsx(file) {
               kra.kpis.push({
                 id: `kpi_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`,
                 name: kpiName,
-                desc: readCell(row, idxKpiDesc),
                 weight: kpiWeight ?? 0,
               });
             }
