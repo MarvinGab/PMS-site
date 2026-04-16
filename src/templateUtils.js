@@ -315,7 +315,8 @@ export async function downloadAttributeValuesTemplate(attrLabel, values = []) {
 
 /* ── BULK GOAL LIBRARY TEMPLATE ──────────────────────────────────────────── */
 // Generates a ready-to-use Excel template for uploading multiple goal libraries at once.
-// Columns: Library Name | Perspective | Persp. Weight % | KRA Name | KRA Description | KRA Weight % | KPI Name | KPI Weight %
+// One sheet, per-group sections. KPI columns greyed for KRA-only groups.
+// Parser matches Group Name + Library Name back to groups and strips KPIs if group is kra-only.
 export async function downloadGoalLibraryBulkTemplate(configOrPerspectives = []) {
   const { default: ExcelJS } = await getExcelJS();
   const wb = makeWorkbook(ExcelJS);
@@ -325,106 +326,169 @@ export async function downloadGoalLibraryBulkTemplate(configOrPerspectives = [])
     : (configOrPerspectives || {});
 
   const perspectives = config.perspectives || [];
-  const goalGroups = config.goalGroups || [];
-  const perspNames = perspectives.filter(p => p.name).map(p => p.name);
+  const goalGroups   = config.goalGroups  || [];
+  const perspNames   = perspectives.filter(p => p.name).map(p => p.name);
   const p1 = perspNames[0] || 'Financial';
   const p2 = perspNames[1] || 'Customer';
-  const p3 = perspNames[2] || 'Internal Processes';
-  const librarySeeds = Array.from(new Set(
-    goalGroups
-      .filter(group => group.hasLibrary)
-      .flatMap(group => {
-        const values = (group.segmentValues || []).map(value => String(value || '').trim()).filter(Boolean);
-        return values.length > 0 ? values : [String(group.name || 'All Employees').trim()];
-      })
-      .filter(Boolean)
-  ));
-  const exampleLibraryOne = librarySeeds[0] || 'Attribute Value 1';
-  const exampleLibraryTwo = librarySeeds[1] || 'Attribute Value 2';
+  const p3 = perspNames[2] || 'Internal Process';
 
-  const headers = [
-    'Library Name',
-    'Perspective',
-    'Perspective Weight %',
-    'KRA Name',
-    'KRA Description',
-    'KRA Weight %',
-    'KPI Name',
-    'KPI Weight %',
-  ];
-  const colWidths = [24, 22, 18, 30, 36, 14, 30, 14];
-  const n = headers.length;
+  // Only groups that have a goal library configured
+  const activeGroups = goalGroups.filter(g => g.hasLibrary);
 
-  // ── Sheet 1: Libraries ──────────────────────────────────────────────────
+  const headers    = ['Group Name', 'Library Name', 'Perspective', 'KRA Name', 'KRA Description', 'KRA Weight %', 'KPI Name', 'KPI Weight %'];
+  const colWidths  = [24, 28, 22, 30, 36, 14, 30, 14];
+  const n          = headers.length;
+  const KPI_COLS   = [7, 8]; // 1-based column indices for KPI Name and KPI Weight %
+  const GREY_FILL  = 'FFE5E7EB';
+  const GREY_TEXT  = 'FF9CA3AF';
+
+  // ── Sheet 1: Goal Libraries ─────────────────────────────────────────────
   const ws = wb.addWorksheet('Goal Libraries', {
     views: [{ showGridLines: false, state: 'frozen', xSplit: 0, ySplit: 1, topLeftCell: 'A2' }],
     properties: { tabColor: { argb: C.BLUE_DARK } },
   });
   ws.columns = colWidths.map(w => ({ width: w }));
 
-  // Header row
   const hRow = ws.addRow(headers);
   styleHeaderRow(hRow, n);
 
-  // Example banner
-  bannerRow(ws, n, '  ↓  Example rows — delete before uploading your data', C.RED_BANNER, C.RED_TEXT);
-
-  // Example rows — Library 1 (KRA + KPI)
-  const ex1 = [
-    [exampleLibraryOne, p1, '30', 'Revenue Growth',    'Grow quarterly revenue',         '50', 'Monthly ARR',          '60'],
-    [exampleLibraryOne, p1, '30', 'Revenue Growth',    'Grow quarterly revenue',         '50', 'New Client Wins',      '40'],
-    [exampleLibraryOne, p2, '25', 'NPS Score',         'Net promoter score improvement', '100','Survey Response Rate', '100'],
-    [exampleLibraryOne, p3, '25', 'Delivery Quality',  'On-time delivery of sprints',    '100','Sprint Velocity',      '50'],
-    [exampleLibraryOne, p3, '25', 'Delivery Quality',  'On-time delivery of sprints',    '100','Bug Escape Rate',      '50'],
-  ];
-  // Example rows — Library 2 (KRA only)
-  const ex2 = [
-    [exampleLibraryTwo, p1, '40', 'Quota Achievement',  'Hit individual revenue targets',  '60', '', ''],
-    [exampleLibraryTwo, p1, '40', 'Pipeline Growth',    'Expand active sales pipeline',    '40', '', ''],
-    [exampleLibraryTwo, p2, '35', 'Customer Retention', 'Retain existing client base',     '100','', ''],
-    [exampleLibraryTwo, p3, '25', 'Process Compliance', 'Follow sales process standards',  '100','', ''],
-  ];
-
-  let exRowIndex = 0;
-  for (const row of [...ex1, ...ex2]) {
-    const r = ws.addRow(row);
-    styleExampleRow(r, n);
-    exRowIndex++;
+  // Helper: grey out KPI cells on a row (for KRA-only sections)
+  function greyKpiCells(row) {
+    for (const c of KPI_COLS) {
+      const cell = row.getCell(c);
+      applyFill(cell, GREY_FILL);
+      cell.value = '—';
+      font(cell, { color: { argb: GREY_TEXT }, italic: true });
+      applyBorder(cell, 'thin', GREY_FILL);
+    }
   }
 
-  // "Your data goes here" banner
-  bannerRow(ws, n, '  ↑  Delete examples above  ·  Your libraries start here  ↓', C.BLUE_FILL, C.BLUE_DARK);
+  // Helper: group section banner (coloured header strip per group)
+  const GROUP_COLORS = [
+    { fill: 'FFE0E7FF', text: 'FF1E40AF', border: 'FFC7D2FE' }, // indigo
+    { fill: 'FFF0FDF4', text: 'FF166534', border: 'FFBBF7D0' }, // green
+    { fill: 'FFFDF4FF', text: 'FF701A75', border: 'FFFAE8FF' }, // purple
+    { fill: 'FFFEFCE8', text: 'FF713F12', border: 'FFFEF08A' }, // yellow
+    { fill: 'FFFFF1F2', text: 'FF9F1239', border: 'FFFECDD3' }, // rose
+  ];
 
-  // 10 blank editable rows
-  for (let i = 0; i < 10; i++) {
-    const r = ws.addRow(Array(n).fill(''));
-    styleDataRow(r, n, i);
+  function groupBannerRow(groupIndex, group, libType) {
+    const attr    = group.segmentAttr || 'All Employees';
+    const typeLabel = libType === 'kra-kpi' ? '📊 KRAs + KPIs — fill all columns' : '📌 KRAs only — leave KPI columns blank';
+    const text    = `  ▶  GROUP: ${group.name}  |  Attribute: ${attr}  |  ${typeLabel}`;
+    const palette = GROUP_COLORS[groupIndex % GROUP_COLORS.length];
+
+    const row = ws.addRow([text]);
+    ws.mergeCells(`A${row.number}:${colLetter(n)}${row.number}`);
+    const cell = ws.getCell(`A${row.number}`);
+    applyFill(cell, palette.fill);
+    applyBorder(cell, 'medium', palette.border);
+    cell.font = { name: 'Calibri', size: 10.5, bold: true, color: { argb: palette.text } };
+    cell.alignment = { vertical: 'middle', horizontal: 'left', indent: 1 };
+    row.height = 22;
+    return row;
   }
 
-  // Notes section
+  // Styles the Group Name cell (col A) in a data/example row to signal it is pre-filled
+  function styleGroupNameCell(row, groupIndex) {
+    const cell = row.getCell(1);
+    const palette = GROUP_COLORS[groupIndex % GROUP_COLORS.length];
+    applyFill(cell, palette.fill);
+    font(cell, { color: { argb: palette.text }, italic: true, size: 9.5 });
+    cell.alignment = { vertical: 'middle', horizontal: 'left', indent: 1 };
+  }
+
+  if (activeGroups.length === 0) {
+    // Fallback: no groups configured with libraries — generic template
+    bannerRow(ws, n, '  ↓  Example rows — delete before uploading your data', C.RED_BANNER, C.RED_TEXT);
+    const exRows = [
+      ['', 'Library A', p1, 'Revenue Growth',   'Grow quarterly revenue',        '40', 'Monthly ARR',    '60'],
+      ['', 'Library A', p1, 'Revenue Growth',   'Grow quarterly revenue',        '40', 'New Client Wins', '40'],
+      ['', 'Library A', p2, 'Customer NPS',     'Net promoter score improvement','60', 'Survey Rate',    '100'],
+    ];
+    for (const row of exRows) { styleExampleRow(ws.addRow(row), n); }
+    bannerRow(ws, n, '  ↑  Delete examples above  ·  Your libraries start here  ↓', C.BLUE_FILL, C.BLUE_DARK);
+    for (let i = 0; i < 12; i++) { styleDataRow(ws.addRow(Array(n).fill('')), n, i); }
+  } else {
+    // One section per group
+    activeGroups.forEach((group, gi) => {
+      const libType = group.libraryType || 'kra-only';
+      const isKraOnly = libType === 'kra-only';
+
+      // Get the library names this group expects (segment values or group name)
+      const segValues = (group.segmentValues || []).map(v => String(v || '').trim()).filter(Boolean);
+      const libNames  = segValues.length > 0 ? segValues : [group.name || 'All Employees'];
+
+      // Section banner
+      if (gi > 0) ws.addRow([]); // spacer between groups
+      groupBannerRow(gi, group, libType);
+
+      // Example rows (first lib name only, 2-3 KRAs) — Group Name pre-filled
+      const exName = libNames[0];
+      bannerRow(ws, n, `  ↓  Example rows for "${exName}" — delete before uploading`, C.RED_BANNER, C.RED_TEXT);
+
+      const exRows = isKraOnly
+        ? [
+            [group.name, exName, p1, 'Revenue Growth',    'Grow quarterly revenue',        '40', '', ''],
+            [group.name, exName, p2, 'Customer Retention','Retain existing client base',   '35', '', ''],
+            [group.name, exName, p3, 'Process Quality',   'Improve delivery standards',    '25', '', ''],
+          ]
+        : [
+            [group.name, exName, p1, 'Revenue Growth',    'Grow quarterly revenue',        '40', 'Monthly ARR',    '60'],
+            [group.name, exName, p1, 'Revenue Growth',    'Grow quarterly revenue',        '40', 'New Client Wins', '40'],
+            [group.name, exName, p2, 'Customer NPS',      'Net promoter score improvement','35', 'Survey Rate',    '100'],
+            [group.name, exName, p3, 'Process Quality',   'Improve delivery standards',    '25', 'On-time Rate',   '100'],
+          ];
+
+      for (const row of exRows) {
+        const r = ws.addRow(row);
+        styleExampleRow(r, n);
+        styleGroupNameCell(r, gi);
+        if (isKraOnly) greyKpiCells(r);
+      }
+
+      bannerRow(ws, n, `  ↑  Delete examples above  ·  Fill your ${libNames.length} librar${libNames.length === 1 ? 'y' : 'ies'} below  ↓`, C.BLUE_FILL, C.BLUE_DARK);
+
+      // Hint row showing expected library names
+      if (libNames.length > 1) {
+        bannerRow(ws, n, `     Expected Library Names for this group:  ${libNames.join('  ·  ')}`, 'FFF8FAFC', 'FF64748B', 16);
+      }
+
+      // Blank data rows — 4 per library name, Group Name pre-filled
+      const blankCount = Math.min(libNames.length * 4, 20);
+      for (let i = 0; i < blankCount; i++) {
+        const blankRow = Array(n).fill('');
+        blankRow[0] = group.name;
+        const r = ws.addRow(blankRow);
+        styleDataRow(r, n, i);
+        styleGroupNameCell(r, gi);
+        if (isKraOnly) greyKpiCells(r);
+      }
+    });
+  }
+
+  // Notes
   addNoteRows(ws, [
     ['RULES & NOTES'],
-    ['• Library Name: all rows for the same library must have the exact same name in column A. Each unique name becomes a separate library card.'],
-    [librarySeeds.length > 0
-      ? '• In this setup, the Library Name should usually match one of your configured attribute values from Step 3.'
-      : '• In this setup, the Library Name should usually match the attribute value or employee group you are building a card for.'],
-    ['• Perspective Weight %: the weight of each perspective (must sum to 100 across all perspectives for that library).'],
-    ['• KRA Weight %: weights for KRAs within a perspective. Must sum to 100 per perspective, per library.'],
-    ['• KPI Name / KPI Weight %: optional. If you include KPIs, repeat the KRA Name & KRA Weight % on each KPI row.'],
-    ['• KPI Weight %: weights for KPIs within a KRA. Must sum to 100 per KRA.'],
-    ['• Leave KPI columns blank for KRA-only libraries.'],
+    ['• Each section above corresponds to one employee group from your Step 3 configuration.'],
+    ['• Group Name: pre-filled automatically — do not edit. It tells the system which group each library belongs to, so two groups can share the same designation name without collision.'],
+    ['• Library Name: use the exact segment value (e.g. designation name) as the Library Name. Each unique Group Name + Library Name pair becomes one library card.'],
+    ['• Perspective: grouping and display only — not scored separately. Must match your BSC perspective names.'],
+    ['• KRA Weight %: optional. If provided, the value is pre-filled as a suggestion in the employee\'s goal plan. The library is a reference catalog — employees may pick any subset of KRAs, so weights here do not need to sum to 100.'],
+    ['• KPI columns (greyed): only applicable for KRA+KPI groups. Leave blank or do not fill greyed cells.'],
+    ['• KPI Weight %: optional. If provided, pre-filled as a suggested starting weight in the employee\'s plan.'],
     ['• Delete all red example rows before uploading.'],
-    ['• Column headers must remain exactly as shown — do not rename or reorder them.'],
+    ['• Do not rename, reorder, or delete column headers.'],
     perspNames.length > 0
-      ? [`• Valid Perspectives for this org: ${perspNames.join('  |  ')}`]
-      : ['• Perspective names should match what you configured in Step 2 (BSC Perspectives).'],
+      ? [`• Valid Perspectives: ${perspNames.join('  |  ')}`]
+      : ['• Perspective names must match what you set in Step 2.'],
   ]);
 
   // ── Sheet 2: Reference ──────────────────────────────────────────────────
   const ref = wb.addWorksheet('Reference', {
     properties: { tabColor: { argb: 'FF64748B' } },
   });
-  ref.columns = [{ width: 28 }, { width: 50 }];
+  ref.columns = [{ width: 28 }, { width: 55 }];
 
   const addRefSection = (title, rows) => {
     const tRow = ref.addRow([title]);
@@ -441,40 +505,42 @@ export async function downloadGoalLibraryBulkTemplate(configOrPerspectives = [])
   };
 
   addRefSection('Column Guide', [
-    ['Library Name',        'A unique name for this library. All KRAs/KPIs in this library share this name.'],
-    ['Perspective',         'The BSC perspective this KRA belongs to.'],
-    ['Perspective Weight %','Weight of this perspective across all perspectives (must total 100).'],
-    ['KRA Name',            'Key Result Area — the goal topic or theme.'],
-    ['KRA Description',     'Optional: a brief description of the KRA.'],
-    ['KRA Weight %',        'Weight of this KRA within its Perspective (must total 100 per perspective).'],
-    ['KPI Name',            'Key Performance Indicator under this KRA. Leave blank for KRA-only libraries.'],
-    ['KPI Weight %',        'Weight of this KPI within its KRA (must total 100 per KRA).'],
+    ['Group Name',      'Pre-filled automatically — identifies which employee group this library belongs to. Do not edit. Two groups can use the same Library Name; Group Name keeps them separate.'],
+    ['Library Name',    'Unique name per library within a group — usually the designation/segment value. All rows for one library share this name.'],
+    ['Perspective',     'BSC perspective this KRA belongs to. Display/grouping only — not scored separately.'],
+    ['KRA Name',        'Key Result Area — the goal topic or theme.'],
+    ['KRA Description', 'Optional brief description of the KRA.'],
+    ['KRA Weight %',    'Optional suggested weight. Pre-filled in the employee\'s plan when they add this KRA. The library is a reference catalog — employees pick a subset, so weights here do not need to sum to 100.'],
+    ['KPI Name',        'Key Performance Indicator under this KRA. Only for KRA+KPI groups — leave blank otherwise.'],
+    ['KPI Weight %',    'Optional suggested weight for this KPI. Pre-filled in the employee\'s plan as a starting value.'],
   ]);
 
-  if (perspNames.length > 0) {
-    addRefSection('Configured Perspectives', perspNames.map(name => {
-      const p = perspectives.find(x => x.name === name);
-      return [name, `Weight: ${p?.weight ?? '—'}%`];
+  if (activeGroups.length > 0) {
+    addRefSection('Configured Groups', activeGroups.map((g, i) => {
+      const libType  = g.libraryType || 'kra-only';
+      const segVals  = (g.segmentValues || []).filter(Boolean);
+      const libNames = segVals.length > 0 ? segVals.join(', ') : g.name;
+      return [g.name, `${libType === 'kra-kpi' ? 'KRA + KPI' : 'KRA only'}  |  Library cards: ${libNames}`];
     }));
   }
 
-  if (librarySeeds.length > 0) {
-    addRefSection('Current Library Card Names', librarySeeds.map(name => [name, 'Use this exact value in the Library Name column if you are filling that card.']));
+  if (perspNames.length > 0) {
+    addRefSection('Configured Perspectives', perspNames.map(name => [name, 'Use this exact name in the Perspective column.']));
   }
 
   addRefSection('Common Mistakes', [
-    ['KRA weights ≠ 100',    'KRA weights within a perspective must always add up to exactly 100.'],
-    ['KPI weights ≠ 100',    'KPI weights within a KRA must always add up to exactly 100.'],
-    ['Mixed KRA/KPI rows',   'If using KPIs, every row in that library should have a KPI (or leave all KPI columns blank for KRA-only).'],
-    ['Perspective mismatch', 'Perspective names must match your BSC configuration exactly (case-sensitive).'],
-    ['Library name mismatch','All rows for a library must use the exact same Library Name value.'],
+    ['Non-numeric weight',    'If you fill in a weight, it must be a plain number (e.g. 40, not "40%"). Blank is fine — weights are optional.'],
+    ['Filling greyed cells',  'Grey KPI cells belong to KRA-only groups — any values there will be ignored on upload.'],
+    ['Perspective mismatch',  'Perspective names must match your BSC configuration exactly (case-sensitive).'],
+    ['Library name mismatch', 'All rows for a library must use the exact same Library Name.'],
+    ['Editing Group Name',    'The Group Name column is pre-filled — changing it will break the group-to-library mapping on upload.'],
   ]);
 
   await writeAndDownload(wb, 'zaro_goal_libraries_template.xlsx');
 }
 
 /* ── PARSE BULK GOAL LIBRARY UPLOAD ─────────────────────────────────────── */
-export function parseGoalLibraryBulkXlsx(file) {
+export function parseGoalLibraryBulkXlsx(file, goalGroups = []) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onerror = () => reject(new Error('Could not read file'));
@@ -490,9 +556,9 @@ export function parseGoalLibraryBulkXlsx(file) {
         }
 
         const headers = (allRows[0] || []).map(h => String(h || '').trim().toLowerCase());
+        const idxGroupName = headers.indexOf('group name');
         const idxLibrary = headers.indexOf('library name');
         const idxPersp = headers.indexOf('perspective');
-        const idxPerspWeight = headers.indexOf('perspective weight %');
         const idxKraName = headers.indexOf('kra name');
         const idxKraDesc = headers.indexOf('kra description');
         const idxKraWeight = headers.indexOf('kra weight %');
@@ -504,7 +570,7 @@ export function parseGoalLibraryBulkXlsx(file) {
           return;
         }
 
-        const librariesByName = new Map();
+        const librariesByKey = new Map(); // key: "groupName::libraryName" or "libraryName" for old templates
         let validRowCount = 0;
 
         const readCell = (row, index) => (index >= 0 ? String(row[index] || '').trim() : '');
@@ -512,7 +578,7 @@ export function parseGoalLibraryBulkXlsx(file) {
           const text = String(raw || '').trim();
           if (!text) return null;
           const numeric = Number(text);
-          return Number.isFinite(numeric) ? numeric : null;
+          return Number.isFinite(numeric) && numeric >= 0 ? numeric : null;
         };
 
         for (const row of allRows.slice(1)) {
@@ -527,6 +593,7 @@ export function parseGoalLibraryBulkXlsx(file) {
             continue;
           }
 
+          const groupName = readCell(row, idxGroupName);
           const libraryName = readCell(row, idxLibrary);
           const perspectiveName = readCell(row, idxPersp);
           const kraName = readCell(row, idxKraName);
@@ -535,24 +602,29 @@ export function parseGoalLibraryBulkXlsx(file) {
           if (!libraryName || !perspectiveName || !kraName) continue;
           validRowCount += 1;
 
-          const perspectiveWeight = parseWeight(readCell(row, idxPerspWeight));
           const kraWeight = parseWeight(readCell(row, idxKraWeight));
           const kpiWeight = parseWeight(readCell(row, idxKpiWeight));
 
-          const libKey = libraryName.toLowerCase();
-          if (!librariesByName.has(libKey)) {
-            librariesByName.set(libKey, {
+          // Composite key prevents collision when two groups share the same designation/library name.
+          // Falls back to plain libraryName for templates generated before Group Name column was added.
+          const libKey = groupName
+            ? `${groupName.toLowerCase()}::${libraryName.toLowerCase()}`
+            : libraryName.toLowerCase();
+
+          if (!librariesByKey.has(libKey)) {
+            librariesByKey.set(libKey, {
               id: `lib_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
               name: libraryName,
+              groupName,
               type: 'kra-only',
               weightType: 'none',
               perspectivesMap: new Map(),
             });
           }
 
-          const library = librariesByName.get(libKey);
+          const library = librariesByKey.get(libKey);
           if (kpiName) library.type = 'kra-kpi';
-          if (perspectiveWeight !== null || kraWeight !== null || kpiWeight !== null) {
+          if (kraWeight !== null || kpiWeight !== null) {
             library.weightType = 'suggested';
           }
 
@@ -561,15 +633,12 @@ export function parseGoalLibraryBulkXlsx(file) {
             library.perspectivesMap.set(perspectiveKey, {
               id: `lp_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`,
               name: perspectiveName,
-              weight: perspectiveWeight ?? 0,
+              weight: 0,
               krasMap: new Map(),
             });
           }
 
           const perspective = library.perspectivesMap.get(perspectiveKey);
-          if (perspective.weight === 0 && perspectiveWeight !== null) {
-            perspective.weight = perspectiveWeight;
-          }
 
           const kraKey = kraName.toLowerCase();
           if (!perspective.krasMap.has(kraKey)) {
@@ -601,25 +670,56 @@ export function parseGoalLibraryBulkXlsx(file) {
           }
         }
 
-        const libraries = Array.from(librariesByName.values()).map(library => ({
-          id: library.id,
-          name: library.name,
-          type: library.type,
-          weightType: library.weightType,
-          perspectives: Array.from(library.perspectivesMap.values()).map(perspective => ({
-            id: perspective.id,
-            name: perspective.name,
-            weight: perspective.weight,
-            kras: Array.from(perspective.krasMap.values()),
-          })),
-        }));
+        // Build kra-only lookup using composite keys (groupName::libName).
+        // Also keep plain-name fallback for templates uploaded without the Group Name column.
+        const kraOnlyCompositeKeys = new Set();
+        const kraOnlyPlainNames = new Set();
+        for (const group of (goalGroups || [])) {
+          if (!group.hasLibrary || (group.libraryType || 'kra-only') !== 'kra-only') continue;
+          const gName   = String(group.name || '').trim().toLowerCase();
+          const segVals = (group.segmentValues || []).map(v => String(v || '').trim().toLowerCase()).filter(Boolean);
+          const names   = segVals.length > 0 ? segVals : [gName];
+          names.forEach(name => {
+            kraOnlyCompositeKeys.add(`${gName}::${name}`);
+            kraOnlyPlainNames.add(name); // backward compat
+          });
+        }
+
+        const warnings = [];
+        const libraries = Array.from(librariesByKey.values()).map(library => {
+          const compositeKey = library.groupName
+            ? `${library.groupName.toLowerCase()}::${library.name.toLowerCase()}`
+            : null;
+          const isKraOnly = compositeKey
+            ? kraOnlyCompositeKeys.has(compositeKey)
+            : kraOnlyPlainNames.has(library.name.toLowerCase());
+          if (isKraOnly && library.type === 'kra-kpi') {
+            warnings.push(`"${library.name}" (${library.groupName || 'unknown group'}) is configured as KRA-only — KPI entries were ignored.`);
+          }
+          return {
+            id: library.id,
+            name: library.name,
+            groupName: library.groupName || '',
+            type: isKraOnly ? 'kra-only' : library.type,
+            weightType: library.weightType,
+            perspectives: Array.from(library.perspectivesMap.values()).map(perspective => ({
+              id: perspective.id,
+              name: perspective.name,
+              weight: perspective.weight,
+              kras: Array.from(perspective.krasMap.values()).map(kra => ({
+                ...kra,
+                kpis: isKraOnly ? [] : kra.kpis,
+              })),
+            })),
+          };
+        });
 
         if (!validRowCount || libraries.length === 0) {
           reject(new Error('No valid library rows found in the uploaded sheet'));
           return;
         }
 
-        resolve({ libraries, count: libraries.length });
+        resolve({ libraries, count: libraries.length, warnings });
       } catch (err) {
         reject(new Error('Could not parse file: ' + err.message));
       }
@@ -907,6 +1007,45 @@ function detectSimilarNames(employees) {
   return warnings;
 }
 
+function normalizeEmployeeNameForCompare(value) {
+  return String(value || '').trim().replace(/\s+/g, ' ').toLowerCase();
+}
+
+function validateEmployeeName(value) {
+  const name = String(value || '').trim().replace(/\s+/g, ' ');
+  if (!name) {
+    return { valid: false, message: 'Employee Name is missing' };
+  }
+
+  const letterTokens = name.match(/\p{L}[\p{L}\p{M}]*/gu) || [];
+  if (letterTokens.length === 0) {
+    return { valid: false, message: 'Employee Name must contain letters' };
+  }
+  if (!/^[\p{L}\p{M} .'\-’]+$/u.test(name)) {
+    return { valid: false, message: 'Employee Name contains invalid characters — use letters, spaces, dots, apostrophes, or hyphens only' };
+  }
+
+  const compactLetters = letterTokens.join('');
+  if (compactLetters.length < 2) {
+    return { valid: false, message: 'Employee Name looks incomplete — use the employee’s full name' };
+  }
+
+  if (letterTokens.length === 1 && !name.includes('.') && /^[\p{Ll}\p{M}]+$/u.test(letterTokens[0])) {
+    return { valid: false, message: 'Employee Name looks incomplete or mistyped — use a properly formatted full name' };
+  }
+
+  return { valid: true, normalized: normalizeEmployeeNameForCompare(name) };
+}
+
+function formatIssueRowList(rows = []) {
+  if (rows.length === 0) return '';
+  const visibleRows = rows.slice(0, 5).join(', ');
+  const extraCount = rows.length - Math.min(rows.length, 5);
+  return rows.length === 1
+    ? `row ${rows[0]}`
+    : `rows ${visibleRows}${extraCount > 0 ? ` +${extraCount} more` : ''}`;
+}
+
 /* ── EMPLOYEE TEMPLATE META ──────────────────────────────────────────────── */
 const STD_NORM = ['employeecode','employeename','emailid','reportingmanagercode','reportingmanagername','reportingmanageremail','l2managercode','l2managername'];
 
@@ -915,20 +1054,135 @@ function attrAlreadyStandard(attrLabel) {
   return STD_NORM.some(s => s.includes(norm) || norm.includes(s));
 }
 
-export function employeeTemplateMeta(config) {
-  const { goalCreationMode, goalLibraryScope, goalSegmentAttr, goalSegmentValues, goalLimitScope, goalLimitAttr, managerLevels, requireEmail, empCodeFormat } = config;
-  const needsAttr =
+function normalizeEmployeeFieldKey(value) {
+  return String(value || '').trim().toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+
+function getEmployeeRowValue(employee, fieldName) {
+  if (!employee || !fieldName) return '';
+  const directValue = employee[fieldName];
+  if (directValue !== undefined && directValue !== null && String(directValue).trim()) {
+    return String(directValue).trim();
+  }
+
+  const normalizedField = normalizeEmployeeFieldKey(fieldName);
+  const matchedKey = Object.keys(employee).find((key) => normalizeEmployeeFieldKey(key) === normalizedField);
+  return matchedKey ? String(employee[matchedKey] || '').trim() : '';
+}
+
+function pushUniqueNamedValue(target, rawValue) {
+  const value = String(rawValue || '').trim();
+  if (!value) return;
+  if (target.some(existing => normalizeEmployeeFieldKey(existing) === normalizeEmployeeFieldKey(value))) return;
+  target.push(value);
+}
+
+const DEFAULT_EMPLOYEE_LIBRARY_SLOT_KEY = '__default__';
+
+function getNormalizedGroupSegmentValues(group) {
+  return [...new Set((group?.segmentValues || []).map(value => String(value || '').trim()).filter(Boolean))];
+}
+
+function getEmployeeLibraryAssignments(group) {
+  const values = getNormalizedGroupSegmentValues(group);
+  const expected = values.length === 0
+    ? [{ slotKey: DEFAULT_EMPLOYEE_LIBRARY_SLOT_KEY, label: group?.name || 'All Employees' }]
+    : values.map(value => ({ slotKey: value, label: value }));
+  const existing = group?.libraryAssignments || [];
+  const fallbackLibraryId = expected.length === 1 ? (group?.libraryId || null) : null;
+
+  return expected.map(slot => {
+    const match = existing.find(assignment => String(assignment?.slotKey || '').trim().toLowerCase() === slot.slotKey.toLowerCase());
+    return {
+      ...slot,
+      libraryId: match?.libraryId ?? fallbackLibraryId,
+    };
+  });
+}
+
+export function getEmployeeRoutingColumns(config = {}) {
+  const groups = config.goalGroups || [];
+  const groupedColumns = [];
+  const groupedIndex = new Map();
+
+  groups.forEach(group => {
+    const label = String(group?.segmentAttr || '').trim();
+    if (!label || attrAlreadyStandard(label)) return;
+    const key = normalizeEmployeeFieldKey(label);
+    if (!groupedIndex.has(key)) {
+      groupedIndex.set(key, groupedColumns.length);
+      groupedColumns.push({ label, values: [] });
+    }
+    const column = groupedColumns[groupedIndex.get(key)];
+    (group?.segmentValues || []).forEach(value => pushUniqueNamedValue(column.values, value));
+  });
+
+  if (groupedColumns.length > 0) {
+    return groupedColumns;
+  }
+
+  const {
+    goalCreationMode,
+    goalLibraryScope,
+    goalSegmentAttr,
+    goalSegmentValues,
+    goalLimitScope,
+    goalLimitAttr,
+    goalLimitValues,
+  } = config;
+
+  const needsLegacyAttr =
     (goalCreationMode === 'admin-library' && goalLibraryScope === 'by-attribute') ||
-    (goalCreationMode === 'employee-self'  && goalLimitScope  === 'by-attribute');
-  const attrLabel  = goalCreationMode === 'admin-library' ? (goalSegmentAttr || 'Department') : (goalLimitAttr || 'Department');
-  const addAttrCol = needsAttr && !attrAlreadyStandard(attrLabel);
-  const hasL2      = (managerLevels || 1) >= 2;
-  const needsEmail = requireEmail !== false;
+    (goalCreationMode === 'employee-self' && goalLimitScope === 'by-attribute');
+
+  if (!needsLegacyAttr) return [];
+
+  const label = goalCreationMode === 'admin-library'
+    ? (goalSegmentAttr || 'Department')
+    : (goalLimitAttr || 'Department');
+
+  if (attrAlreadyStandard(label)) return [];
+
+  const values = goalCreationMode === 'admin-library'
+    ? (goalSegmentValues || []).map(value => value?.name)
+    : (goalLimitValues || []).map(value => value?.name);
+
+  const uniqueValues = [];
+  values.forEach(value => pushUniqueNamedValue(uniqueValues, value));
+  return [{ label, values: uniqueValues }];
+}
+
+export function employeeTemplateMeta(config) {
+  const { managerLevels, requireEmail, empCodeFormat } = config;
+  const routingColumns = getEmployeeRoutingColumns(config);
+  const hasL2        = (managerLevels || 1) >= 2;
+  const needsEmail   = requireEmail !== false;
+  const goalGroups   = config.goalGroups || [];
+  const hasGoalGroups = goalGroups.length > 0;
+  const groupNames   = goalGroups.map(g => String(g.name || '').trim()).filter(Boolean);
+
+  // For each example row index, find the group whose segmentValues contain the primary
+  // routing example value — so Group Name is pre-filled correctly in the example rows.
+  const getExampleGroupName = (rowIndex) => {
+    if (!hasGoalGroups) return '';
+    if (routingColumns.length === 0) return goalGroups[rowIndex % goalGroups.length]?.name || '';
+    const primaryCol = routingColumns[0];
+    const val = primaryCol.values.length > 0
+      ? primaryCol.values[rowIndex % primaryCol.values.length]
+      : '';
+    if (!val) return goalGroups[rowIndex % goalGroups.length]?.name || '';
+    const match = goalGroups.find(g =>
+      String(g.segmentAttr || '').trim().toLowerCase() === primaryCol.label.toLowerCase() &&
+      (g.segmentValues || []).some(sv => String(sv).trim().toLowerCase() === val.toLowerCase())
+    );
+    return match?.name || goalGroups[rowIndex % goalGroups.length]?.name || '';
+  };
 
   const headers = [
     'Employee Code', 'Employee Name',
     ...(needsEmail ? ['Email ID'] : []),
-    ...(addAttrCol ? [attrLabel] : []),
+    ...(hasGoalGroups ? ['Group Name'] : []),
+    ...routingColumns.map(column => column.label),
     'Reporting Manager Code', 'Reporting Manager Name',
     ...(needsEmail ? ['Reporting Manager Email'] : []),
     ...(hasL2 ? ['L2 Manager Code', 'L2 Manager Name'] : []),
@@ -936,48 +1190,60 @@ export function employeeTemplateMeta(config) {
   const colWidths = [
     16, 26,
     ...(needsEmail ? [30] : []),
-    ...(addAttrCol ? [18] : []),
+    ...(hasGoalGroups ? [22] : []),
+    ...routingColumns.map(() => 18),
     22, 26,
     ...(needsEmail ? [32] : []),
     ...(hasL2 ? [22, 26] : []),
   ];
 
-  const attrValues = addAttrCol ? (goalSegmentValues || []).map(v => v.name).filter(Boolean) : [];
+  const getRoutingExampleValues = (rowIndex) => routingColumns.map((column) => (
+    column.values.length > 0 ? column.values[rowIndex % column.values.length] : `${column.label} Value ${rowIndex + 1}`
+  ));
 
-  const ex = (code, name, email, attr, mgr, mgrName, mgrEmail, l2Code, l2Name) => [
+  const ex = (code, name, email, groupName, routingValues, mgr, mgrName, mgrEmail, l2Code, l2Name) => [
     code, name,
     ...(needsEmail ? [email] : []),
-    ...(addAttrCol ? [attr] : []),
+    ...(hasGoalGroups ? [groupName] : []),
+    ...routingValues,
     mgr, mgrName,
     ...(needsEmail ? [mgrEmail] : []),
     ...(hasL2 ? [l2Code, l2Name] : []),
   ];
-  // Use real attribute values in example rows so the admin sees actual valid options
-  const exAttr = (i) => attrValues.length > 0 ? attrValues[i % attrValues.length] : `${attrLabel} Value ${i + 1}`;
   const exampleRows = [
-    ex('EMP001','Priya Sharma',  'priya@company.com',  exAttr(0), 'MGR001','Amit Shah',  'amit@company.com',  'DIR001','Ravi Verma'),
-    ex('EMP002','Rahul Mehta',   'rahul@company.com',  exAttr(1), 'MGR002','Neha Patel', 'neha@company.com',  'DIR001','Ravi Verma'),
-    ex('EMP003','Sneha Iyer',    'sneha@company.com',  exAttr(2), 'MGR001','Amit Shah',  'amit@company.com',  'DIR002','Sonal Desai'),
+    ex('EMP001','Priya Sharma',  'priya@company.com',  getExampleGroupName(0), getRoutingExampleValues(0), 'MGR001','Amit Shah',  'amit@company.com',  'DIR001','Ravi Verma'),
+    ex('EMP002','Rahul Mehta',   'rahul@company.com',  getExampleGroupName(1), getRoutingExampleValues(1), 'MGR002','Neha Patel', 'neha@company.com',  'DIR001','Ravi Verma'),
+    ex('EMP003','Sneha Iyer',    'sneha@company.com',  getExampleGroupName(2), getRoutingExampleValues(2), 'MGR001','Amit Shah',  'amit@company.com',  'DIR002','Sonal Desai'),
   ];
 
   const fmtType = empCodeFormat?.type || 'free';
   const codeNote = fmtType === 'numeric'
     ? '• Employee Code must be numeric (digits only).'
     : fmtType === 'custom'
-    ? '• Employee Code must follow the configured format — see the Employee Settings step for valid patterns.'
+    ? '• Employee Code must follow the configured employee-code rules.'
     : '• Employee Code must be unique. Use the same code consistently across all files.';
+
+  const routingLabels = routingColumns.map(column => `"${column.label}"`);
+  const routingNote = routingLabels.length === 0
+    ? null
+    : routingLabels.length === 1
+    ? `• ${routingLabels[0]} identifies the library slot within the group. Use the exact values listed in the Reference sheet.`
+    : `• ${routingLabels.slice(0, -1).join(', ')} and ${routingLabels[routingLabels.length - 1]} identify the library slot within the group. Use the exact values listed in the Reference sheet.`;
 
   const noteRows = [
     ['NOTES'],
     [codeNote],
-    ['• Reporting Manager Code must match an Employee Code in this file (or an existing manager in the system). Leave blank only for top-level employees who have no manager above them.'],
+    ['• Employee Name must be a real person name. Use letters, spaces, dots, apostrophes, or hyphens only.'],
+    ...(hasGoalGroups ? [['• Group Name is required on every row and must match the configured group names in the Reference sheet exactly.']] : []),
+    ['• Reporting Manager Code must match an Employee Code in this file (or an existing manager already present in the system). If the real manager is outside PMS, leave it blank for the top-most PMS participant under them.'],
     ...(hasL2 ? [['• L2 Manager Code is the skip-level manager (manager of the direct manager).']] : []),
-    ...(addAttrCol ? [[`• "${attrLabel}" determines which goal set is assigned. Must exactly match values in the goal library.`]] : []),
+    ...(routingNote ? [[routingNote]] : []),
     ...(requireEmail === false ? [['• Email ID is optional for this configuration.']] : []),
+    ['• Each upload replaces the current employee master file. Do not upload one group now and expect the others to remain unless they are included in a later full upload.'],
     ['• Delete the red example rows before uploading.'],
   ];
 
-  return { headers, colWidths, exampleRows, noteRows, addAttrCol, attrLabel, hasL2, needsEmail, attrValues };
+  return { headers, colWidths, exampleRows, noteRows, routingColumns, hasL2, needsEmail, hasGoalGroups, groupNames };
 }
 
 /* ── DOWNLOAD EMPLOYEE TEMPLATE ──────────────────────────────────────────── */
@@ -1033,7 +1299,8 @@ export async function downloadEmployeeTemplate(config) {
     ['Employee Code', 'Unique identifier for the employee. Must be consistent across all files — same code used every cycle.'],
     ['Employee Name', 'Full name of the employee (display only).'],
     ...(meta.needsEmail ? [['Email ID', 'Work email address. Used for login link and notifications. Must be unique per employee.']] : []),
-    ...(meta.addAttrCol ? [[meta.attrLabel, `Determines which goal set is assigned to this employee. Must exactly match one of the valid values listed in the "${meta.attrLabel} Values" section below. Leave blank for top-level or manager-only employees who will not have a KRA set assigned.`]] : []),
+    ...(meta.hasGoalGroups ? [['Group Name', 'The goal group this employee belongs to. Must exactly match one of the configured group names listed in the "Valid Group Names" section below. Determines which goal library and workflow applies to this employee.']] : []),
+    ...meta.routingColumns.map(column => [column.label, `Used to identify the specific library slot within the employee's group. Must match one of the configured values listed in the "${column.label} Values" section below.`]),
     ['Reporting Manager Code', 'Employee Code of the direct reporting manager. Must match an Employee Code in this file. Leave blank if this employee is at the top of the hierarchy (no manager above them).'],
     ['Reporting Manager Name', 'Full name of the reporting manager (display only — code is the key). Leave blank if Reporting Manager Code is blank.'],
     ...(meta.needsEmail ? [['Reporting Manager Email', 'Work email of the reporting manager. Used for manager summary emails.']] : []),
@@ -1044,10 +1311,17 @@ export async function downloadEmployeeTemplate(config) {
   ];
   refSection('Column Guide', colGuide);
 
-  // Valid attribute values (if goal library is segmented)
-  if (meta.addAttrCol && meta.attrValues.length > 0) {
-    refSection(`Valid ${meta.attrLabel} Values`, meta.attrValues.map(v => [v, `Use exactly this value in the "${meta.attrLabel}" column.`]));
+  // Valid Group Names (when goal groups are configured)
+  if (meta.hasGoalGroups && meta.groupNames.length > 0) {
+    refSection('Valid Group Names', meta.groupNames.map(name => [name, `Use exactly this value in the "Group Name" column.`]));
   }
+
+  // Valid attribute values (if goal library is segmented)
+  meta.routingColumns
+    .filter(column => column.values.length > 0)
+    .forEach(column => {
+      refSection(`Valid ${column.label} Values`, column.values.map(value => [value, `Use exactly this value in the "${column.label}" column.`]));
+    });
 
   await writeAndDownload(wb, 'employee_upload_template.xlsx');
 }
@@ -1091,52 +1365,66 @@ export function validateEmployeeData(employees, config) {
   const warnings = [];
   const {
     empCodeFormat, managerLevels, requireEmail,
-    goalCreationMode, goalLibraryScope, goalSegmentAttr, goalSegmentValues,
-    goalLimitScope, goalLimitAttr,
   } = config;
 
   const regex = buildEmpCodeRegex(empCodeFormat);
   const hasL2 = (managerLevels || 1) >= 2;
   const emailRequired = requireEmail !== false;
+  const routingColumns = getEmployeeRoutingColumns(config);
+  const goalGroups = config.goalGroups || [];
+  const hasGoalGroups = goalGroups.length > 0;
+  const validGroupNames = new Set(goalGroups.map(g => String(g.name || '').trim().toLowerCase()).filter(Boolean));
+  const validLibraryIds = new Set((config.goalLibraries || []).map(library => library.id));
 
-  // Attribute column — only present when goal library is segmented by attribute
-  const needsAttr =
-    (goalCreationMode === 'admin-library' && goalLibraryScope === 'by-attribute') ||
-    (goalCreationMode === 'employee-self'  && goalLimitScope  === 'by-attribute');
-  const attrLabel = goalCreationMode === 'admin-library'
-    ? (goalSegmentAttr || 'Department')
-    : (goalLimitAttr   || 'Department');
-  const validAttrValues = needsAttr
-    ? (goalSegmentValues || []).map(v => v.name).filter(Boolean)
-    : [];
-  const validAttrSet = new Set(validAttrValues.map(v => v.toLowerCase()));
-
-  const seenCodes = new Set();
+  const seenCodes = new Map();
   const allCodes = new Set(
     employees.map(e => (e['Employee Code'] || '').trim().toLowerCase()).filter(Boolean)
   );
+  const missingL1Managers = new Map();
+  const missingL2Managers = new Map();
 
   employees.forEach((emp, idx) => {
     const row = idx + 2; // 1-based, +1 for header row
     const code = (emp['Employee Code'] || '').trim();
     const name = (emp['Employee Name'] || '').trim();
+    const nameValidation = validateEmployeeName(name);
 
     // Employee Code
     if (!code) {
       errors.push({ row, code: '—', field: 'emp_code', message: 'Employee Code is missing' });
     } else {
-      if (seenCodes.has(code.toLowerCase())) {
-        errors.push({ row, code, field: 'emp_code', message: `Duplicate Employee Code "${code}"` });
+      const normalizedCode = code.toLowerCase();
+      const firstSeen = seenCodes.get(normalizedCode);
+      if (firstSeen) {
+        if (
+          nameValidation.valid &&
+          firstSeen.normalizedName &&
+          nameValidation.normalized !== firstSeen.normalizedName
+        ) {
+          errors.push({
+            row,
+            code,
+            field: 'emp_code',
+            message: `Employee Code "${code}" is reused with a different name. Row ${firstSeen.row} has "${firstSeen.name}", but this row has "${name}".`,
+          });
+        } else {
+          errors.push({ row, code, field: 'emp_code', message: `Duplicate Employee Code "${code}"` });
+        }
+      } else {
+        seenCodes.set(normalizedCode, {
+          row,
+          name,
+          normalizedName: nameValidation.valid ? nameValidation.normalized : normalizeEmployeeNameForCompare(name),
+        });
       }
-      seenCodes.add(code.toLowerCase());
       if (regex && !regex.test(code)) {
         errors.push({ row, code, field: 'emp_code', message: `Employee Code "${code}" is invalid — must be numeric digits only` });
       }
     }
 
     // Employee Name
-    if (!name) {
-      errors.push({ row, code: code || '—', field: 'emp_name', message: 'Employee Name is missing' });
+    if (!nameValidation.valid) {
+      errors.push({ row, code: code || '—', field: 'emp_name', message: nameValidation.message });
     }
 
     // Email
@@ -1144,33 +1432,116 @@ export function validateEmployeeData(employees, config) {
       errors.push({ row, code: code || '—', field: 'email', message: 'Email ID is missing' });
     }
 
-    // Attribute value (blank = no KRA set assigned, allowed for top-level/manager-only employees)
-    if (needsAttr) {
-      const attrVal = (emp[attrLabel] || '').trim();
-      if (!attrVal) {
-        warnings.push({ row, code: code || '—', field: 'attr', category: 'no_designation',
-          message: `"${attrLabel}" is blank — this employee will not have a KRA set assigned (acceptable for top-level or manager-only employees)` });
-      } else if (validAttrSet.size > 0 && !validAttrSet.has(attrVal.toLowerCase())) {
-        errors.push({ row, code: code || '—', field: 'attr', message: `"${attrVal}" is not a valid ${attrLabel}. Valid values: ${validAttrValues.join(', ')}` });
+    let matchedGroup = null;
+    if (hasGoalGroups) {
+      const groupName = getEmployeeRowValue(emp, 'Group Name');
+      if (!groupName) {
+        errors.push({ row, code: code || '—', field: 'group_name',
+          message: 'Group Name is required. Use the exact group name from the Reference sheet.' });
+      } else if (!validGroupNames.has(groupName.toLowerCase())) {
+        errors.push({ row, code: code || '—', field: 'group_name',
+          message: `"${groupName}" is not a configured group name. Use the exact names from the Reference sheet.` });
+      } else {
+        matchedGroup = goalGroups.find(group => String(group.name || '').trim().toLowerCase() === groupName.toLowerCase()) || null;
       }
     }
 
+    if (hasGoalGroups && matchedGroup?.hasLibrary) {
+      const routeAttr = String(matchedGroup.segmentAttr || '').trim();
+      const routeValues = getNormalizedGroupSegmentValues(matchedGroup);
+      const routeValue = routeAttr ? getEmployeeRowValue(emp, routeAttr) : '';
+      const assignments = getEmployeeLibraryAssignments(matchedGroup);
+      const routeValueValid = routeValues.length === 0 || routeValues.some(value => value.toLowerCase() === routeValue.toLowerCase());
+
+      if (routeValues.length > 0) {
+        if (!routeAttr) {
+          errors.push({ row, code: code || '—', field: 'library_assignment',
+            message: `Group "${matchedGroup.name}" needs a routing field to resolve its goal library, but that field is not configured.` });
+        } else if (!routeValue) {
+          errors.push({ row, code: code || '—', field: normalizeEmployeeFieldKey(routeAttr),
+            message: `"${routeAttr}" is required for group "${matchedGroup.name}" because it decides the library tagging.` });
+        } else if (!routeValueValid) {
+          errors.push({ row, code: code || '—', field: normalizeEmployeeFieldKey(routeAttr),
+            message: `"${routeValue}" is not a valid ${routeAttr} for group "${matchedGroup.name}". Use one of: ${routeValues.join(', ')}.` });
+        }
+      }
+
+      const matchedAssignment = routeValues.length > 0
+        ? assignments.find(assignment => assignment.slotKey.toLowerCase() === routeValue.toLowerCase()) || null
+        : assignments[0] || null;
+
+      if (routeValues.length === 0 && !matchedAssignment) {
+        errors.push({ row, code: code || '—', field: 'library_assignment',
+          message: `Group "${matchedGroup.name}" has Goal Library enabled but no library slot is configured.` });
+      } else if (routeValues.length > 0 && routeValueValid && !matchedAssignment) {
+        errors.push({ row, code: code || '—', field: 'library_assignment',
+          message: `No goal library slot is configured for ${routeAttr} "${routeValue}" in group "${matchedGroup.name}".` });
+      } else if (matchedAssignment && !matchedAssignment.libraryId) {
+        const slotLabel = routeValues.length > 0 ? `${routeAttr} "${matchedAssignment.label}"` : 'the default slot';
+        errors.push({ row, code: code || '—', field: 'library_assignment',
+          message: `Group "${matchedGroup.name}" does not have a goal library assigned for ${slotLabel}.` });
+      } else if (matchedAssignment?.libraryId && !validLibraryIds.has(matchedAssignment.libraryId)) {
+        errors.push({ row, code: code || '—', field: 'library_assignment',
+          message: `Group "${matchedGroup.name}" points to a goal library that no longer exists.` });
+      }
+    } else if (!hasGoalGroups) {
+      routingColumns.forEach(column => {
+        const attrVal = getEmployeeRowValue(emp, column.label);
+        const validValues = column.values || [];
+        const validValueSet = new Set(validValues.map(value => value.toLowerCase()));
+
+        if (!attrVal) {
+          warnings.push({ row, code: code || '—', field: normalizeEmployeeFieldKey(column.label), category: 'routing_blank',
+            message: `"${column.label}" is blank — this employee may fall into the default group or miss library assignment` });
+        } else if (validValueSet.size > 0 && !validValueSet.has(attrVal.toLowerCase())) {
+          warnings.push({ row, code: code || '—', field: normalizeEmployeeFieldKey(column.label), category: 'routing_unknown',
+            message: `"${attrVal}" is not one of the configured ${column.label} values. The employee will only map if a catch-all group exists.` });
+        }
+      });
+    }
+
     // Reporting Manager (blank = top of hierarchy, allowed)
-    const l1Code = (emp['Reporting Manager Code'] || '').trim();
+    const l1Code = getEmployeeRowValue(emp, 'Reporting Manager Code');
     if (l1Code && !allCodes.has(l1Code.toLowerCase())) {
-      warnings.push({ row, code: code || '—', field: 'l1_manager', category: 'manager_not_in_file',
-        message: `Manager "${l1Code}" is not in this file — ensure they already exist in the system` });
+      const key = l1Code.toLowerCase();
+      const entry = missingL1Managers.get(key) || { managerCode: l1Code, rows: [], employeeCodes: [] };
+      entry.rows.push(row);
+      if (code) entry.employeeCodes.push(code);
+      missingL1Managers.set(key, entry);
     }
 
     // L2 Manager (optional per employee)
     if (hasL2) {
-      const l2Code = (emp['L2 Manager Code'] || '').trim();
-      if (!l2Code) {
-        warnings.push({ row, code: code || '—', field: 'l2_manager', category: 'l2_missing',
-          message: 'No L2 manager — this employee will go through L1 review only' });
+      const l2Code = getEmployeeRowValue(emp, 'L2 Manager Code');
+      if (l2Code && !allCodes.has(l2Code.toLowerCase())) {
+        const key = l2Code.toLowerCase();
+        const entry = missingL2Managers.get(key) || { managerCode: l2Code, rows: [], employeeCodes: [] };
+        entry.rows.push(row);
+        if (code) entry.employeeCodes.push(code);
+        missingL2Managers.set(key, entry);
       }
     }
   });
+
+  for (const entry of missingL1Managers.values()) {
+    warnings.push({
+      row: entry.rows[0],
+      code: entry.employeeCodes[0] || '—',
+      field: 'l1_manager',
+      category: 'manager_not_in_file',
+      message: `Manager "${entry.managerCode}" is referenced in ${formatIssueRowList(entry.rows)} but is not in this upload. Keep this only if that manager already exists in the system. If they are outside PMS, do not upload them as an employee; blank Reporting Manager Code for the top-most PMS participant under them instead.`,
+    });
+  }
+
+  for (const entry of missingL2Managers.values()) {
+    warnings.push({
+      row: entry.rows[0],
+      code: entry.employeeCodes[0] || '—',
+      field: 'l2_manager',
+      category: 'l2_manager_not_in_file',
+      message: `L2 Manager "${entry.managerCode}" is referenced in ${formatIssueRowList(entry.rows)} but is not in this upload. Keep this only if that manager already exists in the system; otherwise leave L2 blank for those employees instead of uploading a non-PMS manager row.`,
+    });
+  }
 
   // Code anomaly and similar-name checks
   for (const w of detectCodeAnomalies(employees)) warnings.push(w);
@@ -1388,11 +1759,10 @@ export function validateGoalLibraryData(parsedData, config) {
         seenNames[nameKey] = true;
       }
 
-      // KRA perspective missing
+      // KRA perspective — required and must match a configured perspective
       if (!kra.perspName || !String(kra.perspName).trim()) {
         errors.push({ group: groupLabel, kraName: kra.name, kpiName: null, field: 'perspective', message: `KRA "${kra.name}" has no perspective` });
       } else if (perspectives.length > 0) {
-        // Perspective doesn't match configured perspectives
         const perspLower = String(kra.perspName).trim().toLowerCase();
         const matched = perspectives.some(p => p.toLowerCase() === perspLower);
         if (!matched) {
@@ -1400,56 +1770,50 @@ export function validateGoalLibraryData(parsedData, config) {
         }
       }
 
-      // KRA weight missing or not a number
+      // KRA weight — optional (weights are suggested pre-fills, not enforced totals).
+      // Only validate format if a value was actually provided.
       const kraWeightValue = String(kra.weight ?? '').trim();
       const wt = parseFloat(kraWeightValue);
-      if (!kraWeightValue || !numericPattern.test(kraWeightValue) || Number.isNaN(wt)) {
-        errors.push({ group: groupLabel, kraName: kra.name, kpiName: null, field: 'kra_weight', message: `KRA "${kra.name}" weight must be a non-negative numeric value` });
-      } else if (wt < 0) {
+      const kraHasWeight = kraWeightValue !== '' && numericPattern.test(kraWeightValue) && !Number.isNaN(wt);
+      if (kraWeightValue !== '' && !kraHasWeight) {
+        errors.push({ group: groupLabel, kraName: kra.name, kpiName: null, field: 'kra_weight', message: `KRA "${kra.name}" weight must be a numeric value (or leave blank for no suggestion)` });
+      } else if (kraHasWeight && wt < 0) {
         errors.push({ group: groupLabel, kraName: kra.name, kpiName: null, field: 'kra_weight', message: `KRA "${kra.name}" weight cannot be negative` });
-      } else {
+      } else if (kraHasWeight) {
         totalWeight += wt;
       }
 
-      // KPI total weight
+      // KPI names and weights — optional; only validate format if a value was provided
       if (hasKpis && kra.kpis && kra.kpis.length > 0) {
         const seenKpiNames = {};
-        let kpiTotal = 0;
         for (const kpi of kra.kpis) {
           const kpiName = normalizeName(kpi.name);
-          const kpiWeightValue = String(kpi.weight ?? '').trim();
-          const kpiWeight = parseFloat(kpiWeightValue);
           if (!kpiName) {
             errors.push({ group: groupLabel, kraName: kra.name, kpiName: null, field: 'kpi_name', message: `KPI in "${kra.name}" has no name` });
+            continue;
+          }
+          const kpiNameKey = kpiName.toLowerCase();
+          if (seenKpiNames[kpiNameKey]) {
+            errors.push({ group: groupLabel, kraName: kra.name, kpiName: kpiName, field: 'kpi_name', message: `Duplicate KPI name "${kpiName}" in "${kra.name}"` });
           } else {
-            const kpiNameKey = kpiName.toLowerCase();
-            if (seenKpiNames[kpiNameKey]) {
-              errors.push({ group: groupLabel, kraName: kra.name, kpiName: kpiName, field: 'kpi_name', message: `Duplicate KPI name "${kpiName}" in "${kra.name}"` });
-            } else {
-              seenKpiNames[kpiNameKey] = true;
-            }
+            seenKpiNames[kpiNameKey] = true;
           }
 
-          if (!kpiWeightValue || !numericPattern.test(kpiWeightValue) || Number.isNaN(kpiWeight)) {
-            errors.push({ group: groupLabel, kraName: kra.name, kpiName: kpiName || null, field: 'kpi_weight', message: `KPI weight in "${kra.name}" must be a non-negative numeric value` });
-            continue;
+          const kpiWeightValue = String(kpi.weight ?? '').trim();
+          if (kpiWeightValue !== '') {
+            const kpiWeight = parseFloat(kpiWeightValue);
+            if (!numericPattern.test(kpiWeightValue) || Number.isNaN(kpiWeight)) {
+              errors.push({ group: groupLabel, kraName: kra.name, kpiName: kpiName, field: 'kpi_weight', message: `KPI "${kpiName}" weight must be numeric (or leave blank for no suggestion)` });
+            } else if (kpiWeight < 0) {
+              errors.push({ group: groupLabel, kraName: kra.name, kpiName: kpiName, field: 'kpi_weight', message: `KPI "${kpiName}" weight cannot be negative` });
+            }
           }
-          if (kpiWeight < 0) {
-            errors.push({ group: groupLabel, kraName: kra.name, kpiName: kpiName || null, field: 'kpi_weight', message: `KPI weight in "${kra.name}" cannot be negative` });
-            continue;
-          }
-          kpiTotal += kpiWeight;
-        }
-        if (!Number.isNaN(wt) && Math.abs(kpiTotal - wt) > 0.5) {
-          errors.push({ group: groupLabel, kraName: kra.name, kpiName: null, field: 'kpi_weight', message: `KPI weights for "${kra.name}" sum to ${kpiTotal.toFixed(1)}%, expected ${wt.toFixed(1)}% (the KRA weight)` });
         }
       }
     }
 
-    // Total KRA weight
-    if (kras.length > 0 && Math.abs(totalWeight - 100) > 0.5) {
-      errors.push({ group: groupLabel, kraName: null, kpiName: null, field: 'weight', message: `KRA weights in "${groupLabel}" sum to ${totalWeight.toFixed(1)}%, expected 100%` });
-    }
+    // Weight sum is informational only — library is a reference catalog, not a fixed allocation.
+    // No error is raised here; the employee plan enforces its own 100% sum.
   }
 
   if (parsedData.byAttr) {

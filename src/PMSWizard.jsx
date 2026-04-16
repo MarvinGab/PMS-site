@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import zaroLogo from '../images/final zaro logo.png';
-import { downloadGoalLibraryTemplate, parseGoalLibraryXlsx, downloadEmployeeTemplate, parseEmployeeXlsx, validateGoalLibraryData, downloadErrorReport, goalLibraryTemplateMeta, employeeTemplateMeta, validateEmployeeData, downloadAttributeValuesTemplate, parseAttributeValuesXlsx, downloadGoalLibraryBulkTemplate, parseGoalLibraryBulkXlsx } from './templateUtils';
+import { downloadGoalLibraryTemplate, parseGoalLibraryXlsx, downloadEmployeeTemplate, parseEmployeeXlsx, validateGoalLibraryData, downloadErrorReport, goalLibraryTemplateMeta, employeeTemplateMeta, validateEmployeeData, downloadAttributeValuesTemplate, parseAttributeValuesXlsx, downloadGoalLibraryBulkTemplate, parseGoalLibraryBulkXlsx, getEmployeeRoutingColumns } from './templateUtils';
 
 /* ─── CONSTANTS ──────────────────────────────────────────────────────────── */
 function getNavSteps(config) {
@@ -17,8 +17,8 @@ function getNavSteps(config) {
       { id: 'groups',         label: 'Groups & Strategy',     desc: 'Who gets what goal approach' },
       { id: 'goal_libraries', label: 'Goal Libraries',        desc: 'Build or upload KRA libraries' },
       { id: 'limits',         label: 'Goal Limits',           desc: 'KRA/KPI count & weight rules' },
-      { id: 'emp_settings',   label: 'Employee Settings',     desc: 'Code format & manager hierarchy' },
-      { id: 'upload',         label: 'Employee Upload',       desc: 'Upload employees & managers' },
+      { id: 'emp_settings',   label: 'Employee Settings',     desc: 'Manager hierarchy & email rules' },
+      { id: 'upload',         label: 'Employee Upload',       desc: 'Upload employees, managers & routing' },
       { id: 'summary',        label: 'Summary & Launch',      desc: 'Review & go live' },
     ];
     return steps;
@@ -207,6 +207,10 @@ function saveWizardState(orgKey, payload) {
   } catch (_) {}
 }
 
+function normalizeEmployeeFieldKey(value) {
+  return String(value || '').trim().toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+
 function getEmployeeFieldValue(employee, fieldName) {
   if (!employee || !fieldName) return '';
   const directValue = employee[fieldName];
@@ -214,9 +218,92 @@ function getEmployeeFieldValue(employee, fieldName) {
     return String(directValue).trim();
   }
 
-  const normalizedField = String(fieldName).toLowerCase().replace(/[^a-z0-9]/g, '');
-  const matchedKey = Object.keys(employee).find((key) => key.toLowerCase().replace(/[^a-z0-9]/g, '') === normalizedField);
+  const normalizedField = normalizeEmployeeFieldKey(fieldName);
+  const matchedKey = Object.keys(employee).find((key) => normalizeEmployeeFieldKey(key) === normalizedField);
   return matchedKey ? String(employee[matchedKey] || '').trim() : '';
+}
+
+function isCatchAllGoalGroup(group) {
+  if (!group) return false;
+  const attr = String(group.segmentAttr || '').trim();
+  const values = (group.segmentValues || []).map(value => String(value || '').trim()).filter(Boolean);
+  return !attr || values.length === 0;
+}
+
+function employeeMatchesGoalGroup(employee, group) {
+  if (!group) return false;
+  if (isCatchAllGoalGroup(group)) return true;
+
+  const attr = String(group.segmentAttr || '').trim();
+  const employeeValue = getEmployeeFieldValue(employee, attr);
+  if (!employeeValue) return false;
+
+  return (group.segmentValues || [])
+    .map(value => String(value || '').trim())
+    .filter(Boolean)
+    .some(value => value.toLowerCase() === employeeValue.toLowerCase());
+}
+
+function getGoalGroupMatchForEmployee(employee, config) {
+  const groups = config.goalGroups || [];
+
+  const groupNameVal = (employee['Group Name'] || '').trim();
+  if (groupNameVal) {
+    const namedGroup = groups.find(g => String(g.name || '').trim().toLowerCase() === groupNameVal.toLowerCase());
+    if (namedGroup) {
+      return {
+        group: namedGroup,
+        specificMatches: [namedGroup],
+        routeAttr: !isCatchAllGoalGroup(namedGroup) ? (namedGroup.segmentAttr || null) : null,
+        routeValue: !isCatchAllGoalGroup(namedGroup) && namedGroup.segmentAttr
+          ? getEmployeeFieldValue(employee, namedGroup.segmentAttr) : '',
+      };
+    }
+
+    return {
+      group: null,
+      specificMatches: [],
+      routeAttr: null,
+      routeValue: '',
+    };
+  }
+
+  return {
+    group: null,
+    specificMatches: [],
+    routeAttr: null,
+    routeValue: '',
+  };
+}
+
+function getLibraryKraCount(library) {
+  return (library?.perspectives || []).reduce((sum, perspective) => sum + (perspective.kras || []).length, 0);
+}
+
+function getAssignedLibraryForGroup(employee, group, config) {
+  if (!group || !isGroupLibraryEnabled(group)) {
+    return { assignment: null, library: null, kraCount: 0 };
+  }
+
+  const assignments = getGroupLibraryAssignments(group);
+  const libraries = config.goalLibraries || [];
+  const routeValue = group.segmentAttr ? getEmployeeFieldValue(employee, group.segmentAttr) : '';
+  const hasTaggedSlots = (group.segmentValues || []).some(value => String(value || '').trim());
+
+  let assignment = null;
+  if (hasTaggedSlots && routeValue) {
+    assignment = assignments.find(item => String(item.slotKey || '').trim().toLowerCase() === routeValue.toLowerCase()) || null;
+  }
+  if (!assignment && !hasTaggedSlots && assignments.length === 1) {
+    assignment = assignments[0];
+  }
+
+  const library = libraries.find(item => item.id === assignment?.libraryId) || null;
+  return {
+    assignment,
+    library,
+    kraCount: getLibraryKraCount(library),
+  };
 }
 
 function getAssignedGoalLibraryForEmployee(employee, config) {
@@ -245,11 +332,99 @@ function getAssignedGoalLibraryForEmployee(employee, config) {
 }
 
 function attachGoalLibraryToEmployees(employeeResult, config) {
+  const sourceEmployees = employeeResult.employees || [];
+  const totalEmployees = employeeResult.count ?? sourceEmployees.length;
+  const goalGroups = config.goalGroups || [];
+  const deferredGoalGroupNames = normalizeDeferredGoalGroups(config.deferredGoalGroupNames || []);
+  const deferredGoalGroupSet = new Set(deferredGoalGroupNames.map((name) => name.toLowerCase()));
+
+  if (goalGroups.length > 0) {
+    const routingColumns = getEmployeeRoutingColumns(config);
+    const hasGroupLibraries = goalGroups.some(group => isGroupLibraryEnabled(group));
+    const mappingWarnings = [];
+    const groupCounts = new Map(
+      goalGroups
+        .map(group => String(group.name || '').trim())
+        .filter(Boolean)
+        .map(name => [name.toLowerCase(), 0])
+    );
+
+    const employees = sourceEmployees.map((employee, index) => {
+      const groupMatch = getGoalGroupMatchForEmployee(employee, config);
+      const libraryMatch = getAssignedLibraryForGroup(employee, groupMatch.group, config);
+
+      if (groupMatch.group?.name) {
+        const groupKey = String(groupMatch.group.name).trim().toLowerCase();
+        groupCounts.set(groupKey, (groupCounts.get(groupKey) || 0) + 1);
+      }
+
+      if (!groupMatch.group) {
+        mappingWarnings.push({
+          row: index + 2,
+          code: employee['Employee Code'] || '—',
+          field: 'group_match',
+          category: 'group_unmatched',
+          message: 'Does not match any configured employee group.',
+        });
+      } else if (isGroupLibraryEnabled(groupMatch.group) && !libraryMatch.library) {
+        const valueLabel = groupMatch.routeValue ? ` for ${groupMatch.routeAttr} "${groupMatch.routeValue}"` : '';
+        mappingWarnings.push({
+          row: index + 2,
+          code: employee['Employee Code'] || '—',
+          field: 'library_match',
+          category: 'library_unmatched',
+          message: `Matched group "${groupMatch.group.name}"${valueLabel}, but no goal library is assigned there yet.`,
+        });
+      }
+
+      return {
+        ...employee,
+        assignedGoalGroupName: groupMatch.group?.name || null,
+        assignedGoalGroupAttr: groupMatch.routeAttr,
+        assignedGoalGroupValue: groupMatch.routeValue || null,
+        assignedGoalLibraryKey: libraryMatch.library?.name || libraryMatch.assignment?.label || null,
+        assignedGoalLibraryName: libraryMatch.library?.name || null,
+        assignedGoalLibraryCount: libraryMatch.kraCount,
+      };
+    });
+
+    const assignedGroupCount = employees.filter(employee => !!employee.assignedGoalGroupName).length;
+    const assignedLibraryCount = employees.filter(employee => !!employee.assignedGoalLibraryName).length;
+    const missingGoalGroupNames = goalGroups
+      .map(group => String(group.name || '').trim())
+      .filter(name => name && (groupCounts.get(name.toLowerCase()) || 0) === 0 && !deferredGoalGroupSet.has(name.toLowerCase()));
+
+    if (missingGoalGroupNames.length > 0) {
+      mappingWarnings.push({
+        row: 'Summary',
+        code: 'GROUPS',
+        field: 'group_coverage',
+        category: 'group_missing',
+        message: `No employees were uploaded for ${missingGoalGroupNames.join(', ')}. Defer them for later if this rollout is intentionally partial.`,
+      });
+    }
+
+    return {
+      ...employeeResult,
+      employees,
+      groupLinked: true,
+      libraryLinked: hasGroupLibraries,
+      assignedGroupCount,
+      unassignedGroupCount: totalEmployees - assignedGroupCount,
+      assignedCount: assignedLibraryCount,
+      unassignedCount: totalEmployees - assignedLibraryCount,
+      goalRoutingColumns: routingColumns.map(column => column.label),
+      missingGoalGroupNames,
+      deferredGoalGroupNames,
+      mappingWarnings,
+    };
+  }
+
   if (!config.goalLibraryData) {
     return employeeResult;
   }
 
-  const employees = (employeeResult.employees || []).map((employee) => {
+  const employees = sourceEmployees.map((employee) => {
     const match = getAssignedGoalLibraryForEmployee(employee, config);
     return {
       ...employee,
@@ -262,9 +437,10 @@ function attachGoalLibraryToEmployees(employeeResult, config) {
   return {
     ...employeeResult,
     employees,
+    groupLinked: false,
     libraryLinked: true,
     assignedCount,
-    unassignedCount: employees.length - assignedCount,
+    unassignedCount: totalEmployees - assignedCount,
     goalLibraryAttrLabel: config.goalLibraryData.byAttr
       ? (config.goalLibraryData.attrLabel || config.goalSegmentAttr || 'Department')
       : null,
@@ -272,12 +448,25 @@ function attachGoalLibraryToEmployees(employeeResult, config) {
 }
 
 function getEmployeeUploadMessage(result) {
-  const base = `${result.count} employee${result.count !== 1 ? 's' : ''} found in the file.`;
-  if (!result.libraryLinked) return base;
-  if (result.assignedCount === result.count) {
-    return `${base} Goal library mapped locally for all employees.`;
+  const count = result?.count ?? result?.employees?.length ?? 0;
+  const base = `${count} employee${count !== 1 ? 's' : ''} found in the file.`;
+  const deferredSuffix = result?.deferredGoalGroupNames?.length
+    ? ` Deferred groups: ${result.deferredGoalGroupNames.join(', ')}.`
+    : '';
+
+  if (result?.groupLinked && result?.libraryLinked) {
+    return `${base} Group mapping: ${result.assignedGroupCount || 0}/${count}. Library mapping: ${result.assignedCount || 0}/${count}.${deferredSuffix}`;
   }
-  return `${base} Goal library mapped locally for ${result.assignedCount}/${result.count} employees.`;
+
+  if (result?.groupLinked) {
+    return `${base} Group mapping: ${result.assignedGroupCount || 0}/${count}.${deferredSuffix}`;
+  }
+
+  if (!result?.libraryLinked) return `${base}${deferredSuffix}`;
+  if (result.assignedCount === count) {
+    return `${base} Goal library mapped locally for all employees.${deferredSuffix}`;
+  }
+  return `${base} Goal library mapped locally for ${result.assignedCount}/${count} employees.${deferredSuffix}`;
 }
 
 function isGoalLibraryValid(config) {
@@ -290,13 +479,8 @@ function isGoalLibraryValid(config) {
 function isGoalGroupsValid(config) {
   const groups = config.goalGroups;
   if (!groups || groups.length === 0) return false;
-  // Each group must have at least one mode
-  if (!groups.every(g => g.modes && g.modes.length > 0)) return false;
-  // By-group strategy: groups (except the last "default" group) must have segmentValues
-  if (config.goalGroupStrategy === 'by-group' && groups.length > 1) {
-    const nonDefault = groups.slice(0, -1);
-    if (!nonDefault.every(g => g.segmentValues && g.segmentValues.length > 0)) return false;
-  }
+  // Each group must have at least one of prefill or edit-own enabled
+  if (!groups.every(g => g.prefillType || g.canEditOwn !== false)) return false;
   return true;
 }
 
@@ -326,11 +510,25 @@ function getNewGroupsSnapshot(config) {
       name: g.name,
       segmentAttr: g.segmentAttr || null,
       segmentValues: [...(g.segmentValues || [])].sort(),
-      mode: g.mode || 'scratch',
+      canEditOwn: g.canEditOwn !== false,
+      prefillType: g.prefillType || null,
       hasLibrary: !!g.hasLibrary,
-      prefillEditability: g.mode === 'prefill' ? (g.prefillEditability || 'add-kpis') : null,
+      libraryType: g.hasLibrary ? (g.libraryType || 'kra-only') : null,
     })),
   });
+}
+
+function canUseGroupLibrary(group) {
+  // Library is always available regardless of prefill/edit settings
+  return !!group;
+}
+
+function isGroupLibraryEnabled(group) {
+  return !!group?.hasLibrary;
+}
+
+function normalizeSimpleGoalGroup(group) {
+  return group;
 }
 
 function groupsNeedingDataUpload(config) {
@@ -539,6 +737,40 @@ function isNonNegativeNumeric(value) {
   return /^\d+(\.\d+)?$/.test(String(value ?? '').trim());
 }
 
+function toNonNegativeWeight(value) {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) && numeric >= 0 ? numeric : 0;
+}
+
+function normalizeGoalLibraryRecord(library) {
+  if (!library || typeof library !== 'object') return library;
+  return {
+    ...library,
+    perspectives: Array.isArray(library.perspectives)
+      ? library.perspectives.map((perspective) => ({
+          ...perspective,
+          weight: toNonNegativeWeight(perspective.weight),
+          kras: Array.isArray(perspective.kras)
+            ? perspective.kras.map((kra) => ({
+                ...kra,
+                suggestedWeight: toNonNegativeWeight(kra.suggestedWeight ?? kra.weight),
+                kpis: Array.isArray(kra.kpis)
+                  ? kra.kpis.map((kpi) => ({
+                      ...kpi,
+                      weight: toNonNegativeWeight(kpi.weight),
+                    }))
+                  : [],
+              }))
+            : [],
+        }))
+      : [],
+  };
+}
+
+function normalizeGoalLibraries(libraries) {
+  return Array.isArray(libraries) ? libraries.map(normalizeGoalLibraryRecord) : [];
+}
+
 function buildManualGoalLibraryData(krasBySegment, segments, perspectives, scope, attrLabel) {
   const mapPerspectiveName = (perspId) => perspectives.find((perspective) => String(perspective.id) === String(perspId))?.name || '';
   const normalizeKpi = (kpi) => ({
@@ -582,6 +814,19 @@ function exitToLogin() {
   } catch (_) {}
 
   window.location.href = '/';
+}
+
+function normalizeDeferredGoalGroups(groupNames = []) {
+  const seen = new Set();
+  return (groupNames || [])
+    .map((name) => String(name || '').trim())
+    .filter((name) => {
+      if (!name) return false;
+      const key = name.toLowerCase();
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
 }
 
 /* ─── TOGGLE ─────────────────────────────────────────────────────────────── */
@@ -1983,7 +2228,7 @@ function AttributeSheetControls({ attrLabel, values, onImported }) {
   );
 }
 
-function GoalLibrarySheetControls({ config, existingLibraries, onImported }) {
+function GoalLibrarySheetControls({ config, downloadConfig = null, existingLibraries, onImported }) {
   const fileRef = useRef(null);
   const wrapRef = useRef(null);
   const [phase, setPhase] = useState('idle');
@@ -2006,7 +2251,7 @@ function GoalLibrarySheetControls({ config, existingLibraries, onImported }) {
   async function handleDownload() {
     setMessage('');
     setPhase('idle');
-    await downloadGoalLibraryBulkTemplate(config);
+    await downloadGoalLibraryBulkTemplate(downloadConfig || config);
   }
 
   async function handleUpload(event) {
@@ -2015,16 +2260,34 @@ function GoalLibrarySheetControls({ config, existingLibraries, onImported }) {
     setPhase('parsing');
     setMessage('');
     try {
-      const result = await parseGoalLibraryBulkXlsx(file);
+      const result = await parseGoalLibraryBulkXlsx(file, config?.goalGroups || []);
+      // Normalize spaces around parentheses so "Name( X)" and "Name ( X)" match
+      const normalizeLibName = s => String(s || '').trim().toLowerCase()
+        .replace(/\s*\(\s*/g, ' (').replace(/\s*\)\s*/g, ')').replace(/\s+/g, ' ').trim();
+      // When re-uploading, drop ALL existing libraries that belong to any group present in the file.
+      // This ensures a full replace — no stale entries survive from previous uploads.
+      const importedGroupNames = new Set(
+        (result.libraries || []).map(lib => normalizeLibName(lib.groupName || '')).filter(Boolean)
+      );
       const importedNames = new Set(
-        (result.libraries || []).map(library => String(library.name || '').trim().toLowerCase()).filter(Boolean)
+        (result.libraries || []).map(library => normalizeLibName(library.name)).filter(Boolean)
       );
-      const retained = (existingLibraries || []).filter(
-        library => !importedNames.has(String(library.name || '').trim().toLowerCase())
-      );
-      onImported([...retained, ...(result.libraries || [])]);
+      const retained = (existingLibraries || []).filter(library => {
+        const libGroup = normalizeLibName(library.groupName || '');
+        // Drop if this library belongs to a group being re-uploaded
+        if (libGroup && importedGroupNames.has(libGroup)) return false;
+        // Drop if name matches directly (backward compat for libraries without groupName)
+        if (importedNames.has(normalizeLibName(library.name))) return false;
+        return true;
+      });
+      const importedLibraries = result.libraries || [];
+      const importSummary = onImported([...retained, ...importedLibraries], importedLibraries) || {};
       setPhase('done');
-      setMessage(`${result.count} librar${result.count === 1 ? 'y' : 'ies'} imported.`);
+      const warningText = (result.warnings || []).length > 0 ? ` ⚠ ${result.warnings.join(' ')}` : '';
+      const unmatchedText = importSummary.unassignedImportCount > 0
+        ? ` ${importSummary.unassignedImportCount} imported librar${importSummary.unassignedImportCount === 1 ? 'y was' : 'ies were'} not linked to a visible card automatically.${importSummary.unassignedImportNames?.length ? ` Unmatched: ${importSummary.unassignedImportNames.join(', ')}.` : ''} Check Group Name / Library Name in the sheet.`
+        : '';
+      setMessage(`${result.count} librar${result.count === 1 ? 'y' : 'ies'} imported.${warningText}${unmatchedText}`);
       setOpen(false);
     } catch (err) {
       setPhase('error');
@@ -2473,15 +2736,10 @@ function makeDefaultGroup(overrides = {}) {
     segmentAttr: null,
     segmentValues: [],
     libraryAssignments: [],
-    modes: ['free'],
-    prefillData: [],
-    prefillEditability: 'add-kpis',
-    libraryData: [],
-    goalLimitsEnabled: false,
-    goalMin: 3,
-    goalMax: 8,
-    kraWeightsEnabled: true,
-    kpiWeightsEnabled: false,
+    canEditOwn: true,
+    prefillType: null,
+    hasLibrary: false,
+    libraryId: null,
     ...overrides,
   };
 }
@@ -2693,9 +2951,31 @@ function GoalGroupCard({ group, index, isDefault, isOnlyGroup, segAttr, onUpdate
 }
 
 /* ─── STEP GROUPS ────────────────────────────────────────────────────────── */
-function GroupStrategyCard({ group, index, totalGroups, onUpdate, onDelete }) {
+
+function getGroupResult(group) {
+  const prefill = group.prefillType || null;
+  const edit    = group.canEditOwn !== false;
+  const lib     = !!group.hasLibrary;
+  if (!prefill && !edit) return null;
+  if (!prefill && edit && !lib)  return { title: 'Open Canvas',            desc: 'Employees start from a blank page and build their own KRAs and KPIs freely within each perspective.', chips: ['✏️ Edit Own'],                              color: '#16A34A', bg: '#F0FDF4', border: '#86EFAC' };
+  if (!prefill && edit &&  lib)  return { title: 'Guided Scratch',          desc: 'Employees build freely from scratch with a curated goal library available as reference and inspiration.', chips: ['✏️ Edit Own', '📚 Library'],                color: '#2563EB', bg: '#EFF6FF', border: '#93C5FD' };
+  if (prefill === 'kra-kpi' && !edit && !lib) return { title: 'Fully Locked Prefill', desc: 'Admin pre-assigns the complete KRA + KPI structure. Employees view their goals — no edits allowed.', chips: ['📋 Prefill (KRA+KPI)', '🔒 Locked'],   color: '#DC2626', bg: '#FEF2F2', border: '#FCA5A5' };
+  if (prefill === 'kra-only' && !edit && !lib) return { title: 'Prefill — KRAs Locked', desc: 'KRAs are pre-assigned. Employees create their own KPIs under each locked KRA.', chips: ['📋 Prefill (KRAs only)', '🔒 KRAs locked'],             color: '#D97706', bg: '#FFFBEB', border: '#FCD34D' };
+  if (prefill === 'kra-only' && !edit &&  lib) return { title: 'Locked Prefill + Library', desc: 'KRAs are locked by admin. Employees pull KPIs from the goal library to complete their goals.', chips: ['📋 Prefill (KRAs only)', '🔒 Locked', '📚 Library'], color: '#7C3AED', bg: '#F5F3FF', border: '#C4B5FD' };
+  if (prefill && edit && !lib) return { title: 'Partial Prefill + Edit',   desc: 'Admin sets the foundation. Employees can adjust pre-filled goals and add their own on top.', chips: ['📋 Prefill', '✏️ Edit Own'],                         color: '#0891B2', bg: '#ECFEFF', border: '#67E8F9' };
+  if (prefill && edit &&  lib) return { title: 'Full Flexibility',          desc: 'Admin sets a foundation. Employees can edit, add their own goals, and browse the library for inspiration.', chips: ['📋 Prefill', '✏️ Edit Own', '📚 Library'], color: '#2563EB', bg: '#EFF6FF', border: '#93C5FD' };
+  return null;
+}
+
+function GroupStrategyCard({ group, index, totalGroups, onUpdate, onDelete, libraries = [] }) {
   const isOnly = totalGroups === 1;
   const hasNoFilter = !group.segmentAttr && !(group.segmentValues || []).length;
+  const canUseGoalLibrary = canUseGroupLibrary(group);
+  const goalLibraryEnabled = isGroupLibraryEnabled(group);
+  const result = getGroupResult(group);
+  const comboKey = `${group.prefillType || 'none'}-${group.canEditOwn !== false}-${group.hasLibrary}`;
+  const currentLibType = group.libraryType || 'kra-only';
+
   const S = {
     sectionLabel: { fontSize: 11, fontWeight: 700, color: '#64748B', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 8 },
   };
@@ -2762,73 +3042,131 @@ function GroupStrategyCard({ group, index, totalGroups, onUpdate, onDelete }) {
           )}
         </div>
 
-        {/* Mode picker - 2 cards */}
+        {/* Goal Approach — 3 independent toggles */}
         <div style={{ marginBottom: 16 }}>
-          <div style={S.sectionLabel}>Goal Creation Mode</div>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
-            {[
-              { id: 'scratch', icon: '✏️', title: 'Scratch', desc: 'Employee builds goals from a blank canvas.' },
-              { id: 'prefill', icon: '📋', title: 'Prefill',  desc: 'Admin pre-assigns KRAs that appear ready-made.' },
-            ].map(opt => {
-              const active = group.mode === opt.id;
-              return (
-                <div key={opt.id} onClick={() => onUpdate({ mode: opt.id })} style={{
-                  padding: '14px 16px', borderRadius: 10, cursor: 'pointer',
-                  border: `2px solid ${active ? '#2563EB' : '#E2E8F0'}`,
-                  background: active ? '#EFF6FF' : '#FAFAFA',
-                  transition: 'all .12s', userSelect: 'none',
-                }}>
-                  <div style={{ fontSize: 20, marginBottom: 5 }}>{opt.icon}</div>
-                  <div style={{ fontWeight: 700, fontSize: 13.5, color: active ? '#1D4ED8' : '#374151', marginBottom: 3 }}>{opt.title}</div>
-                  <div style={{ fontSize: 12, color: '#6B7280', lineHeight: 1.4 }}>{opt.desc}</div>
-                  {active && <div style={{ marginTop: 8, display: 'inline-block', fontSize: 11, color: '#2563EB', fontWeight: 700, background: '#DBEAFE', padding: '2px 8px', borderRadius: 20 }}>✓ Selected</div>}
+          <div style={S.sectionLabel}>Goal Approach</div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+
+            {/* 1. Pre-fill */}
+            <div style={{ borderRadius: 10, border: `1.5px solid ${group.prefillType ? '#2563EB' : '#E2E8F0'}`, background: group.prefillType ? '#EFF6FF' : '#FAFAFA', overflow: 'hidden' }}>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '12px 16px', cursor: 'pointer', userSelect: 'none' }}>
+                <input
+                  type="checkbox"
+                  checked={!!group.prefillType}
+                  onChange={e => onUpdate({ prefillType: e.target.checked ? 'kra-only' : null })}
+                  style={{ width: 16, height: 16, accentColor: '#2563EB', cursor: 'pointer', flexShrink: 0 }}
+                />
+                <div>
+                  <div style={{ fontWeight: 700, fontSize: 13, color: group.prefillType ? '#1D4ED8' : '#374151' }}>📋 Pre-fill Goals</div>
+                  <div style={{ fontSize: 12, color: '#6B7280', marginTop: 1 }}>Admin assigns KRAs (and optionally KPIs) that appear ready-made for employees.</div>
                 </div>
-              );
-            })}
+              </label>
+              {group.prefillType && (
+                <div style={{ borderTop: '1px solid #DBEAFE', padding: '10px 16px', display: 'flex', gap: 8 }}>
+                  {[
+                    { id: 'kra-only', label: 'KRAs only', sub: 'Employees create their own KPIs' },
+                    { id: 'kra-kpi',  label: 'KRAs + KPIs', sub: 'Full goal structure pre-filled' },
+                  ].map(opt => (
+                    <button key={opt.id} type="button" onClick={() => onUpdate({ prefillType: opt.id })} style={{
+                      flex: 1, padding: '8px 12px', borderRadius: 8, cursor: 'pointer', textAlign: 'left', fontFamily: 'inherit',
+                      border: `1.5px solid ${group.prefillType === opt.id ? '#2563EB' : '#D1D5DB'}`,
+                      background: group.prefillType === opt.id ? '#fff' : '#F9FAFB',
+                    }}>
+                      <div style={{ fontSize: 12.5, fontWeight: 600, color: group.prefillType === opt.id ? '#1D4ED8' : '#374151' }}>{opt.label}</div>
+                      <div style={{ fontSize: 11, color: '#9CA3AF', marginTop: 2 }}>{opt.sub}</div>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* 2. Edit own */}
+            <label style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '12px 16px', cursor: 'pointer', userSelect: 'none', borderRadius: 10, border: `1.5px solid ${group.canEditOwn !== false ? '#16A34A' : '#E2E8F0'}`, background: group.canEditOwn !== false ? '#F0FDF4' : '#FAFAFA' }}>
+              <input
+                type="checkbox"
+                checked={group.canEditOwn !== false}
+                onChange={e => onUpdate({ canEditOwn: e.target.checked })}
+                style={{ width: 16, height: 16, accentColor: '#16A34A', cursor: 'pointer', flexShrink: 0 }}
+              />
+              <div>
+                <div style={{ fontWeight: 700, fontSize: 13, color: group.canEditOwn !== false ? '#15803D' : '#374151' }}>✏️ Employees can add / edit their own goals</div>
+                <div style={{ fontSize: 12, color: '#6B7280', marginTop: 1 }}>
+                  {group.prefillType
+                    ? 'Pre-filled KRAs can be supplemented or adjusted by the employee.'
+                    : 'Employees start from a blank canvas and build their own KRAs/KPIs.'}
+                </div>
+              </div>
+            </label>
+
+            {/* 3. Goal Library */}
+            <div style={{ borderRadius: 10, border: `1.5px solid ${goalLibraryEnabled ? '#7C3AED' : '#E2E8F0'}`, background: goalLibraryEnabled ? '#F5F3FF' : '#FAFAFA', overflow: 'hidden' }}>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '12px 16px', cursor: 'pointer', userSelect: 'none' }}>
+                <input
+                  type="checkbox"
+                  checked={goalLibraryEnabled}
+                  onChange={e => onUpdate({ hasLibrary: e.target.checked, libraryType: e.target.checked ? (group.libraryType || 'kra-only') : undefined })}
+                  style={{ width: 16, height: 16, accentColor: '#7C3AED', cursor: 'pointer', flexShrink: 0 }}
+                />
+                <div>
+                  <div style={{ fontWeight: 700, fontSize: 13, color: goalLibraryEnabled ? '#6D28D9' : '#374151' }}>📚 Attach Goal Library</div>
+                  <div style={{ fontSize: 12, color: '#6B7280', marginTop: 1 }}>A curated library that employees can browse and pull goals from as a reference.</div>
+                </div>
+              </label>
+              {goalLibraryEnabled && (
+                <div style={{ borderTop: '1px solid #DDD6FE', padding: '12px 16px' }}>
+                  <div style={{ fontSize: 11, fontWeight: 700, color: '#7C3AED', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 8 }}>What will this library contain?</div>
+                  <div style={{ display: 'flex', gap: 8 }}>
+                    {[
+                      { id: 'kra-only', icon: '📌', label: 'KRAs only',   sub: 'Employees create their own KPIs' },
+                      { id: 'kra-kpi',  icon: '📊', label: 'KRAs + KPIs', sub: 'Full goal structure provided' },
+                    ].map(opt => (
+                      <button key={opt.id} type="button" onClick={() => onUpdate({ libraryType: opt.id })} style={{
+                        flex: 1, padding: '9px 12px', borderRadius: 8, cursor: 'pointer', textAlign: 'left', fontFamily: 'inherit',
+                        border: `1.5px solid ${currentLibType === opt.id ? '#7C3AED' : '#DDD6FE'}`,
+                        background: currentLibType === opt.id ? '#EDE9FE' : '#fff',
+                      }}>
+                        <div style={{ fontSize: 13, marginBottom: 2 }}>{opt.icon}</div>
+                        <div style={{ fontSize: 12.5, fontWeight: 700, color: currentLibType === opt.id ? '#6D28D9' : '#374151' }}>{opt.label}</div>
+                        <div style={{ fontSize: 11, color: '#9CA3AF', marginTop: 1 }}>{opt.sub}</div>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Warning if both unchecked */}
+            {!group.prefillType && group.canEditOwn === false && (
+              <div style={{ padding: '8px 12px', background: '#FEF2F2', border: '1px solid #FCA5A5', borderRadius: 8, fontSize: 12, color: '#DC2626' }}>
+                ⚠️ Enable at least one of Pre-fill or Edit Own — otherwise employees have no way to create goals.
+              </div>
+            )}
           </div>
         </div>
 
-        {/* Prefill editability */}
-        {group.mode === 'prefill' && (
-          <div style={{ marginBottom: 16, padding: '12px 16px', background: '#F8FAFC', borderRadius: 8, border: '1px solid #E2E8F0' }}>
-            <div style={S.sectionLabel}>Employee Can Edit Pre-filled Goals?</div>
-            <div style={{ display: 'flex', gap: 8 }}>
-              {[
-                { id: 'locked',      label: '🔒 Locked',        sub: 'View only' },
-                { id: 'add-kpis',    label: '✏️ Add KPIs',      sub: 'Can add KPIs to KRAs' },
-                { id: 'edit-freely', label: '🔓 Edit Freely',   sub: 'Full control' },
-              ].map(opt => (
-                <button key={opt.id} type="button" onClick={() => onUpdate({ prefillEditability: opt.id })} style={{
-                  flex: 1, padding: '8px 10px', borderRadius: 8, cursor: 'pointer', textAlign: 'left',
-                  border: `1.5px solid ${group.prefillEditability === opt.id ? '#2563EB' : '#E2E8F0'}`,
-                  background: group.prefillEditability === opt.id ? '#EFF6FF' : '#fff',
-                  fontFamily: 'inherit',
-                }}>
-                  <div style={{ fontSize: 12.5, fontWeight: 600, color: group.prefillEditability === opt.id ? '#1D4ED8' : '#374151' }}>{opt.label}</div>
-                  <div style={{ fontSize: 11, color: '#9CA3AF', marginTop: 2 }}>{opt.sub}</div>
-                </button>
+        {/* ── Animated Result Strip ── */}
+        <style>{`@keyframes grpResultIn{from{opacity:0;transform:translateY(5px)}to{opacity:1;transform:translateY(0)}}`}</style>
+        {result && (
+          <div
+            key={comboKey}
+            style={{
+              margin: '0 16px 16px',
+              borderRadius: 10,
+              border: `1.5px solid ${result.border}`,
+              background: result.bg,
+              padding: '12px 16px',
+              animation: 'grpResultIn 0.22s ease',
+            }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6, flexWrap: 'wrap' }}>
+              {result.chips.map(chip => (
+                <span key={chip} style={{ fontSize: 11.5, fontWeight: 600, color: result.color, background: '#fff', border: `1px solid ${result.border}`, borderRadius: 20, padding: '2px 10px' }}>{chip}</span>
               ))}
             </div>
+            <div style={{ fontSize: 13, fontWeight: 700, color: result.color, marginBottom: 3 }}>{result.title}</div>
+            <div style={{ fontSize: 12, color: '#4B5563', lineHeight: 1.55 }}>{result.desc}</div>
           </div>
         )}
-
-        {/* Goal Library toggle */}
-        <label style={{ display: 'flex', alignItems: 'flex-start', gap: 12, cursor: 'pointer', padding: '12px 14px', background: '#F8FAFC', borderRadius: 8, border: `1.5px solid ${group.hasLibrary ? '#7C3AED' : '#E2E8F0'}`, userSelect: 'none', transition: 'border-color .15s' }}>
-          <input
-            type="checkbox"
-            checked={!!group.hasLibrary}
-            onChange={e => onUpdate({ hasLibrary: e.target.checked })}
-            style={{ width: 16, height: 16, accentColor: '#7C3AED', cursor: 'pointer', marginTop: 2, flexShrink: 0 }}
-          />
-          <div>
-            <div style={{ fontWeight: 600, fontSize: 13, color: '#374151' }}>📚 Include Goal Library</div>
-            <div style={{ fontSize: 12, color: '#6B7280', marginTop: 2, lineHeight: 1.5 }}>
-              {group.mode === 'prefill'
-                ? 'Adds a read-only reference panel alongside pre-filled goals. Employees can browse the library for context.'
-                : 'Adds a browsable side panel. Employees can pull KRAs from the library into their goal plan.'}
-            </div>
-          </div>
-        </label>
       </div>
     </div>
   );
@@ -2836,12 +3174,13 @@ function GroupStrategyCard({ group, index, totalGroups, onUpdate, onDelete }) {
 
 function StepGroups({ config, update }) {
   const groups = config.goalGroups || [];
+  const libraries = config.goalLibraries || [];
 
-  const isValid = groups.length > 0 && groups.every(g => g.mode);
+  const isValid = groups.length > 0 && groups.every(g => g.prefillType || g.canEditOwn !== false);
   const isApplied = isValid && config.goalGroupsAppliedSnapshot === getNewGroupsSnapshot(config);
 
   function updateGroup(id, changes) {
-    update('goalGroups', groups.map(g => g.id === id ? { ...g, ...changes } : g));
+    update('goalGroups', groups.map(g => g.id === id ? normalizeSimpleGoalGroup({ ...g, ...changes }) : g));
     update('goalGroupsAppliedSnapshot', null);
   }
 
@@ -2857,10 +3196,10 @@ function StepGroups({ config, update }) {
       segmentAttr: '',
       segmentValues: [],
       libraryAssignments: [],
-      mode: 'scratch',
+      canEditOwn: true,
+      prefillType: null,
       hasLibrary: false,
       libraryId: null,
-      prefillEditability: 'add-kpis',
     };
     update('goalGroups', [...groups, newGroup]);
     update('goalGroupsAppliedSnapshot', null);
@@ -2884,6 +3223,7 @@ function StepGroups({ config, update }) {
           totalGroups={groups.length}
           onUpdate={changes => updateGroup(group.id, changes)}
           onDelete={() => removeGroup(group.id)}
+          libraries={libraries}
         />
       ))}
 
@@ -2896,11 +3236,42 @@ function StepGroups({ config, update }) {
         + Add Employee Group
       </button>
 
+      {/* Groups Summary Table — shown when all groups are configured */}
+      {isValid && groups.length > 0 && (
+        <div style={{ background: '#fff', border: '1.5px solid #E2E8F0', borderRadius: 12, marginBottom: 16, overflow: 'hidden' }}>
+          <div style={{ padding: '12px 18px', borderBottom: '1px solid #F1F5F9', fontSize: 12, fontWeight: 700, color: '#64748B', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+            Configuration Summary
+          </div>
+          <div style={{ padding: '4px 0' }}>
+            {groups.map((g, i) => {
+              const r = getGroupResult(g);
+              const ck = `${g.prefillType || 'none'}-${g.canEditOwn !== false}-${g.hasLibrary}`;
+              return (
+                <div key={g.id} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '10px 18px', borderBottom: i < groups.length - 1 ? '1px solid #F8FAFC' : 'none' }}>
+                  <div style={{ width: 24, height: 24, borderRadius: 7, background: '#F1F5F9', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 11, fontWeight: 700, color: '#2563EB', flexShrink: 0 }}>{i + 1}</div>
+                  <div style={{ fontWeight: 600, fontSize: 13, color: '#111827', minWidth: 140, flexShrink: 0 }}>{g.name}</div>
+                  {r ? (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', flex: 1 }}>
+                      {r.chips.map(chip => (
+                        <span key={chip} style={{ fontSize: 11, fontWeight: 600, color: r.color, background: r.bg, border: `1px solid ${r.border}`, borderRadius: 20, padding: '2px 9px' }}>{chip}</span>
+                      ))}
+                      <span style={{ fontSize: 12, color: '#6B7280', marginLeft: 4 }}>— {r.title}</span>
+                    </div>
+                  ) : (
+                    <span style={{ fontSize: 12, color: '#DC2626' }}>⚠️ Incomplete setup</span>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
       <StepStatusBar
         applied={isApplied}
         valid={isValid}
         appliedMessage="Groups confirmed — configure Goal Libraries next."
-        pendingMessage={groups.length === 0 ? 'Add at least one group.' : !groups.every(g => g.mode) ? 'Set a mode for every group.' : 'Review and confirm to proceed.'}
+        pendingMessage={groups.length === 0 ? 'Add at least one group.' : !groups.every(g => g.prefillType || g.canEditOwn !== false) ? 'Each group needs at least Pre-fill or Edit Own enabled.' : 'Review your groups above and confirm to proceed.'}
         buttonLabel="Confirm Groups"
         onApply={() => update('goalGroupsAppliedSnapshot', getNewGroupsSnapshot(config))}
       />
@@ -2980,11 +3351,32 @@ function LibraryCard({ library, groupLabel, assignedText, accent, active = false
       flexDirection: 'column',
     }}>
       <div onClick={onSelect} style={{ background: accent.soft, color: accent.text, padding: '14px 16px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, borderBottom: `1px solid ${active ? accent.bar : '#EEF2F7'}` }}>
-        <div style={{ fontSize: 13, fontWeight: 800, letterSpacing: '0.01em', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+        <div title={groupLabel} style={{ fontSize: 13, fontWeight: 800, letterSpacing: '0.01em', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', minWidth: 0, flex: 1 }}>
           {groupLabel}
         </div>
         {assignedText ? (
-          <span style={{ fontSize: 11.5, fontWeight: 700, padding: '4px 10px', borderRadius: 999, background: '#FFFFFF', color: accent.text, border: '1px solid rgba(148,163,184,.18)' }}>
+          <span
+            title={assignedText}
+            style={{
+              fontSize: 11.5,
+              fontWeight: 700,
+              padding: '0 12px',
+              borderRadius: 999,
+              background: '#FFFFFF',
+              color: accent.text,
+              border: '1px solid rgba(148,163,184,.18)',
+              display: 'inline-flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              height: 36,
+              minWidth: 108,
+              maxWidth: 144,
+              whiteSpace: 'nowrap',
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              flexShrink: 0,
+            }}
+          >
             {assignedText}
           </span>
         ) : null}
@@ -3024,8 +3416,11 @@ function LibraryCard({ library, groupLabel, assignedText, accent, active = false
         <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12, marginBottom: 16 }}>
           <div>
             <div style={{ fontSize: 15, fontWeight: 800, color: '#111827', marginBottom: 6 }}>{library.name}</div>
-            <div style={{ fontSize: 12.5, color: '#6B7280', lineHeight: 1.5 }}>
-              {library.type === 'kra-kpi' ? 'KRA + KPI' : 'KRA only'} · {kraCount} KRAs · {kpiCount} KPIs
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+              <span style={{ fontSize: 11, color: '#9CA3AF' }}>{kraCount} KRAs · {kpiCount} KPIs</span>
+              <span style={{ fontSize: 10.5, color: '#94A3B8', background: '#F1F5F9', border: '1px solid #E2E8F0', borderRadius: 20, padding: '1px 8px', fontWeight: 500 }}>
+                {library.type === 'kra-kpi' ? '📊 KRA + KPI' : '📌 KRA only'}
+              </span>
             </div>
           </div>
           {onDelete ? (
@@ -3068,161 +3463,78 @@ function LibraryCard({ library, groupLabel, assignedText, accent, active = false
   );
 }
 
-function AddLibraryModal({ config, initialLibrary = null, fixedName = '', onSave, onClose }) {
-  const defaultPersp = (config.perspectives || []).filter(p => p.name && p.weight).map(p => ({
+function AddLibraryModal({ config, initialLibrary = null, fixedName = '', suggestedType = null, onSave, onClose }) {
+  const normalizedInitialLibrary = initialLibrary ? normalizeGoalLibraryRecord(initialLibrary) : null;
+  const defaultPersp = (config.perspectives || []).filter(p => p.name).map(p => ({
     id: `lp_${Date.now()}_${Math.random().toString(36).slice(2,5)}`,
     name: p.name,
-    weight: p.weight,
-    baseWeight: p.weight,
+    weight: Number(p.weight || p.weightage) || 0,
     kras: [],
   }));
 
-  const seedPerspectives = initialLibrary?.perspectives?.length
-    ? initialLibrary.perspectives.map(perspective => ({
+  const seedPerspectives = normalizedInitialLibrary?.perspectives?.length
+    ? normalizedInitialLibrary.perspectives.map(perspective => ({
         ...perspective,
-        baseWeight: perspective.baseWeight ?? perspective.weight ?? 0,
         kras: (perspective.kras || []).map(kra => ({
           ...kra,
-          kpis: (kra.kpis || []).map(kpi => ({ ...kpi })),
+          suggestedWeight: toNonNegativeWeight(kra.suggestedWeight),
+          kpis: (kra.kpis || []).map(kpi => ({ ...kpi, weight: toNonNegativeWeight(kpi.weight) })),
         })),
       }))
     : (defaultPersp.length > 0 ? defaultPersp : [
-        { id: `lp_${Date.now()}`, name: 'Financial', weight: 25, baseWeight: 25, kras: [] },
+        { id: `lp_${Date.now()}`, name: 'Financial', weight: 25, kras: [] },
       ]);
 
-  const [name, setName] = useState(initialLibrary?.name || fixedName || '');
-  const [type, setType] = useState(initialLibrary?.type || 'kra-kpi');
-  const [weightType, setWeightType] = useState(initialLibrary?.weightType || 'suggested');
+  const [name, setName] = useState(normalizedInitialLibrary?.name || fixedName || '');
+  const [type, setType] = useState(normalizedInitialLibrary?.type || suggestedType || 'kra-only');
+  const [weightType, setWeightType] = useState(normalizedInitialLibrary?.weightType || 'suggested');
   const [perspectives, setPerspectives] = useState(seedPerspectives);
   const [openKraDescriptions, setOpenKraDescriptions] = useState({});
-  const [weightDrafts, setWeightDrafts] = useState({});
-  const [manualKraWeights, setManualKraWeights] = useState(() => {
-    const next = {};
-    (initialLibrary?.perspectives || []).forEach(perspective => {
-      (perspective.kras || []).forEach(kra => {
-        if (Number(kra.suggestedWeight) > 0) next[kra.id] = true;
-      });
-    });
-    return next;
-  });
-  const [manualKpiWeights, setManualKpiWeights] = useState(() => {
-    const next = {};
-    (initialLibrary?.perspectives || []).forEach(perspective => {
-      (perspective.kras || []).forEach(kra => {
-        (kra.kpis || []).forEach(kpi => {
-          if (Number(kpi.weight) > 0) next[kpi.id] = true;
-        });
-      });
-    });
-    return next;
-  });
 
-  function numericWeight(value) {
-    const numeric = Number(value);
-    return Number.isFinite(numeric) ? numeric : 0;
+  // Clamp any stale negative weights that may have been stored before validation was added
+  useEffect(() => {
+    setPerspectives(prev => prev.map(p => ({
+      ...p,
+      kras: (p.kras || []).map(k => ({
+        ...k,
+        suggestedWeight: toNonNegativeWeight(k.suggestedWeight),
+        kpis: (k.kpis || []).map(kpi => ({ ...kpi, weight: toNonNegativeWeight(kpi.weight) })),
+      })),
+    })));
+  }, []);
+
+  function changeType(newType) {
+    if (newType === type) return;
+    const hasKpis = perspectives.some(p => (p.kras || []).some(k => (k.kpis || []).length > 0));
+    if (newType === 'kra-only' && hasKpis) {
+      if (!window.confirm('Switching to KRAs only will remove all KPI entries. Continue?')) return;
+      setPerspectives(current => current.map(p => ({
+        ...p,
+        kras: (p.kras || []).map(k => ({ ...k, kpis: [] })),
+      })));
+    }
+    setType(newType);
   }
 
-  function roundWeight(value) {
-    return Math.round((numericWeight(value) + Number.EPSILON) * 100) / 100;
-  }
-
-  function distributeWeights(total, count) {
-    if (!count) return [];
-    const safeTotal = roundWeight(Math.max(total, 0));
-    if (count === 1) return [safeTotal];
-    const base = roundWeight(safeTotal / count);
-    const values = Array.from({ length: count }, () => base);
-    const consumed = roundWeight(base * (count - 1));
-    values[count - 1] = roundWeight(Math.max(safeTotal - consumed, 0));
-    return values;
-  }
-
-  function syncKpisToKra(kra, nextManualKpiWeights, kraIsManual) {
-    const currentKpis = kra.kpis || [];
-    if (!currentKpis.length) return { ...kra, kpis: currentKpis };
-
-    const manualSum = roundWeight(currentKpis.reduce((sum, kpi) => (
-      sum + (nextManualKpiWeights[kpi.id] ? numericWeight(kpi.weight) : 0)
-    ), 0));
-    const autoIndexes = currentKpis
-      .map((kpi, index) => (nextManualKpiWeights[kpi.id] ? null : index))
-      .filter(index => index !== null);
-    const remaining = roundWeight(Math.max(numericWeight(kra.suggestedWeight) - manualSum, 0));
-    const distributed = distributeWeights(remaining, autoIndexes.length);
-    const nextKpis = currentKpis.map((kpi, index) => {
-      const autoPosition = autoIndexes.indexOf(index);
-      if (autoPosition === -1) return { ...kpi, weight: roundWeight(kpi.weight) };
-      return { ...kpi, weight: distributed[autoPosition] ?? 0 };
-    });
-    const childTotal = roundWeight(nextKpis.reduce((sum, kpi) => sum + numericWeight(kpi.weight), 0));
-    const currentWeight = roundWeight(kra.suggestedWeight);
-    const nextWeight = !kraIsManual ? childTotal : (childTotal > currentWeight ? childTotal : currentWeight);
-    return {
-      ...kra,
-      suggestedWeight: nextWeight,
-      kpis: nextKpis,
-    };
-  }
-
-  function syncPerspectiveWeights(perspective, nextManualKraWeights, nextManualKpiWeights) {
-    let nextKras = (perspective.kras || []).map(kra => syncKpisToKra(kra, nextManualKpiWeights, !!nextManualKraWeights[kra.id]));
-    const baseWeight = roundWeight(perspective.baseWeight ?? perspective.weight);
-
-    const lockedKraIds = new Set(
-      nextKras
-        .filter(kra => nextManualKraWeights[kra.id] || (kra.kpis || []).length > 0)
-        .map(kra => kra.id)
-    );
-    const lockedTotal = roundWeight(nextKras.reduce((sum, kra) => (
-      sum + (lockedKraIds.has(kra.id) ? numericWeight(kra.suggestedWeight) : 0)
-    ), 0));
-    const autoIndexes = nextKras
-      .map((kra, index) => (lockedKraIds.has(kra.id) ? null : index))
-      .filter(index => index !== null);
-    const remaining = roundWeight(Math.max(baseWeight - lockedTotal, 0));
-    const distributed = distributeWeights(remaining, autoIndexes.length);
-
-    nextKras = nextKras.map((kra, index) => {
-      const autoPosition = autoIndexes.indexOf(index);
-      if (autoPosition === -1) return kra;
-      return { ...kra, suggestedWeight: distributed[autoPosition] ?? 0 };
-    });
-
-    const kraTotal = roundWeight(nextKras.reduce((sum, kra) => sum + numericWeight(kra.suggestedWeight), 0));
-    return {
-      ...perspective,
-      weight: kraTotal > baseWeight ? kraTotal : baseWeight,
-      kras: nextKras,
-    };
-  }
-
-  function updatePerspectiveTree(perspId, mutator, nextManualKraWeights = manualKraWeights, nextManualKpiWeights = manualKpiWeights) {
-    setPerspectives(current => current.map(perspective => {
-      if (perspective.id !== perspId) return perspective;
-      const mutated = typeof mutator === 'function' ? mutator(perspective) : perspective;
-      return syncPerspectiveWeights(mutated, nextManualKraWeights, nextManualKpiWeights);
-    }));
+  function updatePerspKras(perspId, updater) {
+    setPerspectives(current => current.map(p =>
+      p.id !== perspId ? p : { ...p, kras: updater(p.kras || []) }
+    ));
   }
 
   function addKRA(perspId) {
-    updatePerspectiveTree(perspId, perspective => ({
-      ...perspective,
-      kras: [...(perspective.kras || []), { id: `kra_${Date.now()}_${Math.random().toString(36).slice(2,5)}`, name: '', desc: '', suggestedWeight: 0, kpis: [] }]
-    }));
+    updatePerspKras(perspId, kras => [
+      ...kras,
+      { id: `kra_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`, name: '', desc: '', suggestedWeight: 0, kpis: [] },
+    ]);
   }
 
   function updateKRA(perspId, kraId, changes) {
-    updatePerspectiveTree(perspId, perspective => ({
-      ...perspective,
-      kras: perspective.kras.map(k => k.id === kraId ? { ...k, ...changes } : k)
-    }));
+    updatePerspKras(perspId, kras => kras.map(k => k.id === kraId ? { ...k, ...changes } : k));
   }
 
   function removeKRA(perspId, kraId) {
-    const nextManualKras = { ...manualKraWeights };
-    delete nextManualKras[kraId];
-    setManualKraWeights(nextManualKras);
-    updatePerspectiveTree(perspId, perspective => ({ ...perspective, kras: perspective.kras.filter(k => k.id !== kraId) }), nextManualKras, manualKpiWeights);
+    updatePerspKras(perspId, kras => kras.filter(k => k.id !== kraId));
     setOpenKraDescriptions(current => {
       const next = { ...current };
       delete next[kraId];
@@ -3230,160 +3542,65 @@ function AddLibraryModal({ config, initialLibrary = null, fixedName = '', onSave
     });
   }
 
+  function updateKraWeight(perspId, kraId, rawValue) {
+    const sanitized = sanitizeWeightInput(rawValue);
+    updatePerspKras(perspId, kras => kras.map(k => k.id === kraId ? { ...k, suggestedWeight: sanitized === '' ? 0 : Number(sanitized) || 0 } : k));
+  }
+
   function addKPI(perspId, kraId) {
-    updatePerspectiveTree(perspId, perspective => ({
-      ...perspective,
-      kras: perspective.kras.map(k => k.id === kraId ? {
-        ...k,
-        kpis: [...(k.kpis || []), { id: `kpi_${Date.now()}_${Math.random().toString(36).slice(2,5)}`, name: '', weight: 0 }]
-      } : k)
+    updatePerspKras(perspId, kras => kras.map(k => k.id !== kraId ? k : {
+      ...k,
+      kpis: [...(k.kpis || []), { id: `kpi_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`, name: '', weight: 0 }],
     }));
   }
 
   function updateKPI(perspId, kraId, kpiId, changes) {
-    updatePerspectiveTree(perspId, perspective => ({
-      ...perspective,
-      kras: perspective.kras.map(k => k.id === kraId ? {
-        ...k,
-        kpis: k.kpis.map(kp => kp.id === kpiId ? { ...kp, ...changes } : kp)
-      } : k)
+    updatePerspKras(perspId, kras => kras.map(k => k.id !== kraId ? k : {
+      ...k,
+      kpis: (k.kpis || []).map(kp => kp.id === kpiId ? { ...kp, ...changes } : kp),
     }));
   }
 
   function removeKPI(perspId, kraId, kpiId) {
-    const nextManualKpis = { ...manualKpiWeights };
-    delete nextManualKpis[kpiId];
-    setManualKpiWeights(nextManualKpis);
-    updatePerspectiveTree(perspId, perspective => ({
-      ...perspective,
-      kras: perspective.kras.map(k => k.id === kraId ? { ...k, kpis: k.kpis.filter(kp => kp.id !== kpiId) } : k)
-    }), manualKraWeights, nextManualKpis);
+    updatePerspKras(perspId, kras => kras.map(k => k.id !== kraId ? k : {
+      ...k,
+      kpis: (k.kpis || []).filter(kp => kp.id !== kpiId),
+    }));
   }
 
-  function handleKraWeightChange(kraId, rawValue) {
-    setWeightDrafts(current => ({ ...current, [`kra:${kraId}`]: rawValue }));
+  function updateKpiWeight(perspId, kraId, kpiId, rawValue) {
+    const sanitized = sanitizeWeightInput(rawValue);
+    updatePerspKras(perspId, kras => kras.map(k => k.id !== kraId ? k : {
+      ...k,
+      kpis: (k.kpis || []).map(kp => kp.id === kpiId ? { ...kp, weight: sanitized === '' ? 0 : Number(sanitized) || 0 } : kp),
+    }));
   }
 
-  function handleKpiWeightChange(kpiId, rawValue) {
-    setWeightDrafts(current => ({ ...current, [`kpi:${kpiId}`]: rawValue }));
+  function getPerspKraTotal(perspId) {
+    return (perspectives.find(p => p.id === perspId)?.kras || [])
+      .reduce((s, k) => s + toNonNegativeWeight(k.suggestedWeight), 0);
   }
 
-  function clearWeightDraft(draftKey) {
-    setWeightDrafts(current => {
-      const next = { ...current };
-      delete next[draftKey];
-      return next;
-    });
-  }
-
-  function handleKraWeightBlur(perspId, kraId) {
-    const draftKey = `kra:${kraId}`;
-    if (!Object.prototype.hasOwnProperty.call(weightDrafts, draftKey)) return;
-    const rawValue = (weightDrafts[draftKey] ?? '').trim();
-    clearWeightDraft(draftKey);
-    const nextManualKras = { ...manualKraWeights };
-    if (!rawValue) {
-      delete nextManualKras[kraId];
-      setManualKraWeights(nextManualKras);
-      updatePerspectiveTree(
-        perspId,
-        perspective => ({
-          ...perspective,
-          kras: perspective.kras.map(kra => kra.id === kraId ? { ...kra, suggestedWeight: 0 } : kra),
-        }),
-        nextManualKras,
-        manualKpiWeights,
-      );
-      return;
-    }
-    nextManualKras[kraId] = true;
-    setManualKraWeights(nextManualKras);
-    updatePerspectiveTree(
-      perspId,
-      perspective => ({
-        ...perspective,
-        kras: perspective.kras.map(kra => kra.id === kraId ? { ...kra, suggestedWeight: roundWeight(rawValue) } : kra),
-      }),
-      nextManualKras,
-      manualKpiWeights,
-    );
-  }
-
-  function handleKpiWeightBlur(perspId, kraId, kpiId) {
-    const draftKey = `kpi:${kpiId}`;
-    if (!Object.prototype.hasOwnProperty.call(weightDrafts, draftKey)) return;
-    const rawValue = (weightDrafts[draftKey] ?? '').trim();
-    clearWeightDraft(draftKey);
-    const nextManualKpis = { ...manualKpiWeights };
-    if (!rawValue) {
-      delete nextManualKpis[kpiId];
-      setManualKpiWeights(nextManualKpis);
-      updatePerspectiveTree(
-        perspId,
-        perspective => ({
-          ...perspective,
-          kras: perspective.kras.map(kra => kra.id === kraId ? {
-            ...kra,
-            kpis: kra.kpis.map(kpi => kpi.id === kpiId ? { ...kpi, weight: 0 } : kpi),
-          } : kra),
-        }),
-        manualKraWeights,
-        nextManualKpis,
-      );
-      return;
-    }
-    nextManualKpis[kpiId] = true;
-    setManualKpiWeights(nextManualKpis);
-    updatePerspectiveTree(
-      perspId,
-      perspective => ({
-        ...perspective,
-        kras: perspective.kras.map(kra => kra.id === kraId ? {
-          ...kra,
-          kpis: kra.kpis.map(kpi => kpi.id === kpiId ? { ...kpi, weight: roundWeight(rawValue) } : kpi),
-        } : kra),
-      }),
-      manualKraWeights,
-      nextManualKpis,
-    );
-  }
-
-  function handlePerspectiveWeightChange(perspId, rawValue) {
-    setWeightDrafts(current => ({ ...current, [`persp:${perspId}`]: rawValue }));
-  }
-
-  function handlePerspectiveWeightBlur(perspId) {
-    const draftKey = `persp:${perspId}`;
-    if (!Object.prototype.hasOwnProperty.call(weightDrafts, draftKey)) return;
-    const rawValue = (weightDrafts[draftKey] ?? '').trim();
-    clearWeightDraft(draftKey);
-    const nextWeight = rawValue === '' ? 0 : roundWeight(rawValue);
-    updatePerspectiveTree(
-      perspId,
-      perspective => ({ ...perspective, weight: nextWeight, baseWeight: nextWeight }),
-      manualKraWeights,
-      manualKpiWeights,
-    );
-  }
+  const globalKraTotal = perspectives.reduce((s, p) =>
+    s + (p.kras || []).reduce((ps, k) => ps + toNonNegativeWeight(k.suggestedWeight), 0), 0
+  );
 
   function stripWeightsFromPerspectives(nextPerspectives) {
     return (nextPerspectives || []).map(perspective => ({
       ...perspective,
       weight: 0,
-      baseWeight: 0,
       kras: (perspective.kras || []).map(kra => ({
         ...kra,
         suggestedWeight: 0,
-        kpis: (kra.kpis || []).map(kpi => ({
-          ...kpi,
-          weight: 0,
-        })),
+        kpis: (kra.kpis || []).map(kpi => ({ ...kpi, weight: 0 })),
       })),
     }));
   }
 
   const resolvedName = fixedName || name;
-  const canSave = resolvedName.trim() && perspectives.some(p => (p.kras || []).some(k => k.name.trim()));
+  const canSave = resolvedName.trim() && (initialLibrary
+    ? true
+    : perspectives.some(p => (p.kras || []).some(k => k.name.trim())));
 
   const inputStyle = { border: '1px solid #E2E8F0', borderRadius: 6, padding: '6px 10px', fontSize: 13, outline: 'none', fontFamily: 'inherit', background: '#fff' };
   const textareaStyle = { ...inputStyle, width: '100%', boxSizing: 'border-box', resize: 'vertical', minHeight: 64, lineHeight: 1.45 };
@@ -3398,34 +3615,49 @@ function AddLibraryModal({ config, initialLibrary = null, fixedName = '', onSave
         </div>
 
         <div style={{ padding: '24px', maxHeight: '70vh', overflowY: 'auto' }}>
-          {/* Name + type */}
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 14, marginBottom: 20 }}>
-            <div style={{ gridColumn: '1/-1' }}>
-              <label style={{ fontSize: 11.5, fontWeight: 600, color: '#64748B', display: 'block', marginBottom: 5 }}>Library Name *</label>
-              {fixedName ? (
-                <div style={{ ...inputStyle, width: '100%', boxSizing: 'border-box', background: '#F8FAFC', color: '#334155', fontWeight: 700 }}>
-                  {fixedName}
-                </div>
-              ) : (
-                <input value={name} onChange={e => setName(e.target.value)} placeholder="e.g. Engineering Goals 2025" style={{ ...inputStyle, width: '100%', boxSizing: 'border-box' }} />
-              )}
-            </div>
+          {/* Library Name */}
+          <div style={{ marginBottom: 20 }}>
+            <label style={{ fontSize: 11.5, fontWeight: 600, color: '#64748B', display: 'block', marginBottom: 5 }}>Library Name *</label>
+            {fixedName ? (
+              <div style={{ ...inputStyle, width: '100%', boxSizing: 'border-box', background: '#F8FAFC', color: '#334155', fontWeight: 700 }}>
+                {fixedName}
+              </div>
+            ) : (
+              <input value={name} onChange={e => setName(e.target.value)} placeholder="e.g. Engineering Goals 2025" style={{ ...inputStyle, width: '100%', boxSizing: 'border-box' }} />
+            )}
+          </div>
+
+          {/* Compact meta row: type + weight */}
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 20 }}>
             <div>
-              <label style={{ fontSize: 11.5, fontWeight: 600, color: '#64748B', display: 'block', marginBottom: 5 }}>Type</label>
-              <select value={type} onChange={e => setType(e.target.value)} style={{ ...inputStyle, width: '100%' }}>
-                <option value="kra-kpi">KRA + KPI</option>
-                <option value="kra-only">KRA only</option>
+              <label style={{ fontSize: 11.5, fontWeight: 600, color: '#64748B', display: 'block', marginBottom: 5 }}>
+                Library Type
+                {suggestedType && !initialLibrary && <span style={{ marginLeft: 6, fontSize: 10.5, color: '#7C3AED', background: '#F5F3FF', border: '1px solid #DDD6FE', borderRadius: 20, padding: '1px 7px', fontWeight: 600 }}>from group</span>}
+              </label>
+              <select value={type} onChange={e => changeType(e.target.value)} style={{ ...inputStyle, width: '100%' }}>
+                <option value="kra-only">📌 KRAs only</option>
+                <option value="kra-kpi">📊 KRAs + KPIs</option>
               </select>
             </div>
             <div>
-              <label style={{ fontSize: 11.5, fontWeight: 600, color: '#64748B', display: 'block', marginBottom: 5 }}>Weights</label>
+              <label style={{ fontSize: 11.5, fontWeight: 600, color: '#64748B', display: 'block', marginBottom: 5 }}>KRA Weight Behaviour</label>
               <select value={weightType} onChange={e => setWeightType(e.target.value)} style={{ ...inputStyle, width: '100%' }}>
-                <option value="suggested">Suggested (employee can adjust)</option>
-                <option value="fixed">Fixed (locked)</option>
-                <option value="none">None</option>
+                <option value="suggested">💡 Suggested — employees can adjust</option>
+                <option value="fixed">🔒 Fixed — weights locked</option>
+                <option value="none">— None — employees set own weights</option>
               </select>
             </div>
           </div>
+
+          {weightType !== 'none' && (
+            <div style={{ marginBottom: 16, display: 'flex', alignItems: 'center', gap: 8 }}>
+              <span style={{ fontSize: 12, color: '#6B7280' }}>Total KRA weight:</span>
+              <span style={{ fontSize: 13, fontWeight: 700, color: globalKraTotal === 100 ? '#16A34A' : globalKraTotal > 100 ? '#DC2626' : '#D97706' }}>
+                {globalKraTotal} / 100
+              </span>
+              {globalKraTotal === 100 && <span style={{ fontSize: 12, color: '#16A34A' }}>✓</span>}
+            </div>
+          )}
 
           {/* Perspectives + KRAs */}
           {perspectives.map((persp, pi) => (
@@ -3440,11 +3672,10 @@ function AddLibraryModal({ config, initialLibrary = null, fixedName = '', onSave
                     <span style={{ fontSize: 12, color: '#9CA3AF' }}>Weight</span>
                     <input
                       type="number"
-                      value={Object.prototype.hasOwnProperty.call(weightDrafts, `persp:${persp.id}`) ? weightDrafts[`persp:${persp.id}`] : (persp.weight || '')}
-                      onChange={e => handlePerspectiveWeightChange(persp.id, e.target.value)}
-                      onBlur={() => handlePerspectiveWeightBlur(persp.id)}
-                      style={{ ...inputStyle, width: 60, textAlign: 'center' }}
-                      placeholder="%"
+                      readOnly
+                      value={getPerspKraTotal(persp.id) || ''}
+                      style={{ ...inputStyle, width: 60, textAlign: 'center', background: '#F8FAFC', cursor: 'default' }}
+                      placeholder="0"
                     />
                     <span style={{ fontSize: 12, color: '#9CA3AF' }}>%</span>
                   </>
@@ -3463,10 +3694,10 @@ function AddLibraryModal({ config, initialLibrary = null, fixedName = '', onSave
                       {weightType !== 'none' && (
                         <>
                           <input
-                            type="number"
-                            value={Object.prototype.hasOwnProperty.call(weightDrafts, `kra:${kra.id}`) ? weightDrafts[`kra:${kra.id}`] : (kra.suggestedWeight || '')}
-                            onChange={e => handleKraWeightChange(kra.id, e.target.value)}
-                            onBlur={() => handleKraWeightBlur(persp.id, kra.id)}
+                            type="text"
+                            inputMode="decimal"
+                            value={toNonNegativeWeight(kra.suggestedWeight) || ''}
+                            onChange={e => updateKraWeight(persp.id, kra.id, e.target.value)}
                             style={{ ...inputStyle, width: 60, textAlign: 'center' }}
                             placeholder="%"
                           />
@@ -3512,10 +3743,10 @@ function AddLibraryModal({ config, initialLibrary = null, fixedName = '', onSave
                               {weightType !== 'none' && (
                                 <>
                                   <input
-                                    type="number"
-                                    value={Object.prototype.hasOwnProperty.call(weightDrafts, `kpi:${kpi.id}`) ? weightDrafts[`kpi:${kpi.id}`] : (kpi.weight || '')}
-                                    onChange={e => handleKpiWeightChange(kpi.id, e.target.value)}
-                                    onBlur={() => handleKpiWeightBlur(persp.id, kra.id, kpi.id)}
+                                    type="text"
+                                    inputMode="decimal"
+                                    value={toNonNegativeWeight(kpi.weight) || ''}
+                                    onChange={e => updateKpiWeight(persp.id, kra.id, kpi.id, e.target.value)}
                                     style={{ ...inputStyle, width: 55, textAlign: 'center', fontSize: 12 }}
                                     placeholder="%"
                                   />
@@ -3543,13 +3774,21 @@ function AddLibraryModal({ config, initialLibrary = null, fixedName = '', onSave
         <div style={{ padding: '16px 24px', borderTop: '1px solid #E9EDF2', display: 'flex', justifyContent: 'flex-end', gap: 10 }}>
           <button type="button" onClick={onClose} style={{ padding: '9px 20px', border: '1px solid #E2E8F0', borderRadius: 8, background: '#fff', fontSize: 13, cursor: 'pointer', fontFamily: 'inherit' }}>Cancel</button>
           <button type="button" disabled={!canSave} onClick={() => {
-            const nextPerspectives = weightType === 'none' ? stripWeightsFromPerspectives(perspectives) : perspectives;
+            const clampWeights = persp => ({
+              ...persp,
+              kras: (persp.kras || []).map(k => ({
+                ...k,
+                suggestedWeight: Math.max(0, Number(k.suggestedWeight) || 0),
+                kpis: (k.kpis || []).map(kpi => ({ ...kpi, weight: Math.max(0, Number(kpi.weight) || 0) })),
+              })),
+            });
+            const sanitized = (weightType === 'none' ? stripWeightsFromPerspectives(perspectives) : perspectives).map(clampWeights);
             onSave({
               id: initialLibrary?.id || `lib_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
               name: resolvedName.trim(),
               type,
               weightType,
-              perspectives: nextPerspectives.map(({ baseWeight, ...perspective }) => perspective),
+              perspectives: sanitized,
             });
           }} style={{ padding: '9px 22px', background: canSave ? '#2563EB' : '#CBD5E1', color: '#fff', border: 'none', borderRadius: 8, fontSize: 13, fontWeight: 600, cursor: canSave ? 'pointer' : 'not-allowed', fontFamily: 'inherit' }}>
             {initialLibrary ? 'Save Changes' : 'Save Library'}
@@ -3563,7 +3802,7 @@ function AddLibraryModal({ config, initialLibrary = null, fixedName = '', onSave
 function StepGoalLibraries({ config, update }) {
   const libraries = config.goalLibraries || [];
   const groups = config.goalGroups || [];
-  const groupsNeedingLib = groups.filter(g => g.hasLibrary);
+  const groupsNeedingLib = groups.filter(isGroupLibraryEnabled);
   const [showAddModal, setShowAddModal] = useState(false);
   const [editingLibraryId, setEditingLibraryId] = useState(null);
   const [showAllGroups, setShowAllGroups] = useState(false);
@@ -3587,6 +3826,9 @@ function StepGoalLibraries({ config, update }) {
   }, [groupsWithAssignments, selectedGroupId, showAllGroups]);
 
   const selectedGroup = groupsWithAssignments.find(group => group.id === selectedGroupId) || groupsWithAssignments[0] || null;
+  const templateScopeConfig = showAllGroups || !selectedGroup
+    ? config
+    : { ...config, goalGroups: [selectedGroup] };
   const selectedGroupIndex = Math.max(0, groupsWithAssignments.findIndex(group => group.id === selectedGroup?.id));
   const editingLibrary = libraries.find(library => library.id === editingLibraryId) || null;
   const boardSlots = (showAllGroups ? groupsWithAssignments : (selectedGroup ? [selectedGroup] : []))
@@ -3638,23 +3880,85 @@ function StepGoalLibraries({ config, update }) {
     setShowAddModal(true);
   }
 
-  function handleImportedLibraries(nextLibraries) {
+  function handleImportedLibraries(nextLibraries, importedLibraries = nextLibraries) {
     let nextGroups = [...groups];
-    const libraryByName = new Map(
-      nextLibraries.map(library => [String(library.name || '').trim().toLowerCase(), library.id])
-    );
+    const normalizeLookup = value => String(value || '').trim().toLowerCase()
+      .replace(/\s*\(\s*/g, ' (').replace(/\s*\)\s*/g, ')').replace(/\s+/g, ' ').trim();
+    const appendLookup = (map, key, value) => {
+      if (!key) return;
+      const existing = map.get(key) || [];
+      existing.push(value);
+      map.set(key, existing);
+    };
+    const libraryById = new Map(nextLibraries.map(library => [library.id, library]));
+    const librariesByName = new Map();
+    const librariesByGroup = new Map();
+    const librariesByCompositeKey = new Map();
+
+    nextLibraries.forEach(library => {
+      const nameKey = normalizeLookup(library.name);
+      const groupKey = normalizeLookup(library.groupName);
+      appendLookup(librariesByName, nameKey, library);
+      appendLookup(librariesByGroup, groupKey, library);
+      if (nameKey && groupKey) {
+        appendLookup(librariesByCompositeKey, `${groupKey}::${nameKey}`, library);
+      }
+    });
+
+    const assignedLibraryIds = new Set();
+
+    const resolveAssignmentLibraryId = (group, assignment) => {
+      if (assignment.libraryId && libraryById.has(assignment.libraryId)) {
+        return assignment.libraryId;
+      }
+
+      const groupKey = normalizeLookup(group.name);
+      const labelKey = normalizeLookup(assignment.label);
+
+      const compositeMatches = groupKey && labelKey
+        ? (librariesByCompositeKey.get(`${groupKey}::${labelKey}`) || [])
+        : [];
+      if (compositeMatches.length === 1) {
+        return compositeMatches[0].id;
+      }
+
+      const plainMatches = labelKey ? (librariesByName.get(labelKey) || []) : [];
+      if (plainMatches.length === 1) {
+        return plainMatches[0].id;
+      }
+
+      const groupMatches = groupKey ? (librariesByGroup.get(groupKey) || []) : [];
+      if (group.libraryAssignments.length === 1 && groupMatches.length === 1) {
+        return groupMatches[0].id;
+      }
+
+      return null;
+    };
 
     groupsWithAssignments.forEach(group => {
-      const nextAssignments = group.libraryAssignments.map(assignment => ({
-        ...assignment,
-        libraryId: assignment.libraryId || libraryByName.get(String(assignment.label || '').trim().toLowerCase()) || null,
-      }));
+      const nextAssignments = group.libraryAssignments.map(assignment => {
+        const libraryId = resolveAssignmentLibraryId(group, assignment);
+        if (libraryId) assignedLibraryIds.add(libraryId);
+        return {
+          ...assignment,
+          libraryId,
+        };
+      });
       nextGroups = setGroupLibraryAssignments(nextGroups, group.id, nextAssignments);
     });
 
     update('goalLibraries', nextLibraries);
     update('goalGroups', nextGroups);
     update('goalLibrariesAppliedSnapshot', null);
+    const unassignedImportedLibraries = importedLibraries.filter(library => !assignedLibraryIds.has(library.id));
+    return {
+      unassignedImportCount: unassignedImportedLibraries.length,
+      unassignedImportNames: unassignedImportedLibraries.map(library => {
+        const groupLabel = String(library.groupName || '').trim();
+        const libraryLabel = String(library.name || '').trim() || 'Untitled library';
+        return groupLabel ? `${groupLabel} / ${libraryLabel}` : libraryLabel;
+      }),
+    };
   }
 
   return (
@@ -3664,6 +3968,7 @@ function StepGoalLibraries({ config, update }) {
           config={config}
           initialLibrary={editingLibrary}
           fixedName={editingSlot?.assignment?.label || ''}
+          suggestedType={editingSlot?.group?.libraryType || null}
           onSave={saveLibrary}
           onClose={() => {
             setShowAddModal(false);
@@ -3771,6 +4076,7 @@ function StepGoalLibraries({ config, update }) {
             <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
               <GoalLibrarySheetControls
                 config={config}
+                downloadConfig={templateScopeConfig}
                 existingLibraries={libraries}
                 onImported={handleImportedLibraries}
               />
@@ -3792,6 +4098,28 @@ function StepGoalLibraries({ config, update }) {
 }
 
 /* ─── STEP LIMITS (BSC) ──────────────────────────────────────────────────── */
+function hasLimitValue(value) {
+  return value !== null && value !== undefined && value !== '';
+}
+
+function getLimitPlaceholder(label, placeholder) {
+  if (placeholder) return placeholder;
+  if (label.startsWith('Min ')) return 'No minimum';
+  if (label.startsWith('Max ')) return 'No maximum';
+  return 'No limit';
+}
+
+function getAdvancedLimitValueCount(rule, hasKPIs) {
+  const keys = [
+    'minKRAsPerPersp',
+    'maxKRAsPerPersp',
+    'minKRAWeight',
+    'maxKRAWeight',
+    ...(hasKPIs ? ['minKPIWeight', 'maxKPIWeight'] : []),
+  ];
+  return keys.filter(key => hasLimitValue(rule?.[key])).length;
+}
+
 function LimitField({ label, value, onChange, placeholder }) {
   return (
     <div>
@@ -3800,7 +4128,7 @@ function LimitField({ label, value, onChange, placeholder }) {
         type="number"
         value={value ?? ''}
         onChange={e => onChange(e.target.value === '' ? null : Number(e.target.value))}
-        placeholder={placeholder || '—'}
+        placeholder={getLimitPlaceholder(label, placeholder)}
         min={0}
         style={{ width: '100%', border: '1px solid #E2E8F0', borderRadius: 6, padding: '7px 10px', fontSize: 13, outline: 'none', fontFamily: 'inherit', boxSizing: 'border-box' }}
       />
@@ -3819,6 +4147,39 @@ function StepLimits({ config, update }) {
     return rules.find(r => r.groupId === groupId) || {};
   }
 
+  const [advancedOpenByGroup, setAdvancedOpenByGroup] = useState(() =>
+    Object.fromEntries(
+      groups.map(group => {
+        const rule = rules.find(item => item.groupId === group.id) || {};
+        return [group.id, getAdvancedLimitValueCount(rule, hasKPIs) > 0];
+      })
+    )
+  );
+
+  useEffect(() => {
+    setAdvancedOpenByGroup(current => {
+      const next = { ...current };
+      let changed = false;
+
+      groups.forEach(group => {
+        if (!(group.id in next)) {
+          const rule = rules.find(item => item.groupId === group.id) || {};
+          next[group.id] = getAdvancedLimitValueCount(rule, hasKPIs) > 0;
+          changed = true;
+        }
+      });
+
+      Object.keys(next).forEach(groupId => {
+        if (!groups.some(group => group.id === groupId)) {
+          delete next[groupId];
+          changed = true;
+        }
+      });
+
+      return changed ? next : current;
+    });
+  }, [groups, rules, hasKPIs]);
+
   function updateRule(groupId, changes) {
     const existing = rules.find(r => r.groupId === groupId);
     if (existing) {
@@ -3833,9 +4194,9 @@ function StepLimits({ config, update }) {
     <div style={{ maxWidth: 820, margin: '0 auto', paddingBottom: 40 }}>
       <div style={{ marginBottom: 28 }}>
         <div style={{ fontSize: 11, fontWeight: 700, color: '#94A3B8', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 6 }}>Goal Limits</div>
-        <h2 style={{ margin: 0, fontSize: 22, fontWeight: 800, color: '#0F172A' }}>KRA/KPI count & weight rules</h2>
+        <h2 style={{ margin: 0, fontSize: 22, fontWeight: 800, color: '#0F172A' }}>KRA/KPI count rules</h2>
         <p style={{ margin: '8px 0 0', fontSize: 14, color: '#64748B', lineHeight: 1.6 }}>
-          Optionally restrict how many KRAs/KPIs employees can set and what weight ranges are allowed.
+          Most teams only set total KRA limits and, when KPI mode is on, KPI counts per KRA. Perspective and weight rules stay under Advanced.
         </p>
       </div>
 
@@ -3845,41 +4206,85 @@ function StepLimits({ config, update }) {
           <input type="checkbox" checked={enabled} onChange={e => { update('limitsEnabled', e.target.checked); update('limitsAppliedSnapshot', null); }} style={{ width: 18, height: 18, accentColor: '#2563EB', cursor: 'pointer', flexShrink: 0 }} />
           <div>
             <div style={{ fontSize: 14, fontWeight: 700, color: '#0F172A' }}>Enable Goal Limits</div>
-            <div style={{ fontSize: 12.5, color: '#6B7280', marginTop: 2 }}>Employees will be constrained by the rules you define per group. Leave blank = no limit on that dimension.</div>
+            <div style={{ fontSize: 12.5, color: '#6B7280', marginTop: 2 }}>Employees will be constrained by the rules you define per group. Leave a field blank and we will not enforce that rule.</div>
           </div>
         </label>
       </div>
 
       {enabled && groups.map(group => {
         const rule = getRuleForGroup(group.id);
+        const advancedValueCount = getAdvancedLimitValueCount(rule, hasKPIs);
+        const advancedOpen = !!advancedOpenByGroup[group.id];
         return (
           <div key={group.id} style={{ background: '#fff', border: '1.5px solid #E2E8F0', borderRadius: 12, marginBottom: 14, overflow: 'hidden' }}>
             <div style={{ padding: '13px 20px', borderBottom: '1px solid #F1F5F9', background: '#FAFBFF', display: 'flex', alignItems: 'center', gap: 10 }}>
               <div style={{ fontSize: 13, fontWeight: 700, color: '#0F172A' }}>{group.name}</div>
               <span style={{ fontSize: 11.5, color: '#9CA3AF', background: '#F1F5F9', padding: '2px 8px', borderRadius: 10 }}>
-                {group.mode === 'prefill' ? '📋 Prefill' : '✏️ Scratch'}{group.hasLibrary ? ' + Library' : ''}
+                {group.mode === 'prefill' ? '📋 Prefill' : '✏️ Scratch'}{isGroupLibraryEnabled(group) ? ' + Library' : ''}
               </span>
             </div>
             <div style={{ padding: '16px 20px' }}>
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12, marginBottom: 14 }}>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 12 }}>
                 <LimitField label="Min KRAs (total)" value={rule.minKRAs} onChange={v => updateRule(group.id, { minKRAs: v })} />
                 <LimitField label="Max KRAs (total)" value={rule.maxKRAs} onChange={v => updateRule(group.id, { maxKRAs: v })} />
-                <LimitField label="Min KRAs / Perspective" value={rule.minKRAsPerPersp} onChange={v => updateRule(group.id, { minKRAsPerPersp: v })} />
-                <LimitField label="Max KRAs / Perspective" value={rule.maxKRAsPerPersp} onChange={v => updateRule(group.id, { maxKRAsPerPersp: v })} />
-              </div>
-              {hasKPIs && (
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12, marginBottom: 14 }}>
+                {hasKPIs && <>
                   <LimitField label="Min KPIs / KRA" value={rule.minKPIsPerKRA} onChange={v => updateRule(group.id, { minKPIsPerKRA: v })} />
                   <LimitField label="Max KPIs / KRA" value={rule.maxKPIsPerKRA} onChange={v => updateRule(group.id, { maxKPIsPerKRA: v })} />
-                </div>
-              )}
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12 }}>
-                <LimitField label="Min KRA weight %" value={rule.minKRAWeight} onChange={v => updateRule(group.id, { minKRAWeight: v })} />
-                <LimitField label="Max KRA weight %" value={rule.maxKRAWeight} onChange={v => updateRule(group.id, { maxKRAWeight: v })} />
-                {hasKPIs && <>
-                  <LimitField label="Min KPI weight %" value={rule.minKPIWeight} onChange={v => updateRule(group.id, { minKPIWeight: v })} />
-                  <LimitField label="Max KPI weight %" value={rule.maxKPIWeight} onChange={v => updateRule(group.id, { maxKPIWeight: v })} />
                 </>}
+              </div>
+
+              <div style={{ marginTop: 14, paddingTop: 14, borderTop: '1px solid #F1F5F9' }}>
+                <button
+                  type="button"
+                  onClick={() => setAdvancedOpenByGroup(current => ({ ...current, [group.id]: !current[group.id] }))}
+                  aria-expanded={advancedOpen}
+                  style={{
+                    width: '100%',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    gap: 12,
+                    border: '1px solid #E2E8F0',
+                    borderRadius: 10,
+                    background: advancedOpen ? '#F8FAFC' : '#FFFFFF',
+                    padding: '11px 12px',
+                    cursor: 'pointer',
+                    textAlign: 'left',
+                  }}
+                >
+                  <div>
+                    <div style={{ fontSize: 12.5, fontWeight: 700, color: '#0F172A' }}>Advanced rules</div>
+                    <div style={{ fontSize: 11.5, color: '#6B7280', marginTop: 2 }}>
+                      Perspective-level counts and weight % limits for edge-case setups.
+                    </div>
+                  </div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0 }}>
+                    <span style={{
+                      fontSize: 11.5,
+                      fontWeight: 600,
+                      color: advancedValueCount > 0 ? '#2563EB' : '#94A3B8',
+                      background: advancedValueCount > 0 ? '#EFF6FF' : '#F8FAFC',
+                      borderRadius: 999,
+                      padding: '4px 9px',
+                    }}>
+                      {advancedValueCount > 0 ? `${advancedValueCount} active` : 'Optional'}
+                    </span>
+                    <span style={{ fontSize: 15, color: '#64748B' }}>{advancedOpen ? 'Hide' : 'Show'}</span>
+                  </div>
+                </button>
+
+                {advancedOpen && (
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 12, marginTop: 12 }}>
+                    <LimitField label="Min KRAs / Perspective" value={rule.minKRAsPerPersp} onChange={v => updateRule(group.id, { minKRAsPerPersp: v })} />
+                    <LimitField label="Max KRAs / Perspective" value={rule.maxKRAsPerPersp} onChange={v => updateRule(group.id, { maxKRAsPerPersp: v })} />
+                    <LimitField label="Min KRA weight %" value={rule.minKRAWeight} onChange={v => updateRule(group.id, { minKRAWeight: v })} />
+                    <LimitField label="Max KRA weight %" value={rule.maxKRAWeight} onChange={v => updateRule(group.id, { maxKRAWeight: v })} />
+                    {hasKPIs && <>
+                      <LimitField label="Min KPI weight %" value={rule.minKPIWeight} onChange={v => updateRule(group.id, { minKPIWeight: v })} />
+                      <LimitField label="Max KPI weight %" value={rule.maxKPIWeight} onChange={v => updateRule(group.id, { maxKPIWeight: v })} />
+                    </>}
+                  </div>
+                )}
               </div>
             </div>
           </div>
@@ -3903,8 +4308,18 @@ function StepSummary({ config, onLaunched }) {
   const groups = config.goalGroups || [];
   const libraries = config.goalLibraries || [];
   const employees = config.employeeUploadData?.employees || [];
+  const missingGoalGroupNames = config.employeeUploadData?.missingGoalGroupNames || [];
+  const deferredGoalGroupNames = normalizeDeferredGoalGroups(config.deferredGoalGroupNames || []);
+  const employeeWarnings = config.employeeUploadData?.validationWarnings || [];
   const perspectives = (config.perspectives || []).filter(p => p.name && p.weight);
   const fw = FRAMEWORKS.find(f => f.id === config.frameworkId);
+  const employeeCodeSet = new Set(
+    employees.map((employee) => String(employee['Employee Code'] || '').trim().toLowerCase()).filter(Boolean)
+  );
+  const [expandedGroupIds, setExpandedGroupIds] = useState(() => {
+    const firstId = groups[0]?.id;
+    return firstId ? [firstId] : [];
+  });
 
   const groupSummary = groups.map(g => {
     const assignments = getGroupLibraryAssignments(g);
@@ -3917,10 +4332,116 @@ function StepSummary({ config, onLaunched }) {
     return { ...g, configuredAssignments, assignmentCount: assignments.length };
   });
 
+  const coverageByGroup = groupSummary.map((group) => {
+    const members = employees.filter((employee) => String(employee.assignedGoalGroupName || employee['Group Name'] || '').trim().toLowerCase() === String(group.name || '').trim().toLowerCase());
+    const memberCodeSet = new Set(
+      members.map((employee) => String(employee['Employee Code'] || '').trim().toLowerCase()).filter(Boolean)
+    );
+    const directReportsMap = new Map();
+
+    members.forEach((employee) => {
+      const managerCode = String(employee['Reporting Manager Code'] || '').trim().toLowerCase();
+      if (!managerCode || !memberCodeSet.has(managerCode)) return;
+      const list = directReportsMap.get(managerCode) || [];
+      list.push(employee);
+      directReportsMap.set(managerCode, list);
+    });
+
+    const buildNode = (employee, trail = new Set()) => {
+      const code = String(employee['Employee Code'] || '').trim().toLowerCase();
+      if (!code || trail.has(code)) {
+        return { employee, reports: [], reportCount: 0 };
+      }
+      const nextTrail = new Set(trail);
+      nextTrail.add(code);
+      const reports = (directReportsMap.get(code) || [])
+        .slice()
+        .sort((left, right) => String(left['Employee Name'] || '').localeCompare(String(right['Employee Name'] || '')))
+        .map((item) => buildNode(item, nextTrail));
+      return { employee, reports, reportCount: reports.length };
+    };
+
+    const rootNodes = members
+      .filter((employee) => {
+        const managerCode = String(employee['Reporting Manager Code'] || '').trim().toLowerCase();
+        return !managerCode || !memberCodeSet.has(managerCode);
+      })
+      .sort((left, right) => String(left['Employee Name'] || '').localeCompare(String(right['Employee Name'] || '')))
+      .map((employee) => buildNode(employee));
+
+    const assignmentSummaries = group.configuredAssignments.map((assignment) => {
+      const employeeCount = members.filter((employee) => {
+        const match = getAssignedLibraryForGroup(employee, group, config);
+        return match.library?.id === assignment.library?.id
+          && String(match.assignment?.slotKey || '') === String(assignment.slotKey || '');
+      }).length;
+      return { ...assignment, employeeCount };
+    });
+
+    return {
+      id: group.id,
+      name: group.name,
+      members,
+      rootNodes,
+      assignmentSummaries,
+    };
+  });
+
+  const outsidePmsManagers = employeeWarnings
+    .filter((warning) => warning.category === 'manager_not_in_file' || warning.category === 'l2_manager_not_in_file')
+    .map((warning) => {
+      const match = String(warning.message || '').match(/Manager "([^"]+)"/i);
+      return {
+        code: match?.[1] || warning.code || '—',
+        message: warning.message,
+      };
+    })
+    .filter((entry, index, list) => list.findIndex((item) => item.code === entry.code) === index);
+
   const warnings = [];
-  const groupsNeedingLib = groups.filter(g => g.hasLibrary && getGroupLibraryAssignments(g).some(assignment => !assignment.libraryId));
+  const groupsNeedingLib = groups.filter(g => isGroupLibraryEnabled(g) && getGroupLibraryAssignments(g).some(assignment => !assignment.libraryId));
   if (groupsNeedingLib.length > 0) warnings.push(`${groupsNeedingLib.length} group(s) have Goal Library enabled but no library assigned.`);
   if (employees.length === 0) warnings.push('No employees uploaded yet.');
+  if (missingGoalGroupNames.length > 0) warnings.push(`No employees were uploaded for: ${missingGoalGroupNames.join(', ')}. The current employee upload is treated as the full master list.`);
+
+  function toggleGroupDetails(groupId) {
+    setExpandedGroupIds((prev) => (
+      prev.includes(groupId)
+        ? prev.filter((item) => item !== groupId)
+        : [...prev, groupId]
+    ));
+  }
+
+  function renderOrgNode(node, depth = 0) {
+    const employee = node.employee || {};
+    const name = employee['Employee Name'] || employee['Employee Code'] || 'Employee';
+    const code = employee['Employee Code'] || '—';
+    const title = employee.Designation || employee.Department || employee['Group Name'] || '';
+    const managerCode = String(employee['Reporting Manager Code'] || '').trim().toLowerCase();
+    const managerMissingInPms = managerCode && !employeeCodeSet.has(managerCode);
+
+    return (
+      <div key={`${code}_${depth}`} style={{ marginLeft: depth > 0 ? 18 : 0, paddingLeft: depth > 0 ? 14 : 0, borderLeft: depth > 0 ? '2px solid #E2E8F0' : 'none' }}>
+        <div style={{ padding: '9px 11px', borderRadius: 10, background: depth === 0 ? '#F8FAFC' : '#fff', border: '1px solid #E2E8F0', marginTop: 8 }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, flexWrap: 'wrap' }}>
+            <div>
+              <div style={{ fontSize: 12.5, fontWeight: 700, color: '#0F172A' }}>{name}</div>
+              <div style={{ fontSize: 11.5, color: '#64748B', marginTop: 2 }}>
+                {code}{title ? ` · ${title}` : ''}
+              </div>
+              {managerMissingInPms && (
+                <div style={{ fontSize: 11, color: '#B45309', marginTop: 4 }}>Reports to outside-PMS / cross-group manager</div>
+              )}
+            </div>
+            <div style={{ fontSize: 11.5, fontWeight: 700, color: node.reportCount > 0 ? '#2563EB' : '#94A3B8' }}>
+              {node.reportCount} reportee{node.reportCount !== 1 ? 's' : ''}
+            </div>
+          </div>
+        </div>
+        {node.reports.map((child) => renderOrgNode(child, depth + 1))}
+      </div>
+    );
+  }
 
   return (
     <div style={{ maxWidth: 820, margin: '0 auto', paddingBottom: 60 }}>
@@ -3931,17 +4452,17 @@ function StepSummary({ config, onLaunched }) {
       </div>
 
       {/* Framework */}
-      <div style={{ background: '#fff', border: '1.5px solid #E2E8F0', borderRadius: 12, padding: '18px 22px', marginBottom: 14 }}>
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: perspectives.length > 0 ? 14 : 0 }}>
+      <div style={{ background: '#fff', border: '1.5px solid #E2E8F0', borderRadius: 12, padding: '14px 18px', marginBottom: 14 }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, flexWrap: 'wrap' }}>
           <div style={{ fontSize: 13, fontWeight: 700, color: '#0F172A' }}>Performance Framework</div>
-          <span style={{ fontSize: 13, fontWeight: 600, color: '#2563EB', background: '#EFF6FF', padding: '3px 12px', borderRadius: 20 }}>{fw?.name || config.frameworkId}</span>
+          <span style={{ fontSize: 12.5, fontWeight: 600, color: '#2563EB', background: '#EFF6FF', padding: '3px 10px', borderRadius: 20 }}>{fw?.name || config.frameworkId}</span>
         </div>
         {perspectives.length > 0 && (
-          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 10 }}>
             {perspectives.map((p, i) => (
-              <div key={i} style={{ padding: '5px 12px', borderRadius: 20, background: '#F8FAFC', border: '1px solid #E2E8F0', fontSize: 12 }}>
+              <div key={i} style={{ padding: '3px 9px', borderRadius: 20, background: '#F8FAFC', border: '1px solid #E2E8F0', fontSize: 11.5 }}>
                 <span style={{ fontWeight: 600, color: '#374151' }}>{p.name}</span>
-                <span style={{ color: '#9CA3AF', marginLeft: 6 }}>{p.weight}%</span>
+                <span style={{ color: '#9CA3AF', marginLeft: 5 }}>{p.weight}%</span>
               </div>
             ))}
           </div>
@@ -3953,45 +4474,59 @@ function StepSummary({ config, onLaunched }) {
         <div style={{ fontSize: 13, fontWeight: 700, color: '#0F172A', marginBottom: 14 }}>Employee Groups ({groups.length})</div>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
           {groupSummary.map(g => (
-            <div key={g.id} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '10px 14px', background: '#F8FAFC', borderRadius: 8, border: '1px solid #E9EDF2' }}>
-              <div style={{ flex: 1 }}>
-                <div style={{ fontSize: 13, fontWeight: 600, color: '#374151' }}>{g.name}</div>
-                {g.segmentAttr && g.segmentValues?.length > 0 && (
-                  <div style={{ fontSize: 12, color: '#9CA3AF', marginTop: 2 }}>{g.segmentAttr}: {g.segmentValues.join(', ')}</div>
-                )}
-              </div>
-              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
-                <span style={{ fontSize: 11.5, fontWeight: 600, padding: '3px 10px', borderRadius: 20, background: g.mode === 'prefill' ? '#EFF6FF' : '#FFFBEB', color: g.mode === 'prefill' ? '#2563EB' : '#D97706', border: `1px solid ${g.mode === 'prefill' ? '#BFDBFE' : '#FDE68A'}` }}>
-                  {g.mode === 'prefill' ? '📋 Prefill' : '✏️ Scratch'}
-                </span>
-                {g.hasLibrary && (
-                  <span style={{ fontSize: 11.5, fontWeight: 600, padding: '3px 10px', borderRadius: 20, background: '#F5F3FF', color: '#7C3AED', border: '1px solid #DDD6FE' }}>
-                    📚 {g.configuredAssignments.length}/{g.assignmentCount} configured
+            <div key={g.id} style={{ padding: '10px 14px', background: '#F8FAFC', borderRadius: 8, border: '1px solid #E9EDF2' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 12, justifyContent: 'space-between' }}>
+                <button
+                  type="button"
+                  onClick={() => toggleGroupDetails(g.id)}
+                  style={{ flex: 1, textAlign: 'left', background: 'none', border: 'none', padding: 0, cursor: 'pointer', fontFamily: 'inherit' }}
+                >
+                  <div style={{ fontSize: 13, fontWeight: 600, color: '#374151' }}>{g.name}</div>
+                  {g.segmentAttr && g.segmentValues?.length > 0 && (
+                    <div style={{ fontSize: 12, color: '#9CA3AF', marginTop: 2 }}>{g.segmentAttr}: {g.segmentValues.join(', ')}</div>
+                  )}
+                </button>
+                <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', justifyContent: 'flex-end', alignItems: 'center' }}>
+                  <span style={{ fontSize: 11.5, fontWeight: 600, padding: '3px 10px', borderRadius: 20, background: g.mode === 'prefill' ? '#EFF6FF' : '#FFFBEB', color: g.mode === 'prefill' ? '#2563EB' : '#D97706', border: `1px solid ${g.mode === 'prefill' ? '#BFDBFE' : '#FDE68A'}` }}>
+                    {g.mode === 'prefill' ? '📋 Prefill' : '✏️ Scratch'}
                   </span>
-                )}
+                  {isGroupLibraryEnabled(g) && (
+                    <span style={{ fontSize: 11.5, fontWeight: 600, padding: '3px 10px', borderRadius: 20, background: '#F5F3FF', color: '#7C3AED', border: '1px solid #DDD6FE' }}>
+                      📚 {g.configuredAssignments.length}/{g.assignmentCount} library slots mapped
+                    </span>
+                  )}
+                  <span style={{ fontSize: 12, color: '#64748B' }}>{expandedGroupIds.includes(g.id) ? 'Hide' : 'Show'} details</span>
+                </div>
               </div>
+              {expandedGroupIds.includes(g.id) && (() => {
+                const groupCoverage = coverageByGroup.find((item) => item.id === g.id);
+                return (
+                  <div style={{ marginTop: 12, paddingTop: 12, borderTop: '1px solid #E2E8F0' }}>
+                    {groupCoverage?.assignmentSummaries?.length > 0 && (
+                      <div style={{ marginBottom: 12 }}>
+                        <div style={{ fontSize: 11.5, fontWeight: 700, color: '#64748B', textTransform: 'uppercase', letterSpacing: '.05em', marginBottom: 8 }}>Associated Libraries</div>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                          {groupCoverage.assignmentSummaries.map((assignment) => (
+                            <div key={`${g.id}_${assignment.slotKey || assignment.library?.id}`} style={{ padding: '8px 10px', borderRadius: 8, background: '#fff', border: '1px solid #E2E8F0', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
+                              <div>
+                                <div style={{ fontSize: 12.5, fontWeight: 700, color: '#0F172A' }}>{assignment.library?.name || assignment.label}</div>
+                                <div style={{ fontSize: 11.5, color: '#64748B', marginTop: 2 }}>
+                                  {assignment.label}{assignment.library?.type ? ` · ${assignment.library.type === 'kra-kpi' ? 'KRA+KPI' : 'KRA only'}` : ''}
+                                </div>
+                              </div>
+                              <div style={{ fontSize: 11.5, fontWeight: 700, color: '#2563EB' }}>{assignment.employeeCount} employee{assignment.employeeCount !== 1 ? 's' : ''}</div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
             </div>
           ))}
         </div>
       </div>
-
-      {/* Libraries */}
-      {libraries.length > 0 && (
-        <div style={{ background: '#fff', border: '1.5px solid #E2E8F0', borderRadius: 12, padding: '18px 22px', marginBottom: 14 }}>
-          <div style={{ fontSize: 13, fontWeight: 700, color: '#0F172A', marginBottom: 12 }}>Goal Libraries ({libraries.length})</div>
-          <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
-            {libraries.map(lib => {
-              const kraCount = (lib.perspectives || []).reduce((s, p) => s + (p.kras || []).length, 0);
-              return (
-                <div key={lib.id} style={{ padding: '10px 14px', background: '#F8FAFC', border: '1px solid #E9EDF2', borderRadius: 9 }}>
-                  <div style={{ fontSize: 13, fontWeight: 600, color: '#374151' }}>📚 {lib.name}</div>
-                  <div style={{ fontSize: 11.5, color: '#9CA3AF', marginTop: 2 }}>{kraCount} KRAs · {lib.type === 'kra-kpi' ? 'KRA+KPI' : 'KRA only'}</div>
-                </div>
-              );
-            })}
-          </div>
-        </div>
-      )}
 
       {/* Limits */}
       <div style={{ background: '#fff', border: '1.5px solid #E2E8F0', borderRadius: 12, padding: '18px 22px', marginBottom: 14 }}>
@@ -4011,11 +4546,88 @@ function StepSummary({ config, onLaunched }) {
         </div>
       </div>
 
+      {/* Rollout structure */}
+      <div style={{ background: '#fff', border: '1.5px solid #E2E8F0', borderRadius: 12, padding: '18px 22px', marginBottom: 20 }}>
+        <div style={{ fontSize: 13, fontWeight: 700, color: '#0F172A', marginBottom: 14 }}>PMS Rollout Structure</div>
+
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 10, marginBottom: 16 }}>
+          {[
+            { label: 'Employees In PMS', value: employees.length, color: '#2563EB', bg: '#EFF6FF' },
+            { label: 'Groups Covered', value: `${coverageByGroup.filter((group) => group.members.length > 0).length}/${groups.length || 0}`, color: '#16A34A', bg: '#F0FDF4' },
+            { label: 'Deferred Groups', value: deferredGoalGroupNames.length, color: '#D97706', bg: '#FFFBEB' },
+            { label: 'Outside-PMS Managers', value: outsidePmsManagers.length, color: '#7C3AED', bg: '#F5F3FF' },
+          ].map((item) => (
+            <div key={item.label} style={{ padding: '12px 14px', borderRadius: 10, background: item.bg, border: '1px solid #E5E7EB' }}>
+              <div style={{ fontSize: 11.5, color: '#64748B', marginBottom: 6 }}>{item.label}</div>
+              <div style={{ fontSize: 20, fontWeight: 800, color: item.color }}>{item.value}</div>
+            </div>
+          ))}
+        </div>
+
+        <div style={{ marginBottom: 16 }}>
+          <div style={{ fontSize: 12, fontWeight: 700, color: '#64748B', textTransform: 'uppercase', letterSpacing: '.05em', marginBottom: 8 }}>Group organogram</div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            {coverageByGroup.map((group) => (
+              <div key={group.name} style={{ padding: '10px 12px', borderRadius: 10, border: '1px solid #E9EDF2', background: '#F8FAFC' }}>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, marginBottom: 8 }}>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: '#0F172A' }}>{group.name}</div>
+                  <div style={{ fontSize: 12, fontWeight: 700, color: group.members.length > 0 ? '#2563EB' : '#9CA3AF' }}>{group.members.length} employee{group.members.length !== 1 ? 's' : ''}</div>
+                </div>
+                {group.rootNodes.length > 0 ? (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                    {group.rootNodes.map((node) => renderOrgNode(node))}
+                  </div>
+                ) : (
+                  <div style={{ fontSize: 12, color: '#9CA3AF' }}>No employees in current PMS rollout.</div>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {deferredGoalGroupNames.length > 0 && (
+          <div style={{ marginBottom: 16 }}>
+            <div style={{ fontSize: 12, fontWeight: 700, color: '#64748B', textTransform: 'uppercase', letterSpacing: '.05em', marginBottom: 8 }}>Deferred groups</div>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+              {deferredGoalGroupNames.map((name) => (
+                <div key={name} style={{ padding: '6px 10px', borderRadius: 999, background: '#EFF6FF', border: '1px solid #BFDBFE', fontSize: 11.5, fontWeight: 700, color: '#1D4ED8' }}>
+                  {name}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        <div>
+          <div style={{ fontSize: 12, fontWeight: 700, color: '#64748B', textTransform: 'uppercase', letterSpacing: '.05em', marginBottom: 8 }}>Outside-PMS managers</div>
+          {outsidePmsManagers.length > 0 ? (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              {outsidePmsManagers.map((manager) => (
+                <div key={manager.code} style={{ padding: '10px 12px', borderRadius: 10, background: '#F5F3FF', border: '1px solid #DDD6FE' }}>
+                  <div style={{ fontSize: 12.5, fontWeight: 700, color: '#6D28D9', marginBottom: 4 }}>{manager.code}</div>
+                  <div style={{ fontSize: 11.5, color: '#6B21A8' }}>{manager.message}</div>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div style={{ fontSize: 12, color: '#9CA3AF' }}>No outside-PMS manager references detected in the current upload.</div>
+          )}
+        </div>
+      </div>
+
       {/* Warnings */}
       {warnings.length > 0 && (
         <div style={{ background: '#FFFBEB', border: '1.5px solid #FDE68A', borderRadius: 10, padding: '14px 18px', marginBottom: 20 }}>
           <div style={{ fontSize: 12.5, fontWeight: 700, color: '#92400E', marginBottom: 6 }}>⚠️ Warnings</div>
           {warnings.map((w, i) => <div key={i} style={{ fontSize: 12.5, color: '#78350F', marginBottom: 3 }}>· {w}</div>)}
+        </div>
+      )}
+      {deferredGoalGroupNames.length > 0 && (
+        <div style={{ background: '#EFF6FF', border: '1.5px solid #BFDBFE', borderRadius: 10, padding: '14px 18px', marginBottom: 20 }}>
+          <div style={{ fontSize: 12.5, fontWeight: 700, color: '#1D4ED8', marginBottom: 6 }}>Deferred For Later</div>
+          <div style={{ fontSize: 12.5, color: '#1E3A8A' }}>
+            {deferredGoalGroupNames.join(', ')} will stay outside the current PMS rollout until the admin returns and uploads them.
+          </div>
         </div>
       )}
 
@@ -4740,7 +5352,7 @@ function GoalLibraryMaster({ parsedData, config, onChange }) {
       setEditError('KPI name is required.');
       return;
     }
-    if (!isNonNegativeNumeric(nextWeight)) {
+    if (nextWeight !== '' && !isNonNegativeNumeric(nextWeight)) {
       setEditError('KPI weight must be a non-negative numeric value.');
       return;
     }
@@ -4836,8 +5448,8 @@ function GoalLibraryMaster({ parsedData, config, onChange }) {
       </div>
 
       {!libraryIsValid && (
-        <div style={{padding:'12px 18px',background:'#FFF7ED',borderBottom:'1px solid #FED7AA',fontSize:12.5,color:'#9A3412'}}>
-          Fix the KRA library issues before proceeding to Employee Upload. Current errors: {validationErrors.slice(0, 3).map((err) => err.message).join(' | ')}{validationErrors.length > 3 ? ` | +${validationErrors.length - 3} more` : ''}
+        <div style={{padding:'12px 18px',background:'#FFFBEB',borderBottom:'1px solid #FDE68A',fontSize:12.5,color:'#92400E'}}>
+          Note: {validationErrors.length} item{validationErrors.length !== 1 ? 's' : ''} may need attention — the library can still be used as a reference. {validationErrors.slice(0, 2).map((err) => err.message).join(' | ')}{validationErrors.length > 2 ? ` | +${validationErrors.length - 2} more` : ''}
         </div>
       )}
 
@@ -5222,8 +5834,10 @@ function GroupDataUploadPanel({ group, config, update }) {
       const fakeConfig = { ...config, goalLibraryScope: 'common', goalSegmentValues: [] };
       const result = await parseGoalLibraryXlsx(file, fakeConfig);
       const errs = validateGoalLibraryData(result, fakeConfig);
-      if (errs.length > 0) {
-        setImportErrors(prev => ({ ...prev, [type]: errs }));
+      // Block on perspective errors and invalid/negative weights — KPIs and empty weights are optional.
+      const blockingErrors = errs.filter(e => e.field === 'perspective' || e.field === 'kra_weight' || e.field === 'kpi_weight');
+      if (blockingErrors.length > 0) {
+        setImportErrors(prev => ({ ...prev, [type]: blockingErrors }));
         setImportPhase(prev => ({ ...prev, [type]: 'error' }));
       } else {
         const field = type === 'prefill' ? 'prefillData' : 'libraryData';
@@ -5407,12 +6021,13 @@ function StepKRALibrary({ config, update }) {
     try {
       const result = await parseGoalLibraryXlsx(file, config);
       const errs = validateGoalLibraryData(result, config);
-      if (errs.length > 0) {
-        setImportErrors(errs);
+      // Block on perspective errors and invalid/negative weights — KPIs and empty weights are optional.
+      const blockingErrors = errs.filter(e => e.field === 'perspective' || e.field === 'kra_weight' || e.field === 'kpi_weight');
+      if (blockingErrors.length > 0) {
+        setImportErrors(blockingErrors);
         setImportErrorData(result);
         setImportPhase('error');
       } else {
-        // Success — seed the master view with imported data
         setBaseData(result);
         setMasterKey(k => k + 1);
         update('goalLibraryData', result);
@@ -5528,9 +6143,12 @@ function StepKRALibrary({ config, update }) {
 function StepEmployeeSettings({ config, update }) {
   const isValidManagerSetup = isEmployeeSettingsValid(config);
   const settingsApplied = isValidManagerSetup && config.empSettingsAppliedSnapshot === getEmployeeSettingsSnapshot(config);
+  const routingColumns = getEmployeeRoutingColumns(config);
+  const routingColumnLabels = routingColumns.map(column => column.label);
+  const hasGoalGroups = (config.goalGroups || []).length > 0;
   return (
     <div>
-      <SectionHead title="Employee settings" sub="Configure how employee records are structured before upload." />
+      <SectionHead title="Employee settings" sub="Configure manager fields and any routing columns needed before upload." />
 
       {/* Card 1: Manager hierarchy */}
       <Card>
@@ -5581,9 +6199,12 @@ function StepEmployeeSettings({ config, update }) {
       <div style={{ padding: '12px 16px', background: '#F8FAFC', border: '1.5px solid #E2E8F0', borderRadius: 10, fontSize: 12.5, color: '#64748B', lineHeight: 1.7 }}>
         <strong style={{ color: '#374151' }}>Your upload sheet will include:</strong>{' '}
         Employee Code, Employee Name{config.requireEmail !== false ? ', Email ID' : ''}
-        {config.goalLibraryScope === 'by-attribute' && config.goalCreationMode === 'admin-library' ? `, ${config.goalSegmentAttr || 'Department'}` : ''}
+        {hasGoalGroups ? ', Group Name' : ''}
+        {routingColumnLabels.length > 0 ? `, ${routingColumnLabels.join(', ')}` : ''}
         {', '}Reporting Manager Code, Reporting Manager Name{config.requireEmail !== false ? ', Reporting Manager Email' : ''}
         {config.managerLevels >= 2 ? ', L2 Manager Code (optional), L2 Manager Name (optional)' : ''}.
+        {hasGoalGroups ? ' Group Name is mandatory and must match a configured group exactly.' : ''}
+        {routingColumnLabels.length > 0 ? ` These routing field${routingColumnLabels.length > 1 ? 's' : ''} must match the library tagging values for that group.` : ''}
       </div>
 
       <div style={{ marginTop: 18, padding: '14px 16px', borderRadius: 10, background: settingsApplied ? '#F0FDF4' : '#EFF6FF', border: `1.5px solid ${settingsApplied ? '#86EFAC' : '#BFDBFE'}`, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16 }}>
@@ -5617,24 +6238,85 @@ function StepEmployeeSettings({ config, update }) {
 
 
 /* ── STEP 5: EMPLOYEE UPLOAD ─────────────────────────────────────────────── */
+const GROUP_PALETTE = [
+  { accent: '#2563EB' },
+  { accent: '#7C3AED' },
+  { accent: '#16A34A' },
+  { accent: '#EA580C' },
+  { accent: '#DC2626' },
+  { accent: '#0891B2' },
+];
+
 function StepEmployeeUpload({ config, update }) {
-  const [uploadState, setUploadState] = useState(() => (
-    config.employeeUploadData
+  const buildUploadState = (result) => (
+    result
       ? {
           status: 'done',
-          message: getEmployeeUploadMessage(config.employeeUploadData),
-          result: config.employeeUploadData,
-          warnings: [],
+          message: getEmployeeUploadMessage(result),
+          result,
+          warnings: [...(result.validationWarnings || []), ...(result.mappingWarnings || [])],
         }
       : null
+  );
+  const [uploadState, setUploadState] = useState(() => (
+    buildUploadState(config.employeeUploadData)
   ));
 
-  const needsAttrCol =
-    (config.goalCreationMode === 'admin-library' && config.goalLibraryScope === 'by-attribute') ||
-    (config.goalCreationMode === 'employee-self' && config.goalLimitEnabled && config.goalLimitScope === 'by-attribute');
-  const attrName = config.goalCreationMode === 'admin-library'
-    ? (config.goalSegmentAttr || 'Department')
-    : (config.goalLimitAttr || 'Department');
+  const routingColumns = getEmployeeRoutingColumns(config);
+  const routingLabels = routingColumns.map(column => column.label);
+  const hasGoalGroups = (config.goalGroups || []).length > 0;
+  const deferredGoalGroupNames = normalizeDeferredGoalGroups(config.deferredGoalGroupNames || []);
+  const routingLabelText = routingLabels.length <= 1
+    ? (routingLabels[0] || '')
+    : `${routingLabels.slice(0, -1).join(', ')} and ${routingLabels[routingLabels.length - 1]}`;
+
+  const previewColumns = uploadState?.result?.employees?.length > 0 ? [
+    { key: 'code', label: 'Code', width: '1fr', render: (employee) => employee['Employee Code'] || '—' },
+    { key: 'name', label: 'Name', width: '1.15fr', render: (employee) => employee['Employee Name'] || '—' },
+    ...(routingColumns.length > 0 ? [{
+      key: 'routing',
+      label: routingColumns.length === 1 ? routingColumns[0].label : 'Routing',
+      width: '1.45fr',
+      render: (employee) => {
+        const parts = routingColumns.map(column => {
+          const value = getEmployeeFieldValue(employee, column.label);
+          if (!value) return null;
+          return routingColumns.length === 1 ? value : `${column.label}: ${value}`;
+        }).filter(Boolean);
+        return parts.join(' · ') || '—';
+      },
+    }] : []),
+    ...((config.goalGroups || []).length > 0 ? [{
+      key: 'group',
+      label: 'Goal Group',
+      width: '1.2fr',
+      render: (employee) => employee.assignedGoalGroupName
+        ? <span style={{ color: '#16A34A', fontWeight: 600 }}>{employee.assignedGoalGroupName}</span>
+        : <span style={{ color: '#9CA3AF' }}>No match</span>,
+    }] : []),
+    ...(uploadState.result.libraryLinked ? [{
+      key: 'library',
+      label: 'Mapped Library',
+      width: '1.25fr',
+      render: (employee) => employee.assignedGoalLibraryName
+        ? `${employee.assignedGoalLibraryName} (${employee.assignedGoalLibraryCount || 0})`
+        : 'No library',
+    }] : []),
+    { key: 'manager', label: 'Manager', width: '1fr', render: (employee) => employee['Reporting Manager Code'] || '—' },
+  ] : [];
+  const previewGridTemplate = previewColumns.map(column => column.width).join(' ');
+  const getIssueRowLabel = (issue) => (typeof issue?.row === 'number' ? `Row ${issue.row}` : (issue?.row || 'Summary'));
+
+  useEffect(() => {
+    setUploadState((current) => {
+      if (!config.employeeUploadData) return current?.status === 'done' ? null : current;
+      return buildUploadState(config.employeeUploadData);
+    });
+  }, [config.employeeUploadData, config.deferredGoalGroupNames]);
+
+  function deferMissingGoalGroups(names) {
+    update('deferredGoalGroupNames', normalizeDeferredGoalGroups([...(config.deferredGoalGroupNames || []), ...names]));
+  }
 
   async function handleUpload(e) {
     const file = e.target.files?.[0];
@@ -5643,21 +6325,38 @@ function StepEmployeeUpload({ config, update }) {
     setUploadState({ status: 'parsing', message: 'Parsing file…' });
     try {
       const parsed = await parseEmployeeXlsx(file);
+      const missingRoutingColumns = routingColumns.filter(column => !parsed.headers.some(header =>
+        normalizeEmployeeFieldKey(header) === normalizeEmployeeFieldKey(column.label)
+      ));
+      const missingGroupNameColumn = hasGoalGroups && !parsed.headers.some(h =>
+        normalizeEmployeeFieldKey(h) === 'groupname'
+      );
       const { errors, warnings } = validateEmployeeData(parsed.employees, config);
+      const headerErrors = [
+        ...(missingGroupNameColumn ? [{
+          row: 1, code: 'HEADER', field: 'group_name_header',
+          message: 'Missing "Group Name" column. Download a fresh template — this column is required to assign employees to the correct goal group.',
+        }] : []),
+        ...missingRoutingColumns.map(column => ({
+          row: 1, code: 'HEADER', field: 'routing_header',
+          message: `Missing "${column.label}" column. It is required to allot employees to the correct group and library.`,
+        })),
+      ];
 
-      if (errors.length > 0) {
+      if (headerErrors.length > 0 || errors.length > 0) {
         update('employeeUploadData', null);
-        setUploadState({ status: 'invalid', errors, warnings });
+        setUploadState({ status: 'invalid', errors: [...headerErrors, ...errors], warnings });
         return;
       }
 
       const result = attachGoalLibraryToEmployees(parsed, config);
-      update('employeeUploadData', result);
+      const persistedResult = { ...result, validationWarnings: warnings };
+      update('employeeUploadData', persistedResult);
       setUploadState({
         status: 'done',
-        message: getEmployeeUploadMessage(result),
-        result,
-        warnings,
+        message: getEmployeeUploadMessage(persistedResult),
+        result: persistedResult,
+        warnings: [...warnings, ...(persistedResult.mappingWarnings || [])],
       });
     } catch (err) {
       update('employeeUploadData', null);
@@ -5674,12 +6373,26 @@ function StepEmployeeUpload({ config, update }) {
 
   return (
     <div>
-      <SectionHead title="Employee upload" sub="Upload your employee list with manager mapping. The system creates employee records and sends invite emails." />
+      <SectionHead title="Employee upload" sub="Upload your employee list with manager mapping and routing values. The latest successful upload becomes the employee master for this cycle." />
 
-      {needsAttrCol && (
+      {(hasGoalGroups || routingColumns.length > 0) && (
         <Banner type="blue">
           <span>ℹ️</span>
-          <span>Include a <strong>{attrName}</strong> column — the system uses this to assign each employee to the correct goal set.</span>
+          <span>
+            Include {hasGoalGroups ? <strong>Group Name</strong> : null}
+            {hasGoalGroups && routingColumns.length > 0 ? ' and ' : ''}
+            {routingColumns.length > 0 ? <strong>{routingLabelText}</strong> : null}
+            {hasGoalGroups || routingColumns.length > 0 ? ' in the upload. ' : ''}
+            {hasGoalGroups ? 'Group Name chooses the employee group.' : ''}
+            {hasGoalGroups && routingColumns.length > 0 ? ' ' : ''}
+            {routingColumns.length > 0 ? `The ${routingColumns.length > 1 ? 'routing values' : 'routing value'} must then map to a real goal library inside that group.` : ''}
+          </span>
+        </Banner>
+      )}
+      {deferredGoalGroupNames.length > 0 && (
+        <Banner type="blue">
+          <span>🕒</span>
+          <span>Deferred for later upload: <strong>{deferredGoalGroupNames.join(', ')}</strong>. This draft can be reopened anytime.</span>
         </Banner>
       )}
 
@@ -5687,12 +6400,63 @@ function StepEmployeeUpload({ config, update }) {
         <div style={{ padding: '13px 20px', borderBottom: '1px solid #E9EDF2', display: 'flex', alignItems: 'center', gap: 14, flexWrap: 'wrap' }}>
           <div style={{ fontSize: 13.5, fontWeight: 600, color: '#0D1117', flexShrink: 0 }}>Import from Excel</div>
           <div style={{ fontSize: 12.5, color: '#64748B', lineHeight: 1.6 }}>
-            Download the template → fill in employee details and manager mapping → upload back.
+            Download the template → fill in employee details, manager mapping{hasGoalGroups ? ', Group Name' : ''}{routingColumns.length > 0 ? ', and routing fields' : ''} → upload back. Each upload replaces the current employee list; it does not append another group on top.
           </div>
         </div>
         <CardBody>
           {/* Live Excel preview (reflects settings from Employee Settings step) */}
           {(() => { const m = employeeTemplateMeta(config); return <ExcelPreview headers={m.headers} exampleRows={m.exampleRows} noteRows={m.noteRows} />; })()}
+
+          {/* Goal Group routing reference — shows which values map to which group */}
+          {routingColumns.length > 0 && (config.goalGroups || []).length > 0 && (() => {
+            const groups = config.goalGroups || [];
+            const rows = [];
+            routingColumns.forEach(col => {
+              groups.forEach(group => {
+                const attr = String(group.segmentAttr || '').trim();
+                if (!attr || attr.toLowerCase() !== col.label.toLowerCase()) return;
+                const values = (group.segmentValues || []).map(v => String(v?.name || v || '').trim()).filter(Boolean);
+                if (values.length > 0) {
+                  values.forEach(val => rows.push({ value: val, group: group.name, colLabel: col.label }));
+                } else {
+                  rows.push({ value: '(All)', group: group.name, colLabel: col.label });
+                }
+              });
+            });
+            const defaultGroup = groups.find(g => !g.segmentAttr || String(g.segmentAttr).trim() === '');
+            if (!rows.length) return null;
+            return (
+              <div style={{ marginTop: 12, border: '1px solid #E2E8F0', borderRadius: 8, overflow: 'hidden' }}>
+                <div style={{ padding: '8px 14px', background: '#F8FAFC', borderBottom: '1px solid #E2E8F0', display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <span style={{ fontSize: 11.5, fontWeight: 700, color: '#334155', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Goal Group Routing</span>
+                  <span style={{ fontSize: 11, color: '#94A3B8' }}>— how {routingLabelText} values map to groups</span>
+                </div>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 28px 1fr', background: '#fff' }}>
+                  <div style={{ padding: '6px 14px', fontSize: 10.5, fontWeight: 700, color: '#94A3B8', textTransform: 'uppercase', letterSpacing: '0.05em', borderBottom: '1px solid #F1F5F9' }}>{rows[0]?.colLabel} value</div>
+                  <div style={{ borderBottom: '1px solid #F1F5F9' }} />
+                  <div style={{ padding: '6px 14px', fontSize: 10.5, fontWeight: 700, color: '#94A3B8', textTransform: 'uppercase', letterSpacing: '0.05em', borderBottom: '1px solid #F1F5F9' }}>Goal Group</div>
+                  {rows.map((row, i) => {
+                    const pal = GROUP_PALETTE[groups.findIndex(g => g.name === row.group) % GROUP_PALETTE.length];
+                    return [
+                      <div key={`v${i}`} style={{ padding: '5px 14px', fontSize: 12, color: '#374151', borderBottom: i < rows.length - 1 ? '1px solid #F8FAFC' : 'none', display: 'flex', alignItems: 'center' }}>{row.value}</div>,
+                      <div key={`a${i}`} style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 12, color: '#94A3B8', borderBottom: i < rows.length - 1 ? '1px solid #F8FAFC' : 'none' }}>→</div>,
+                      <div key={`g${i}`} style={{ padding: '5px 14px', fontSize: 12, borderBottom: i < rows.length - 1 ? '1px solid #F8FAFC' : 'none', display: 'flex', alignItems: 'center', gap: 6 }}>
+                        <span style={{ width: 7, height: 7, borderRadius: '50%', background: pal?.accent || '#64748B', display: 'inline-block', flexShrink: 0 }} />
+                        <span style={{ fontWeight: 600, color: pal?.accent || '#374151' }}>{row.group}</span>
+                      </div>,
+                    ];
+                  })}
+                  {defaultGroup && (
+                    <>
+                      <div style={{ padding: '5px 14px', fontSize: 12, color: '#9CA3AF', fontStyle: 'italic' }}>Any other value</div>
+                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 12, color: '#94A3B8' }}>→</div>
+                      <div style={{ padding: '5px 14px', fontSize: 12, color: '#9CA3AF', fontStyle: 'italic' }}>{defaultGroup.name}</div>
+                    </>
+                  )}
+                </div>
+              </div>
+            );
+          })()}
 
           {/* Action bar */}
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 10, flexWrap: 'wrap', marginBottom: 2 }}>
@@ -5719,23 +6483,12 @@ function StepEmployeeUpload({ config, update }) {
                   {uploadState.status === 'done' && '✓ '}{uploadState.status === 'error' && '✕ '}{uploadState.message}
                   {uploadState.status === 'done' && uploadState.result?.employees?.length > 0 && (
                     <div style={{ marginTop: 10, border: '1px solid #D1FAE5', borderRadius: 8, overflow: 'hidden' }}>
-                      <div style={{ display: 'grid', gridTemplateColumns: uploadState.result.libraryLinked ? '1fr 1fr 1fr 1fr 1.2fr' : '1fr 1fr 1fr 1fr', gap: 0, background: '#ECFDF5', padding: '6px 12px', fontSize: 11, fontWeight: 700, color: '#059669', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-                        <span>Code</span><span>Name</span><span>Department</span><span>Manager</span>
-                        {uploadState.result.libraryLinked && <span>Mapped library</span>}
+                      <div style={{ display: 'grid', gridTemplateColumns: previewGridTemplate, gap: 0, background: '#ECFDF5', padding: '6px 12px', fontSize: 11, fontWeight: 700, color: '#059669', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                        {previewColumns.map(column => <span key={column.key}>{column.label}</span>)}
                       </div>
                       {uploadState.result.employees.slice(0, 5).map((emp, i) => (
-                        <div key={i} style={{ display: 'grid', gridTemplateColumns: uploadState.result.libraryLinked ? '1fr 1fr 1fr 1fr 1.2fr' : '1fr 1fr 1fr 1fr', gap: 0, padding: '6px 12px', fontSize: 12, color: '#374151', borderTop: '1px solid #D1FAE5' }}>
-                          <span>{emp['Employee Code'] || '—'}</span>
-                          <span>{emp['Employee Name'] || '—'}</span>
-                          <span>{emp['Department'] || '—'}</span>
-                          <span>{emp['Reporting Manager Code'] || '—'}</span>
-                          {uploadState.result.libraryLinked && (
-                            <span>
-                              {emp.assignedGoalLibraryKey
-                                ? `${emp.assignedGoalLibraryKey} (${emp.assignedGoalLibraryCount})`
-                                : 'No match'}
-                            </span>
-                          )}
+                        <div key={i} style={{ display: 'grid', gridTemplateColumns: previewGridTemplate, gap: 0, padding: '6px 12px', fontSize: 12, color: '#374151', borderTop: '1px solid #D1FAE5' }}>
+                          {previewColumns.map(column => <span key={column.key}>{column.render(emp)}</span>)}
                         </div>
                       ))}
                       {uploadState.result.count > 5 && (
@@ -5745,9 +6498,11 @@ function StepEmployeeUpload({ config, update }) {
                       )}
                     </div>
                   )}
-                  {uploadState.status === 'done' && uploadState.result?.libraryLinked && (
+                  {uploadState.status === 'done' && (uploadState.result?.groupLinked || uploadState.result?.libraryLinked) && (
                     <div style={{ marginTop: 10, fontSize: 12, color: '#166534' }}>
-                      Local test mapping uses the uploaded goal library saved in browser storage. Unmatched employees: {uploadState.result.unassignedCount}.
+                      {uploadState.result.groupLinked ? `Group matches: ${uploadState.result.assignedGroupCount || 0}/${uploadState.result.count}. ` : ''}
+                      {uploadState.result.libraryLinked ? `Library matches: ${uploadState.result.assignedCount || 0}/${uploadState.result.count}. ` : ''}
+                      {routingColumns.length > 0 ? `Routing is based on ${routingLabelText}.` : 'Routing uses your current group setup.'}
                     </div>
                   )}
                 </div>
@@ -5765,7 +6520,7 @@ function StepEmployeeUpload({ config, update }) {
                   <div style={{ maxHeight: 220, overflowY: 'auto' }}>
                     {uploadState.errors.map((err, i) => (
                       <div key={i} style={{ display: 'grid', gridTemplateColumns: '60px 120px 1fr', gap: 8, padding: '7px 16px', borderTop: '1px solid #FECACA', fontSize: 12, color: '#374151' }}>
-                        <span style={{ color: '#9CA3AF', fontFamily: 'monospace' }}>Row {err.row}</span>
+                        <span style={{ color: '#9CA3AF', fontFamily: 'monospace' }}>{getIssueRowLabel(err)}</span>
                         <span style={{ color: '#6B7280', fontFamily: 'monospace', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{err.code}</span>
                         <span style={{ color: '#DC2626' }}>{err.message}</span>
                       </div>
@@ -5785,10 +6540,30 @@ function StepEmployeeUpload({ config, update }) {
                   </div>
                   <div style={{ maxHeight: 160, overflowY: 'auto' }}>
                     {uploadState.warnings.map((w, i) => (
-                      <div key={i} style={{ display: 'grid', gridTemplateColumns: '60px 120px 1fr', gap: 8, padding: '6px 16px', borderTop: '1px solid #FDE68A', fontSize: 12, color: '#374151' }}>
-                        <span style={{ color: '#9CA3AF', fontFamily: 'monospace' }}>Row {w.row}</span>
+                      <div key={i} style={{ display: 'grid', gridTemplateColumns: '60px 120px 1fr auto', gap: 8, padding: '6px 16px', borderTop: '1px solid #FDE68A', fontSize: 12, color: '#374151', alignItems: 'start' }}>
+                        <span style={{ color: '#9CA3AF', fontFamily: 'monospace' }}>{getIssueRowLabel(w)}</span>
                         <span style={{ color: '#6B7280', fontFamily: 'monospace', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{w.code}</span>
                         <span style={{ color: '#92400E' }}>{w.message}</span>
+                        {w.category === 'group_missing' && Array.isArray(uploadState.result?.missingGoalGroupNames) && uploadState.result.missingGoalGroupNames.length > 0 ? (
+                          <button
+                            type="button"
+                            onClick={() => deferMissingGoalGroups(uploadState.result.missingGoalGroupNames)}
+                            style={{
+                              padding: '6px 10px',
+                              borderRadius: 8,
+                              border: '1px solid #F59E0B',
+                              background: '#FFF7ED',
+                              color: '#B45309',
+                              fontSize: 11.5,
+                              fontWeight: 700,
+                              cursor: 'pointer',
+                              fontFamily: 'inherit',
+                              whiteSpace: 'nowrap',
+                            }}
+                          >
+                            Defer for later
+                          </button>
+                        ) : <span />}
                       </div>
                     ))}
                   </div>
@@ -6394,6 +7169,7 @@ const INITIAL = {
     }
   ],
   goalGroupsAppliedSnapshot: null,
+  deferredGoalGroupNames: [],
   // Goal libraries (created/uploaded by admin)
   goalLibraries: [],              // [{id, name, type, weightType, perspectives:[{name,weight,kras:[{id,name,desc,suggestedWeight,kpis:[{id,name,desc,weight}]}]}]}]
   goalLibrariesAppliedSnapshot: null,
@@ -6440,10 +7216,13 @@ function normalizeConfig(raw) {
   if (!Array.isArray(merged.enabledModules))   merged.enabledModules   = INITIAL.enabledModules;
   if (!Array.isArray(merged.bellBands))        merged.bellBands        = INITIAL.bellBands;
   if (!Array.isArray(merged.goalGroups))       merged.goalGroups       = INITIAL.goalGroups;
+  if (!Array.isArray(merged.deferredGoalGroupNames)) merged.deferredGoalGroupNames = INITIAL.deferredGoalGroupNames;
   if (!Array.isArray(merged.goalLibraries))    merged.goalLibraries    = INITIAL.goalLibraries;
   if (!Array.isArray(merged.goalSegmentValues))merged.goalSegmentValues= INITIAL.goalSegmentValues;
   if (!Array.isArray(merged.goalLimitValues))  merged.goalLimitValues  = INITIAL.goalLimitValues;
   if (!Array.isArray(merged.selectedCompetencies)) merged.selectedCompetencies = INITIAL.selectedCompetencies;
+  merged.goalLibraries = normalizeGoalLibraries(merged.goalLibraries);
+  merged.deferredGoalGroupNames = normalizeDeferredGoalGroups(merged.deferredGoalGroupNames);
   return merged;
 }
 
@@ -6473,7 +7252,7 @@ function isStepComplete(stepId, config) {
         (config.goalGroups || []).every(g => g.mode) &&
         config.goalGroupsAppliedSnapshot === getNewGroupsSnapshot(config);
     case 'goal_libraries': {
-      const groupsNeedingLib = (config.goalGroups || []).filter(g => g.hasLibrary);
+      const groupsNeedingLib = (config.goalGroups || []).filter(isGroupLibraryEnabled);
       if (groupsNeedingLib.length === 0) return !!config.goalLibrariesAppliedSnapshot;
       return groupsNeedingLib.every(group =>
         getGroupLibraryAssignments(group).every(assignment =>
@@ -6522,6 +7301,24 @@ export default function PMSWizard({ onLaunched }) {
   const [stepNotice, setStepNotice] = useState(null); // { message, type: 'warn'|'info' }
   const workspace = useMemo(() => getWorkspaceContext(), []);
 
+  function saveAndExitSetup() {
+    saveWizardState(workspace.orgKey, {
+      step: safeStep,
+      config,
+      visited: [...visited],
+    });
+    exitToLogin();
+  }
+
+  useEffect(() => {
+    setConfig(prev => {
+      const normalizedLibraries = normalizeGoalLibraries(prev.goalLibraries);
+      return JSON.stringify(prev.goalLibraries) === JSON.stringify(normalizedLibraries)
+        ? prev
+        : { ...prev, goalLibraries: normalizedLibraries };
+    });
+  }, []);
+
   const navSteps = useMemo(() => getNavSteps(config), [config]);
   const totalSteps = navSteps.length;
   const safeStep = Math.min(step, Math.max(totalSteps - 1, 0));
@@ -6543,6 +7340,9 @@ export default function PMSWizard({ onLaunched }) {
     }
     setConfig(prev => {
       const next = { ...prev, [key]: val };
+      if (key === 'goalLibraries') {
+        next.goalLibraries = normalizeGoalLibraries(val);
+      }
       const shouldResetLibraryData =
         (key === 'frameworkId' && val !== prev.frameworkId) ||
         key === 'perspectives' ||
@@ -6579,6 +7379,16 @@ export default function PMSWizard({ onLaunched }) {
         if (prev.employeeUploadData) {
           next.employeeUploadData = null;
           setStepNotice({ type: 'warn', message: 'Employee upload data was cleared because the column structure changed. Re-confirm settings and re-upload.' });
+        }
+      }
+      if ((key === 'goalGroups' || key === 'goalLibraries') && prev.employeeUploadData) {
+        next.employeeUploadData = null;
+        setStepNotice({ type: 'warn', message: 'Employee upload data was cleared because group or library allotment changed. Re-upload to recalculate assignment.' });
+      }
+      if (key === 'deferredGoalGroupNames') {
+        next.deferredGoalGroupNames = normalizeDeferredGoalGroups(val);
+        if (prev.employeeUploadData) {
+          next.employeeUploadData = attachGoalLibraryToEmployees(prev.employeeUploadData, next);
         }
       }
       if (shouldResetLibraryData) {
@@ -6737,26 +7547,46 @@ export default function PMSWizard({ onLaunched }) {
               <div style={{ fontWeight: 600, color: '#374151', marginBottom: 1 }}>HR Admin</div>
               <div>{workspace.orgName}</div>
             </div>
-            <button
-              type="button"
-              onClick={exitToLogin}
-              title="Sign out"
-              style={{
-                width: 32,
-                height: 32,
-                borderRadius: 999,
-                border: '1px solid #E2E8F0',
-                background: '#fff',
-                color: '#64748B',
-                fontSize: 15,
-                lineHeight: 1,
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-              }}
-            >
-              ⏻
-            </button>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <button
+                type="button"
+                onClick={saveAndExitSetup}
+                style={{
+                  padding: '7px 10px',
+                  borderRadius: 8,
+                  border: '1px solid #E2E8F0',
+                  background: '#fff',
+                  color: '#475569',
+                  fontSize: 11.5,
+                  fontWeight: 600,
+                  cursor: 'pointer',
+                  fontFamily: 'inherit',
+                  whiteSpace: 'nowrap',
+                }}
+              >
+                Save & Exit
+              </button>
+              <button
+                type="button"
+                onClick={exitToLogin}
+                title="Sign out"
+                style={{
+                  width: 32,
+                  height: 32,
+                  borderRadius: 999,
+                  border: '1px solid #E2E8F0',
+                  background: '#fff',
+                  color: '#64748B',
+                  fontSize: 15,
+                  lineHeight: 1,
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                }}
+              >
+                ⏻
+              </button>
+            </div>
           </div>
         </div>
       </aside>
@@ -6816,6 +7646,7 @@ export function LaunchOverview({ config, workspace, onClose }) {
   const employees = config?.employeeUploadData?.employees || [];
   const groups = config?.goalGroups || [];
   const hasNewGroups = groups.length > 0;
+  const deferredGoalGroupNames = normalizeDeferredGoalGroups(config?.deferredGoalGroupNames || []);
 
   const groupSummary = hasNewGroups ? groups.map(g => ({
     name: g.name,
@@ -6907,6 +7738,14 @@ export function LaunchOverview({ config, workspace, onClose }) {
                   </div>
                 ))}
                 {employees.length > 20 && <div style={{ padding: '8px 14px', fontSize: 12, color: '#9CA3AF' }}>+{employees.length - 20} more…</div>}
+              </div>
+            </div>
+          )}
+          {deferredGoalGroupNames.length > 0 && (
+            <div style={{ marginTop: 20 }}>
+              <div style={{ fontSize: 11, fontWeight: 700, color: '#94A3B8', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 10 }}>Deferred Rollout</div>
+              <div style={{ padding: '12px 16px', background: '#EFF6FF', borderRadius: 8, border: '1px solid #BFDBFE', fontSize: 12.5, color: '#1E3A8A' }}>
+                {deferredGoalGroupNames.join(', ')} are intentionally left out of this rollout and can be uploaded later by reopening the saved draft.
               </div>
             </div>
           )}
