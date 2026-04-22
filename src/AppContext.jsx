@@ -137,28 +137,26 @@ function readAppDataSync() {
 }
 
 export function AppProvider({ children }) {
-  // Initialize auth state synchronously — eliminates the blank-white flash on every load
-  const [role, setRole]       = useState(() => readSessionSync()?.role || null);
-  const [orgKey, setOrgKey]   = useState(() => readSessionSync()?.orgKey || null);
-  const [userName, setUserName] = useState(() => readSessionSync()?.userName || '');
+  // Read session and app data ONCE to avoid inconsistent state from repeated localStorage reads
+  const initialSession = readSessionSync();
+  const initialAppData = readAppDataSync();
+
+  const [role, setRole]       = useState(initialSession?.role || null);
+  const [orgKey, setOrgKey]   = useState(initialSession?.orgKey || null);
+  const [userName, setUserName] = useState(initialSession?.userName || '');
   const [authReady, setAuthReady] = useState(true);  // always ready since we read sync
 
-  // Initialize org data synchronously too
   const [orgs, setOrgs] = useState(() => {
-    const saved = readAppDataSync();
-    return Array.isArray(saved?.organizationsData) ? saved.organizationsData : DEFAULT_ORGS.map(o => ({ ...o }));
+    return Array.isArray(initialAppData?.organizationsData) ? initialAppData.organizationsData : DEFAULT_ORGS.map(o => ({ ...o }));
   });
   const [pendingActions, setPendingActions] = useState(() => {
-    const saved = readAppDataSync();
-    return Array.isArray(saved?.pendingActionsData) ? saved.pendingActionsData : DEFAULT_PENDING_ACTIONS.map(a => ({ ...a }));
+    return Array.isArray(initialAppData?.pendingActionsData) ? initialAppData.pendingActionsData : DEFAULT_PENDING_ACTIONS.map(a => ({ ...a }));
   });
   const [feedData, setFeedData] = useState(() => {
-    const saved = readAppDataSync();
-    return Array.isArray(saved?.feedData) ? saved.feedData : DEFAULT_FEED_DATA.map(f => ({ ...f }));
+    return Array.isArray(initialAppData?.feedData) ? initialAppData.feedData : DEFAULT_FEED_DATA.map(f => ({ ...f }));
   });
   const [dashboardFlags, setDashboardFlags] = useState(() => {
-    const saved = readAppDataSync();
-    return saved?.dashboardFlags ? { ...DEFAULT_DASHBOARD_FLAGS, ...saved.dashboardFlags } : { ...DEFAULT_DASHBOARD_FLAGS };
+    return initialAppData?.dashboardFlags ? { ...DEFAULT_DASHBOARD_FLAGS, ...initialAppData.dashboardFlags } : { ...DEFAULT_DASHBOARD_FLAGS };
   });
 
   // No longer need the useEffect for initial data load — kept only as a no-op to avoid breaking hooks order

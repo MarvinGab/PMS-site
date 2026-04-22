@@ -4,8 +4,11 @@ import '../admin.css';
 import { useApp } from '../AppContext';
 import {
   SUPER_ADMIN_EMAIL, SUPER_ADMIN_PASS,
-  APP_DATA_KEY, EMP_CREDENTIALS_KEY, EMP_SESSION_KEY,
+  EMP_SESSION_KEY,
 } from '../AppContext';
+
+const APP_DATA_KEY = 'zarohr_app_data_v1';
+const EMP_CREDENTIALS_KEY = 'zarohr_emp_credentials';
 
 function resolveUser(email, password) {
   const e = email.trim().toLowerCase();

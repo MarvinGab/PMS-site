@@ -1,12 +1,15 @@
 import { createContext, useContext, useState } from 'react';
 
+// Perspective colours exclude red / orange / green families — those hues are status-semantic
+// everywhere else in the app (rejected / pending / approved) and were causing goals to "look"
+// approved or pending at a glance.
 export const PRESET_PERSPECTIVE_COLORS = [
-  '#2563EB',
-  '#0F766E',
-  '#D97706',
-  '#7C3AED',
-  '#DC2626',
-  '#4F46E5',
+  '#2563EB', // blue
+  '#0891B2', // cyan
+  '#4F46E5', // indigo
+  '#7C3AED', // violet
+  '#DB2777', // pink
+  '#0EA5E9', // sky
 ];
 
 export const GRADE_VISIBILITY_OPTIONS = [

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import zaroLogo from '../images/final zaro logo.png';
-import { downloadGoalLibraryTemplate, parseGoalLibraryXlsx, downloadEmployeeTemplate, parseEmployeeXlsx, validateGoalLibraryData, downloadErrorReport, goalLibraryTemplateMeta, employeeTemplateMeta, validateEmployeeData, downloadAttributeValuesTemplate, parseAttributeValuesXlsx, downloadGoalLibraryBulkTemplate, parseGoalLibraryBulkXlsx, getEmployeeRoutingColumns } from './templateUtils';
+import { downloadGoalLibraryTemplate, parseGoalLibraryXlsx, downloadEmployeeTemplate, parseEmployeeXlsx, validateGoalLibraryData, downloadErrorReport, goalLibraryTemplateMeta, employeeTemplateMeta, validateEmployeeData, downloadAttributeValuesTemplate, parseAttributeValuesXlsx, downloadGoalLibraryBulkTemplate, downloadPrefillBulkTemplate, parseGoalLibraryBulkXlsx, getEmployeeRoutingColumns } from './templateUtils';
 
 /* ─── CONSTANTS ──────────────────────────────────────────────────────────── */
 function getNavSteps(config) {
@@ -10,12 +10,15 @@ function getNavSteps(config) {
       ? groupsNeedingDataUpload(config).length > 0
       : config?.goalCreationMode === 'admin-library'
   );
+  const hasBscPrefill = typeof config === 'object' && (config.goalGroups || []).some(group => !!group.prefillType);
+  const hasBscLibraries = typeof config === 'object' && (config.goalGroups || []).some(group => !!group.hasLibrary);
   if (frameworkId === 'bsc') {
     const steps = [
       { id: 'framework',      label: 'Performance Framework', desc: 'Choose framework' },
       { id: 'perspectives',   label: 'BSC Perspectives',      desc: 'Strategy layers & weights' },
       { id: 'groups',         label: 'Groups & Strategy',     desc: 'Who gets what goal approach' },
-      { id: 'goal_libraries', label: 'Goal Libraries',        desc: 'Build or upload KRA libraries' },
+      ...(hasBscPrefill ? [{ id: 'prefill_data', label: 'Pre-fill Data', desc: 'Upload pre-assigned KRAs/KPIs' }] : []),
+      ...(hasBscLibraries ? [{ id: 'goal_libraries', label: 'Goal Libraries', desc: 'Build or upload KRA libraries' }] : []),
       { id: 'limits',         label: 'Goal Limits',           desc: 'KRA/KPI count & weight rules' },
       { id: 'emp_settings',   label: 'Employee Settings',     desc: 'Manager hierarchy & email rules' },
       { id: 'upload',         label: 'Employee Upload',       desc: 'Upload employees, managers & routing' },
@@ -25,7 +28,7 @@ function getNavSteps(config) {
   }
   const steps = [
     { id: 'framework',    label: 'Performance Framework', desc: 'Structure & model' },
-    { id: 'goals',        label: 'Goal Library',           desc: 'KRA / KPI structure' },
+    { id: 'goals',        label: 'Goal Library',           desc: 'Flat KRA / KPI structure' },
   ];
   if (hasLibrary) steps.push({ id: 'kra_library', label: 'KRA Library', desc: 'Build & upload goal library' });
   steps.push(
@@ -170,7 +173,9 @@ function getWorkspaceContext() {
         return { orgKey, orgName: org.name };
       }
     }
-  } catch (_) {}
+  } catch {
+    // Silently ignore parsing errors
+  }
 
   return { orgKey, orgName: orgKey ? orgKey.replace(/-/g, ' ') : 'Assigned Organization' };
 }
@@ -179,13 +184,14 @@ function getWizardStorageKey(orgKey = '') {
   return `${WIZARD_STATE_KEY}:${orgKey || 'default'}`;
 }
 
-function loadWizardState() {
+function loadWizardState(orgKeyArg) {
   if (typeof window === 'undefined') {
     return null;
   }
 
-  const params = new URLSearchParams(window.location.search);
-  const orgKey = params.get('orgKey') || '';
+  const orgKey = orgKeyArg !== undefined
+    ? orgKeyArg
+    : (new URLSearchParams(window.location.search).get('orgKey') || '');
   const storageKey = getWizardStorageKey(orgKey);
 
   try {
@@ -469,6 +475,17 @@ function getEmployeeUploadMessage(result) {
   return `${base} Goal library mapped locally for ${result.assignedCount}/${count} employees.${deferredSuffix}`;
 }
 
+function isIntentionalOutsideManagerWarning(warning) {
+  return warning?.category === 'manager_outside_pms' || warning?.category === 'l2_manager_outside_pms';
+}
+
+function getVisibleEmployeeUploadWarnings(result) {
+  return [
+    ...(result?.validationWarnings || []),
+    ...(result?.mappingWarnings || []),
+  ].filter((warning) => !isIntentionalOutsideManagerWarning(warning));
+}
+
 function isGoalLibraryValid(config) {
   if (!config.goalLibraryData) return false;
   return validateGoalLibraryData(config.goalLibraryData, config).length === 0;
@@ -537,14 +554,28 @@ function groupsNeedingDataUpload(config) {
   );
 }
 
+function groupsNeedingPrefillData(config) {
+  return (config.goalGroups || []).filter(group => !!group.prefillType);
+}
+
+function groupsNeedingLibraryData(config) {
+  return (config.goalGroups || []).filter(group => !!group.hasLibrary);
+}
+
 function isGoalGroupDataValid(config) {
   const needsData = groupsNeedingDataUpload(config);
   if (needsData.length === 0) return true;
   return needsData.every(g => {
-    if (g.modes?.includes('prefill') && (!g.prefillData || g.prefillData.length === 0)) return false;
+    if (g.modes?.includes('prefill') && !getGroupPrefillAssignments(g).every(assignment => Array.isArray(assignment.data) && assignment.data.length > 0)) return false;
     if (g.modes?.includes('library') && (!g.libraryData || g.libraryData.length === 0)) return false;
     return true;
   });
+}
+
+function isPrefillDataValid(config) {
+  const groups = groupsNeedingPrefillData(config);
+  if (groups.length === 0) return true;
+  return groups.every(group => getGroupPrefillAssignments(group).every(assignment => Array.isArray(assignment.data) && assignment.data.length > 0));
 }
 
 function getFrameworkSnapshot(config) {
@@ -1184,7 +1215,9 @@ function StepFramework({ config, update }) {
 }
 
 /* ── BSC PERSPECTIVES (dynamic step — BSC only) ─────────────────────── */
-const PERSPECTIVE_COLORS = ['#2563EB', '#16A34A', '#D97706', '#7C3AED', '#DC2626', '#0F766E', '#4F46E5'];
+// Same safe palette used elsewhere — excludes red / orange / green so perspective stripes
+// never collide with status semantics (rejected / pending / approved).
+const PERSPECTIVE_COLORS = ['#2563EB', '#0891B2', '#4F46E5', '#7C3AED', '#DB2777', '#0EA5E9', '#6366F1'];
 const PERSPECTIVE_NAME_OPTIONS = [
   'Financial',
   'Customer',
@@ -2386,6 +2419,192 @@ function GoalLibrarySheetControls({ config, downloadConfig = null, existingLibra
   );
 }
 
+function flattenLibraryPerspectivesForValidation(perspectives = []) {
+  return (perspectives || []).flatMap((perspective) =>
+    (perspective.kras || []).map((kra) => ({
+      id: kra.id,
+      name: kra.name,
+      desc: kra.desc,
+      weight: kra.suggestedWeight ?? kra.weight ?? '',
+      perspName: perspective.name,
+      kpis: (kra.kpis || []).map((kpi) => ({
+        id: kpi.id,
+        name: kpi.name,
+        weight: kpi.weight ?? '',
+      })),
+    }))
+  );
+}
+
+function PrefillSheetControls({ config, selectedGroup, onImported, phase, setPhase, errors, setErrors }) {
+  const fileRef = useRef(null);
+  const wrapRef = useRef(null);
+  const [message, setMessage] = useState('');
+  const [open, setOpen] = useState(false);
+
+  useEffect(() => {
+    if (!open) return;
+
+    function handlePointerDown(event) {
+      if (wrapRef.current && !wrapRef.current.contains(event.target)) {
+        setOpen(false);
+      }
+    }
+
+    document.addEventListener('mousedown', handlePointerDown);
+    return () => document.removeEventListener('mousedown', handlePointerDown);
+  }, [open]);
+
+  useEffect(() => {
+    if (phase !== 'error') return;
+    if (errors?.length > 0) {
+      setMessage(errors.map(error => error.message).join(' '));
+    }
+  }, [errors, phase]);
+
+  async function handleDownload() {
+    if (!selectedGroup) return;
+    setMessage('');
+    setErrors([]);
+    setPhase('idle');
+    await downloadPrefillBulkTemplate({
+      ...config,
+      goalGroups: [selectedGroup],
+    });
+  }
+
+  async function handleUpload(event) {
+    const file = event.target.files?.[0];
+    if (!file || !selectedGroup) return;
+    event.target.value = '';
+    setPhase('parsing');
+    setErrors([]);
+    setMessage('');
+    try {
+      const parserGroup = {
+        ...selectedGroup,
+        hasLibrary: true,
+        libraryType: selectedGroup.prefillType === 'kra-kpi' ? 'kra-kpi' : 'kra-only',
+      };
+      const result = await parseGoalLibraryBulkXlsx(file, [parserGroup]);
+      const validationConfig = getGroupPrefillUploadConfig(config, selectedGroup);
+      const validationErrors = (result.libraries || []).flatMap((library) => (
+        validateGoalLibraryData(
+          { byAttr: false, data: flattenLibraryPerspectivesForValidation(library.perspectives || []) },
+          validationConfig
+        ).map((error) => ({
+          ...error,
+          message: `${library.name}: ${error.message}`,
+        }))
+      )).filter(item => item.field === 'perspective' || item.field === 'kra_weight' || item.field === 'kpi_weight');
+
+      if (validationErrors.length > 0) {
+        setErrors(validationErrors);
+        setPhase('error');
+        return;
+      }
+
+      onImported(result.libraries || []);
+      setPhase('done');
+      setMessage(`${result.count || 0} pre-fill card${(result.count || 0) === 1 ? '' : 's'} imported.`);
+      setOpen(false);
+    } catch (error) {
+      const nextErrors = [{ field: 'parse', message: error.message }];
+      setErrors(nextErrors);
+      setPhase('error');
+      setMessage(error.message || 'Could not import pre-fill data from the uploaded sheet.');
+    }
+  }
+
+  return (
+    <div ref={wrapRef} style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 6 }}>
+      <input
+        ref={fileRef}
+        type="file"
+        accept=".xlsx,.xls,.csv"
+        onChange={handleUpload}
+        style={{ display: 'none' }}
+      />
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+        <button
+          type="button"
+          onClick={() => setOpen(prev => !prev)}
+          style={{
+            fontSize: 12.5,
+            color: phase === 'parsing' ? '#94A3B8' : '#2563EB',
+            background: open ? '#FFFFFF' : '#F8FBFF',
+            border: '1px solid #BFDBFE',
+            borderRadius: 10,
+            padding: '6px 12px',
+            minWidth: 108,
+            cursor: 'pointer',
+            fontWeight: 600,
+            fontFamily: 'inherit',
+            transform: `translateX(${open ? -8 : 0}px)`,
+            transition: 'all .18s ease',
+            boxShadow: open ? '0 6px 16px rgba(37,99,235,.10)' : 'none',
+          }}
+        >
+          {phase === 'parsing' ? 'Uploading…' : 'Upload Sheet'}
+        </button>
+        <button
+          type="button"
+          onClick={handleDownload}
+          title="Download sheet"
+          aria-label="Download sheet"
+          style={{
+            width: open ? 34 : 0,
+            opacity: open ? 1 : 0,
+            overflow: 'hidden',
+            padding: '7px 0',
+            border: open ? '1px solid #D7E3F4' : '1px solid transparent',
+            background: '#F8FAFC',
+            borderRadius: 12,
+            color: '#2563EB',
+            cursor: open ? 'pointer' : 'default',
+            transition: 'all .18s ease',
+            fontSize: 16,
+            fontWeight: 700,
+            lineHeight: 1,
+            boxShadow: open ? '0 8px 18px rgba(15,23,42,.08)' : 'none',
+          }}
+        >
+          ⬇
+        </button>
+        <button
+          type="button"
+          onClick={() => fileRef.current?.click()}
+          title="Upload sheet"
+          aria-label="Upload sheet"
+          style={{
+            width: open ? 34 : 0,
+            opacity: open ? 1 : 0,
+            overflow: 'hidden',
+            padding: '7px 0',
+            border: open ? '1px solid #D7E3F4' : '1px solid transparent',
+            background: '#F8FAFC',
+            borderRadius: 12,
+            color: '#2563EB',
+            cursor: open ? 'pointer' : 'default',
+            transition: 'all .18s ease',
+            fontSize: 16,
+            fontWeight: 700,
+            lineHeight: 1,
+            boxShadow: open ? '0 8px 18px rgba(15,23,42,.08)' : 'none',
+          }}
+        >
+          ⬆
+        </button>
+      </div>
+      {message ? (
+        <div style={{ fontSize: 12, color: phase === 'error' ? '#DC2626' : '#16A34A' }}>
+          {message}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function MagicText({ text }) {
   return (
     <span
@@ -2703,18 +2922,18 @@ const GOAL_MODES = [
     icon: '✏️',
     title: 'Free Creation',
     desc: 'Employee creates all goals from a blank canvas. No library or pre-fill.',
-    color: '#D97706',
-    bg: '#FFFBEB',
-    border: '#FDE68A',
+    color: '#2563EB',
+    bg: '#EFF6FF',
+    border: '#BFDBFE',
   },
   {
     id: 'library',
     icon: '📚',
     title: 'Reference Library',
     desc: 'A browsable panel on the employee page. They drag-drop KRAs into their goal plan.',
-    color: '#7C3AED',
-    bg: '#F5F3FF',
-    border: '#DDD6FE',
+    color: '#2563EB',
+    bg: '#EFF6FF',
+    border: '#BFDBFE',
   },
   {
     id: 'prefill',
@@ -2844,16 +3063,17 @@ function GoalGroupCard({ group, index, isDefault, isOnlyGroup, segAttr, onUpdate
                   onClick={() => toggleMode(mode.id)}
                   style={{
                     padding: '12px 14px', borderRadius: 10, cursor: 'pointer', userSelect: 'none',
-                    border: `2px solid ${active ? mode.color : '#E2E8F0'}`,
-                    background: active ? mode.bg : '#FAFAFA',
-                    transition: 'all .12s',
+                    border: `2px solid ${active ? '#2563EB' : '#E2E8F0'}`,
+                    background: active ? '#EFF6FF' : '#fff',
+                    boxShadow: active ? '0 0 0 1px rgba(37,99,235,0.08)' : 'none',
+                    transition: 'border-color .14s ease, background .14s ease, box-shadow .14s ease',
                   }}
                 >
-                  <div style={{ fontSize: 20, marginBottom: 4 }}>{mode.icon}</div>
-                  <div style={{ fontWeight: 700, fontSize: 13, color: active ? mode.color : '#374151', marginBottom: 3 }}>{mode.title}</div>
+                  <div style={{ fontSize: 20, marginBottom: 4, opacity: active ? 1 : 0.72 }}>{mode.icon}</div>
+                  <div style={{ fontWeight: 700, fontSize: 13, color: active ? '#1D4ED8' : '#374151', marginBottom: 3 }}>{mode.title}</div>
                   <div style={{ fontSize: 11, color: '#6B7280', lineHeight: 1.4 }}>{mode.desc}</div>
                   <div style={{ marginTop: 8 }}>
-                    <span style={S.chip(active, mode.color)}>{active ? '✓ Enabled' : '+ Enable'}</span>
+                    <span style={S.chip(active, '#2563EB')}>{active ? '✓ Enabled' : '+ Enable'}</span>
                   </div>
                 </div>
               );
@@ -2866,8 +3086,8 @@ function GoalGroupCard({ group, index, isDefault, isOnlyGroup, segAttr, onUpdate
 
         {/* Data upload notice */}
         {needsDataUpload && (
-          <div style={{ padding: '10px 14px', background: '#FFFBEB', border: '1px solid #FDE68A', borderRadius: 8, marginBottom: 14, fontSize: 12.5, color: '#92400E' }}>
-            📤 <strong>{hasPrefill && hasLibrary ? 'Pre-fill data + Library data' : hasPrefill ? 'Pre-fill data' : 'Library data'}</strong> will need to be uploaded in the next step (KRA Data Upload).
+          <div style={{ padding: '10px 14px', background: '#EFF6FF', border: '1px solid #BFDBFE', borderRadius: 8, marginBottom: 14, fontSize: 12.5, color: '#1E40AF' }}>
+            <strong>{hasPrefill && hasLibrary ? 'Pre-fill data + library data' : hasPrefill ? 'Pre-fill data' : 'Library data'}</strong> will be uploaded in the next step as a flat KRA/KPI list. No perspective mapping is required.
           </div>
         )}
 
@@ -3182,11 +3402,15 @@ function StepGroups({ config, update }) {
   function updateGroup(id, changes) {
     update('goalGroups', groups.map(g => g.id === id ? normalizeSimpleGoalGroup({ ...g, ...changes }) : g));
     update('goalGroupsAppliedSnapshot', null);
+    update('prefillDataAppliedSnapshot', null);
+    update('goalLibrariesAppliedSnapshot', null);
   }
 
   function removeGroup(id) {
     update('goalGroups', groups.filter(g => g.id !== id));
     update('goalGroupsAppliedSnapshot', null);
+    update('prefillDataAppliedSnapshot', null);
+    update('goalLibrariesAppliedSnapshot', null);
   }
 
   function addGroup() {
@@ -3203,10 +3427,12 @@ function StepGroups({ config, update }) {
     };
     update('goalGroups', [...groups, newGroup]);
     update('goalGroupsAppliedSnapshot', null);
+    update('prefillDataAppliedSnapshot', null);
+    update('goalLibrariesAppliedSnapshot', null);
   }
 
   return (
-    <div style={{ maxWidth: 820, margin: '0 auto', paddingBottom: 40 }}>
+    <div style={{ maxWidth: 1080, margin: '0 auto', paddingBottom: 40 }}>
       <div style={{ marginBottom: 28 }}>
         <div style={{ fontSize: 11, fontWeight: 700, color: '#94A3B8', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 6 }}>Groups & Strategy</div>
         <h2 style={{ margin: 0, fontSize: 22, fontWeight: 800, color: '#0F172A' }}>Who gets what goal approach?</h2>
@@ -3311,6 +3537,19 @@ function getGroupLibraryAssignments(group) {
   });
 }
 
+function getGroupPrefillAssignments(group) {
+  const expected = getExpectedLibrarySlots(group);
+  const existing = group?.prefillAssignments || [];
+  const fallbackData = expected.length === 1 ? (group?.prefillData || []) : [];
+  return expected.map(slot => {
+    const match = existing.find(assignment => String(assignment?.slotKey || '').trim().toLowerCase() === slot.slotKey.toLowerCase());
+    return {
+      ...slot,
+      data: Array.isArray(match?.data) ? match.data : fallbackData,
+    };
+  });
+}
+
 function setGroupLibraryAssignments(groups, groupId, nextAssignments) {
   return groups.map(group => {
     if (group.id !== groupId) return group;
@@ -3318,6 +3557,21 @@ function setGroupLibraryAssignments(groups, groupId, nextAssignments) {
       ...group,
       libraryAssignments: nextAssignments,
       libraryId: nextAssignments.find(assignment => assignment.libraryId)?.libraryId || null,
+    };
+  });
+}
+
+function setGroupPrefillAssignments(groups, groupId, nextAssignments) {
+  return groups.map(group => {
+    if (group.id !== groupId) return group;
+    return {
+      ...group,
+      prefillAssignments: nextAssignments.map(assignment => ({
+        slotKey: assignment.slotKey,
+        label: assignment.label,
+        data: assignment.data || [],
+      })),
+      prefillData: nextAssignments.length === 1 ? (nextAssignments[0]?.data || []) : [],
     };
   });
 }
@@ -3331,7 +3585,7 @@ function getGroupLibraryLabel(group) {
   return `${attr}: ${values[0]} +${values.length - 1}`;
 }
 
-function LibraryCard({ library, groupLabel, assignedText, accent, active = false, onSelect, onEdit, onDelete, selectionHint, empty = false }) {
+function LibraryCard({ library, groupLabel, assignedText, accent, active = false, onSelect, onEdit, onDelete, selectionHint, empty = false, warning = null }) {
   const kraCount = (library.perspectives || []).reduce((sum, perspective) => sum + (perspective.kras || []).length, 0);
   const kpiCount = (library.perspectives || []).reduce((sum, perspective) => (
     sum + (perspective.kras || []).reduce((nested, kra) => nested + (kra.kpis || []).length, 0)
@@ -3340,16 +3594,22 @@ function LibraryCard({ library, groupLabel, assignedText, accent, active = false
   return (
     <div style={{
       background: '#fff',
-      border: `1px solid ${active ? accent.bar : '#E5E7EB'}`,
+      border: `1px solid ${warning ? '#FCA5A5' : active ? accent.bar : '#E5E7EB'}`,
       borderRadius: 28,
       overflow: 'hidden',
-      boxShadow: active ? '0 18px 34px rgba(15,23,42,.08)' : '0 10px 24px rgba(15,23,42,.04)',
+      boxShadow: warning ? '0 12px 28px rgba(220,38,38,.08)' : active ? '0 18px 34px rgba(15,23,42,.08)' : '0 10px 24px rgba(15,23,42,.04)',
       transition: 'all .18s ease',
       cursor: onSelect ? 'pointer' : 'default',
       minHeight: 250,
       display: 'flex',
       flexDirection: 'column',
     }}>
+      {warning && (
+        <div onClick={onSelect} style={{ background: '#FEF2F2', color: '#991B1B', padding: '6px 14px', fontSize: 11.5, fontWeight: 700, borderBottom: '1px solid #FECACA', display: 'flex', alignItems: 'center', gap: 6 }}>
+          <span aria-hidden="true">⚠</span>
+          <span>{warning}</span>
+        </div>
+      )}
       <div onClick={onSelect} style={{ background: accent.soft, color: accent.text, padding: '14px 16px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, borderBottom: `1px solid ${active ? accent.bar : '#EEF2F7'}` }}>
         <div title={groupLabel} style={{ fontSize: 13, fontWeight: 800, letterSpacing: '0.01em', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', minWidth: 0, flex: 1 }}>
           {groupLabel}
@@ -3358,19 +3618,17 @@ function LibraryCard({ library, groupLabel, assignedText, accent, active = false
           <span
             title={assignedText}
             style={{
-              fontSize: 11.5,
-              fontWeight: 700,
-              padding: '0 12px',
-              borderRadius: 999,
-              background: '#FFFFFF',
+              fontSize: 10,
+              fontWeight: 600,
+              padding: '0 8px',
+              borderRadius: 6,
+              background: 'rgba(148,163,184,.08)',
               color: accent.text,
-              border: '1px solid rgba(148,163,184,.18)',
+              border: '1px solid rgba(148,163,184,.2)',
               display: 'inline-flex',
               alignItems: 'center',
               justifyContent: 'center',
-              height: 36,
-              minWidth: 108,
-              maxWidth: 144,
+              height: 24,
               whiteSpace: 'nowrap',
               overflow: 'hidden',
               textOverflow: 'ellipsis',
@@ -3463,15 +3721,387 @@ function LibraryCard({ library, groupLabel, assignedText, accent, active = false
   );
 }
 
-function AddLibraryModal({ config, initialLibrary = null, fixedName = '', suggestedType = null, onSave, onClose }) {
+function getGroupPrefillUploadConfig(config, group) {
+  return {
+    ...config,
+    goalGroups: [group],
+    goalKpiMode: group?.prefillType === 'kra-kpi' ? 'kra-kpi' : 'kra-only',
+    goalEmployeeEdit: group?.prefillEditability || 'add-kpis',
+    goalLibraryScope: 'common',
+    goalSegmentValues: [],
+  };
+}
+
+function buildLegacyPrefillData(config, groupsOverride = null) {
+  const groups = groupsOverride || config.goalGroups || [];
+  const slotAssignments = groups
+    .filter(group => !!group.prefillType)
+    .flatMap(group => getGroupPrefillAssignments(group).map(assignment => ({
+      group,
+      assignment,
+    })))
+    .filter(({ assignment }) => Array.isArray(assignment.data) && assignment.data.length > 0);
+
+  if (slotAssignments.length === 0) return null;
+
+  const onlyAssignment = slotAssignments[0];
+  const onlyGroup = onlyAssignment?.group;
+  const onlyGroupHasSegments = ((onlyGroup?.segmentValues || []).map(value => String(value || '').trim()).filter(Boolean)).length > 0;
+  if (slotAssignments.length === 1 && !onlyGroupHasSegments) {
+    return { byAttr: false, attrLabel: null, data: flattenLibraryPerspectivesForValidation(onlyAssignment.assignment.data || []) };
+  }
+
+  const data = {};
+  slotAssignments.forEach(({ group, assignment }) => {
+    const key = String(assignment.label || group.name || 'All Employees').trim();
+    if (!key) return;
+    data[key] = flattenLibraryPerspectivesForValidation(assignment.data || []);
+  });
+
+  const attrLabel = slotAssignments.find(({ group }) => String(group?.segmentAttr || '').trim())?.group?.segmentAttr
+    || config.goalSegmentAttr
+    || 'Group';
+
+  return {
+    byAttr: true,
+    attrLabel,
+    data,
+  };
+}
+
+function StepPrefillData({ config, update }) {
+  const groups = config.goalGroups || [];
+  const groupsNeedingPrefill = groupsNeedingPrefillData(config);
+  const canShowAllGroups = groupsNeedingPrefill.length > 1;
+  const [selectedGroupId, setSelectedGroupId] = useState(groupsNeedingPrefill[0]?.id || '');
+  const [showAllGroups, setShowAllGroups] = useState(false);
+  const [editingPrefillTarget, setEditingPrefillTarget] = useState(null);
+  const [phase, setPhase] = useState('idle');
+  const [errors, setErrors] = useState([]);
+  const canShowGroupSwitcher = groupsNeedingPrefill.length > 1;
+
+  const isValid = isPrefillDataValid(config);
+  const isApplied = !!config.prefillDataAppliedSnapshot && isValid;
+
+  useEffect(() => {
+    if (showAllGroups && canShowAllGroups) return;
+    if (!groupsNeedingPrefill.some(group => group.id === selectedGroupId)) {
+      setSelectedGroupId(groupsNeedingPrefill[0]?.id || '');
+    }
+  }, [groupsNeedingPrefill, selectedGroupId, showAllGroups, canShowAllGroups]);
+
+  const selectedGroup = groupsNeedingPrefill.find(group => group.id === selectedGroupId) || groupsNeedingPrefill[0] || null;
+  const editingPrefillGroup = groupsNeedingPrefill.find(group => group.id === editingPrefillTarget?.groupId) || null;
+  const editingPrefillAssignment = editingPrefillGroup
+    ? getGroupPrefillAssignments(editingPrefillGroup).find(assignment => assignment.slotKey === editingPrefillTarget?.slotKey) || null
+    : null;
+  const boardSlots = ((showAllGroups && canShowAllGroups) ? groupsNeedingPrefill : (selectedGroup ? [selectedGroup] : []))
+    .flatMap((group, groupIndex) =>
+      getGroupPrefillAssignments(group).map((assignment, assignmentIndex) => ({
+        group,
+        assignment,
+        accent: LIBRARY_BOARD_COLORS[(groupIndex + assignmentIndex) % LIBRARY_BOARD_COLORS.length],
+      }))
+    );
+
+  function updatePrefillAssignments(groupId, nextAssignments) {
+    const nextGroups = setGroupPrefillAssignments(groups, groupId, nextAssignments);
+    update('goalGroups', nextGroups);
+    update('goalLibraryData', buildLegacyPrefillData(config, nextGroups));
+    update('prefillDataAppliedSnapshot', null);
+  }
+
+  function updatePrefillAssignmentData(groupId, slotKey, nextData) {
+    const group = groups.find(item => item.id === groupId);
+    if (!group) return;
+    const nextAssignments = getGroupPrefillAssignments(group).map(assignment => (
+      assignment.slotKey === slotKey ? { ...assignment, data: nextData } : assignment
+    ));
+    updatePrefillAssignments(groupId, nextAssignments);
+  }
+
+  function importPrefillLibraries(importedLibraries) {
+    if (!selectedGroup) return;
+    const normalizeLookup = value => String(value || '').trim().toLowerCase();
+    const importedMap = new Map(
+      (importedLibraries || []).map(library => [normalizeLookup(library.name), library])
+    );
+    const nextAssignments = getGroupPrefillAssignments(selectedGroup).map(assignment => {
+      const match = importedMap.get(normalizeLookup(assignment.label));
+      return {
+        ...assignment,
+        data: match?.perspectives || [],
+      };
+    });
+    updatePrefillAssignments(selectedGroup.id, nextAssignments);
+  }
+
+  return (
+    <div style={{ maxWidth: 1180, margin: '0 auto', paddingBottom: 40 }}>
+      {editingPrefillGroup && editingPrefillAssignment && (
+        <AddLibraryModal
+          config={getGroupPrefillUploadConfig(config, editingPrefillGroup)}
+          initialLibrary={{
+            id: `${editingPrefillGroup.id}_${editingPrefillAssignment.slotKey}`,
+            name: editingPrefillAssignment.label,
+            type: editingPrefillGroup.prefillType === 'kra-kpi' ? 'kra-kpi' : 'kra-only',
+            weightType: 'suggested',
+            perspectives: editingPrefillAssignment.data || [],
+          }}
+          fixedName={editingPrefillAssignment.label}
+          suggestedType={editingPrefillGroup.prefillType}
+          lockType
+          onSave={(library) => {
+            updatePrefillAssignmentData(editingPrefillGroup.id, editingPrefillAssignment.slotKey, library.perspectives || []);
+            setEditingPrefillTarget(null);
+          }}
+          onClose={() => setEditingPrefillTarget(null)}
+        />
+      )}
+
+      <div style={{ marginBottom: 28 }}>
+        <div style={{ fontSize: 11, fontWeight: 700, color: '#94A3B8', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 6 }}>Pre-fill Data</div>
+        <h2 style={{ margin: 0, fontSize: 22, fontWeight: 800, color: '#0F172A' }}>Upload pre-filled goals</h2>
+        <p style={{ margin: '8px 0 0', fontSize: 14, color: '#64748B', lineHeight: 1.6, maxWidth: 820 }}>
+          Each configured employee value becomes its own pre-fill card here. Upload or edit the KRAs or KRAs + KPIs that should appear ready-made for every card inside the selected group.
+        </p>
+      </div>
+
+      <div style={{ background: 'linear-gradient(180deg, #FFFFFF 0%, #FCFDFE 100%)', border: '1px solid #E2E8F0', borderRadius: 34, padding: 30, marginBottom: 22, boxShadow: '0 20px 45px rgba(15,23,42,.05)' }}>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 220px', gap: 24, alignItems: 'stretch' }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+            {(() => {
+              const groupedSlots = [];
+              const groupIdToIndex = {};
+              boardSlots.forEach(slot => {
+                if (groupIdToIndex[slot.group.id] === undefined) {
+                  groupIdToIndex[slot.group.id] = groupedSlots.length;
+                  groupedSlots.push({ group: slot.group, slots: [] });
+                }
+                groupedSlots[groupIdToIndex[slot.group.id]].slots.push(slot);
+              });
+              return groupedSlots.map(({ group, slots }) => (
+                <div key={group.id}>
+                  {(group.segmentAttr || ((showAllGroups && canShowAllGroups) && group.name)) && (
+                    <div style={{ marginBottom: 10, display: 'flex', alignItems: 'center', gap: 6 }}>
+                      {(showAllGroups && canShowAllGroups) && group.name && (
+                        <span style={{ fontSize: 12, fontWeight: 700, color: '#374151' }}>{group.name}</span>
+                      )}
+                      {group.segmentAttr && (
+                        <span style={{ background: '#F1F5F9', border: '1px solid #E2E8F0', borderRadius: 6, padding: '2px 8px', fontSize: 11, fontWeight: 600, color: '#64748B' }}>{group.segmentAttr}</span>
+                      )}
+                    </div>
+                  )}
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(250px, 1fr))', gap: 18 }}>
+                    {slots.map((slot) => {
+                      const { group, assignment, accent } = slot;
+                      const uploadedCount = (assignment.data || []).length;
+                      const prefillKraCount = flattenLibraryPerspectivesForValidation(assignment.data || []).length;
+                      const prefillLabel = group.prefillType === 'kra-kpi' ? '📊 KRAs + KPIs' : '📌 KRAs only';
+                      const editabilityLabel = group.prefillEditability === 'locked'
+                        ? '🔒 Locked'
+                        : group.prefillEditability === 'edit-freely'
+                          ? '✏️ Free edit'
+                          : '✏️ Add KPIs';
+                      return (
+                        <LibraryCard
+                          key={`${group.id}:${assignment.slotKey}`}
+                          library={{
+                            name: assignment.label,
+                            type: group.prefillType === 'kra-kpi' ? 'kra-kpi' : 'kra-only',
+                            perspectives: assignment.data || [],
+                          }}
+                          groupLabel={assignment.label}
+                          assignedText={null}
+                          accent={accent}
+                          active={uploadedCount > 0}
+                          empty={uploadedCount === 0}
+                          onSelect={() => {
+                            setSelectedGroupId(group.id);
+                            setEditingPrefillTarget({ groupId: group.id, slotKey: assignment.slotKey });
+                          }}
+                          onEdit={() => {
+                            setSelectedGroupId(group.id);
+                            setEditingPrefillTarget({ groupId: group.id, slotKey: assignment.slotKey });
+                          }}
+                          onDelete={uploadedCount > 0 ? () => updatePrefillAssignmentData(group.id, assignment.slotKey, []) : null}
+                          selectionHint={uploadedCount > 0
+                            ? `${prefillKraCount} pre-filled KRA${prefillKraCount !== 1 ? 's' : ''} · ${prefillLabel} · ${editabilityLabel}`
+                            : `Create or upload ${prefillLabel.toLowerCase()} for ${assignment.label}`}
+                        />
+                      );
+                    })}
+                  </div>
+                </div>
+              ));
+            })()}
+            {boardSlots.length === 0 && (
+              <div style={{ minHeight: 220, borderRadius: 24, border: '1px dashed #D7E3F4', background: '#FAFCFF', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '24px 28px', textAlign: 'center' }}>
+                <div>
+                  <div style={{ fontSize: 15.5, fontWeight: 700, color: '#374151', marginBottom: 6 }}>No pre-fill cards available</div>
+                  <div style={{ fontSize: 13.5, color: '#94A3B8', lineHeight: 1.6 }}>
+                    Go back to Groups & Strategy and add employee values under the selected attribute. Each value appears here as its own pre-fill card.
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+
+          <div style={{ display: 'flex', flexDirection: 'column', justifyContent: 'space-between', gap: 18 }}>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+              {groupsNeedingPrefill.map((group, index) => {
+                const active = selectedGroup?.id === group.id && !(showAllGroups && canShowAllGroups);
+                return (
+                  <button
+                    key={group.id}
+                    type="button"
+                    onClick={() => { setShowAllGroups(false); setSelectedGroupId(group.id); }}
+                    style={{
+                      borderRadius: 16,
+                      border: `1px solid ${active ? '#93C5FD' : '#E2E8F0'}`,
+                      background: active ? '#EFF6FF' : '#FFFFFF',
+                      color: active ? '#2563EB' : '#334155',
+                      padding: '12px 16px',
+                      fontSize: 14,
+                      fontWeight: 700,
+                      cursor: 'pointer',
+                      fontFamily: 'inherit',
+                      boxShadow: active ? '0 10px 22px rgba(37,99,235,.08)' : 'none',
+                    }}
+                  >
+                    {group.name || `Group ${index + 1}`}
+                  </button>
+                );
+              })}
+
+              {canShowAllGroups && (
+                <button
+                  type="button"
+                  onClick={() => setShowAllGroups(true)}
+                  style={{
+                    borderRadius: 16,
+                    border: `1px solid ${showAllGroups ? '#93C5FD' : '#E2E8F0'}`,
+                    background: showAllGroups ? '#EFF6FF' : '#FFFFFF',
+                    color: showAllGroups ? '#2563EB' : '#334155',
+                    padding: '12px 16px',
+                    fontSize: 14,
+                    fontWeight: 700,
+                    cursor: 'pointer',
+                    fontFamily: 'inherit',
+                    boxShadow: showAllGroups ? '0 10px 22px rgba(37,99,235,.08)' : 'none',
+                  }}
+                >
+                  All Employees
+                </button>
+              )}
+            </div>
+
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 10, alignItems: 'stretch' }}>
+              {selectedGroup && (
+                <>
+                  <PrefillSheetControls
+                    config={config}
+                    selectedGroup={selectedGroup}
+                    onImported={importPrefillLibraries}
+                    phase={phase}
+                    setPhase={setPhase}
+                    errors={errors}
+                    setErrors={setErrors}
+                  />
+                  {phase === 'error' && errors.length > 0 && (
+                    <div style={{ padding: '12px 14px', background: '#FEF2F2', borderRadius: 16, border: '1px solid #FECACA' }}>
+                      {errors.map((error, index) => (
+                        <div key={`${error.field}_${index}`} style={{ fontSize: 12, color: '#DC2626', lineHeight: 1.5 }}>
+                          {error.message}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <StepStatusBar
+        applied={isApplied}
+        valid={isValid}
+        appliedMessage="Pre-fill data confirmed — proceed to Goal Libraries."
+        pendingMessage={groupsNeedingPrefill.length > 0 && !isValid ? 'Upload pre-fill data for every pre-fill-enabled group.' : 'Click confirm to proceed.'}
+        buttonLabel="Confirm Pre-fill Data"
+        onApply={() => update('prefillDataAppliedSnapshot', `confirmed_${Date.now()}`)}
+      />
+    </div>
+  );
+}
+
+// Tokenize a perspective name for fuzzy matching: lowercase, split on common separators,
+// drop short noise tokens like "of", "to".
+function tokenizePerspectiveName(name) {
+  return new Set(
+    String(name || '')
+      .toLowerCase()
+      .split(/[\s/,&()\-–—]+/)
+      .filter((t) => t.length > 2)
+  );
+}
+
+// Find the configured-perspective index that best matches a library perspective name.
+// Tries exact match, then substring containment, then significant-token overlap.
+// Returns -1 if no reasonable match exists.
+function findBestPerspectiveMatch(libName, configList) {
+  const libRaw = String(libName || '').trim();
+  if (!libRaw) return -1;
+  const libLower = libRaw.toLowerCase();
+
+  let idx = configList.findIndex((c) => String(c.name || '').trim().toLowerCase() === libLower);
+  if (idx >= 0) return idx;
+
+  idx = configList.findIndex((c) => {
+    const cLower = String(c.name || '').trim().toLowerCase();
+    if (!cLower) return false;
+    return cLower.includes(libLower) || libLower.includes(cLower);
+  });
+  if (idx >= 0) return idx;
+
+  const libTokens = tokenizePerspectiveName(libName);
+  if (libTokens.size === 0) return -1;
+  let bestScore = 0;
+  let bestIdx = -1;
+  configList.forEach((c, i) => {
+    const cTokens = tokenizePerspectiveName(c.name);
+    let score = 0;
+    libTokens.forEach((t) => { if (cTokens.has(t)) score += 1; });
+    if (score > bestScore) { bestScore = score; bestIdx = i; }
+  });
+  return bestScore > 0 ? bestIdx : -1;
+}
+
+// True if any of the library's perspective names doesn't match a configured perspective name (exact, lowercased).
+function libraryHasPerspectiveMismatch(library, configPerspNamesLower) {
+  if (!library || !configPerspNamesLower || configPerspNamesLower.length === 0) return false;
+  return (library.perspectives || []).some((p) => {
+    const n = String(p?.name || '').trim().toLowerCase();
+    return n && !configPerspNamesLower.includes(n);
+  });
+}
+
+function AddLibraryModal({ config, initialLibrary = null, fixedName = '', suggestedType = null, lockType = false, onSave, onClose }) {
   const normalizedInitialLibrary = initialLibrary ? normalizeGoalLibraryRecord(initialLibrary) : null;
-  const defaultPersp = (config.perspectives || []).filter(p => p.name).map(p => ({
-    id: `lp_${Date.now()}_${Math.random().toString(36).slice(2,5)}`,
+
+  // Configured perspectives for this org — source of truth
+  const configPerspectives = (config.perspectives || []).filter(p => p.name);
+  const configPerspNames = configPerspectives.map(p => String(p.name).trim());
+
+  const defaultPersp = configPerspectives.map((p, i) => ({
+    id: `lp_${Date.now()}_${i}_${Math.random().toString(36).slice(2,5)}`,
     name: p.name,
     weight: Number(p.weight || p.weightage) || 0,
     kras: [],
   }));
 
+  // When editing, seed from saved library but flag any perspective name mismatches vs current config
   const seedPerspectives = normalizedInitialLibrary?.perspectives?.length
     ? normalizedInitialLibrary.perspectives.map(perspective => ({
         ...perspective,
@@ -3481,15 +4111,51 @@ function AddLibraryModal({ config, initialLibrary = null, fixedName = '', sugges
           kpis: (kra.kpis || []).map(kpi => ({ ...kpi, weight: toNonNegativeWeight(kpi.weight) })),
         })),
       }))
-    : (defaultPersp.length > 0 ? defaultPersp : [
-        { id: `lp_${Date.now()}`, name: 'Financial', weight: 25, kras: [] },
-      ]);
+    : defaultPersp;
+
+  // Detect if saved library perspectives don't match configured ones
+  const savedPerspNames = seedPerspectives.map(p => String(p.name || '').trim().toLowerCase());
+  const configPerspNamesLower = configPerspNames.map(n => n.toLowerCase());
+  const hasPerspMismatch = configPerspNames.length > 0 && !!initialLibrary && savedPerspNames.some(
+    n => !configPerspNamesLower.includes(n)
+  );
 
   const [name, setName] = useState(normalizedInitialLibrary?.name || fixedName || '');
   const [type, setType] = useState(normalizedInitialLibrary?.type || suggestedType || 'kra-only');
   const [weightType, setWeightType] = useState(normalizedInitialLibrary?.weightType || 'suggested');
   const [perspectives, setPerspectives] = useState(seedPerspectives);
   const [openKraDescriptions, setOpenKraDescriptions] = useState({});
+  const [showPerspSyncBanner, setShowPerspSyncBanner] = useState(hasPerspMismatch);
+  const [perspSaveError, setPerspSaveError] = useState('');
+
+  // Sync perspectives to current config. Match library perspectives to configured ones by:
+  // 1) exact (case-insensitive) name; 2) substring containment either direction; 3) shared
+  // significant-token overlap (best score wins). Only truly unrelated KRAs fall back to the
+  // first configured perspective so abbreviated/expanded names like "Internal Process" vs
+  // "Internal Process / Operations" merge correctly.
+  function syncPerspectivesToConfig() {
+    const next = configPerspectives.map((cp, i) => ({
+      id: `lp_sync_${Date.now()}_${i}`,
+      name: cp.name,
+      weight: Number(cp.weight || cp.weightage) || 0,
+      kras: [],
+    }));
+    const orphanKras = [];
+    perspectives.forEach(p => {
+      const matchIdx = findBestPerspectiveMatch(p.name, configPerspectives);
+      if (matchIdx >= 0) {
+        next[matchIdx] = { ...next[matchIdx], kras: [...(next[matchIdx].kras || []), ...(p.kras || [])] };
+      } else {
+        orphanKras.push(...(p.kras || []));
+      }
+    });
+    if (orphanKras.length > 0 && next.length > 0) {
+      next[0] = { ...next[0], kras: [...(next[0].kras || []), ...orphanKras] };
+    }
+    setPerspectives(next);
+    setShowPerspSyncBanner(false);
+    setPerspSaveError('');
+  }
 
   // Clamp any stale negative weights that may have been stored before validation was added
   useEffect(() => {
@@ -3634,10 +4300,16 @@ function AddLibraryModal({ config, initialLibrary = null, fixedName = '', sugges
                 Library Type
                 {suggestedType && !initialLibrary && <span style={{ marginLeft: 6, fontSize: 10.5, color: '#7C3AED', background: '#F5F3FF', border: '1px solid #DDD6FE', borderRadius: 20, padding: '1px 7px', fontWeight: 600 }}>from group</span>}
               </label>
-              <select value={type} onChange={e => changeType(e.target.value)} style={{ ...inputStyle, width: '100%' }}>
-                <option value="kra-only">📌 KRAs only</option>
-                <option value="kra-kpi">📊 KRAs + KPIs</option>
-              </select>
+              {lockType ? (
+                <div style={{ ...inputStyle, width: '100%', boxSizing: 'border-box', background: '#F8FAFC', color: '#334155', fontWeight: 700 }}>
+                  {type === 'kra-kpi' ? '📊 KRAs + KPIs' : '📌 KRAs only'}
+                </div>
+              ) : (
+                <select value={type} onChange={e => changeType(e.target.value)} style={{ ...inputStyle, width: '100%' }}>
+                  <option value="kra-only">📌 KRAs only</option>
+                  <option value="kra-kpi">📊 KRAs + KPIs</option>
+                </select>
+              )}
             </div>
             <div>
               <label style={{ fontSize: 11.5, fontWeight: 600, color: '#64748B', display: 'block', marginBottom: 5 }}>KRA Weight Behaviour</label>
@@ -3659,13 +4331,55 @@ function AddLibraryModal({ config, initialLibrary = null, fixedName = '', sugges
             </div>
           )}
 
+          {/* No perspectives configured */}
+          {configPerspNames.length === 0 && (
+            <div style={{ marginBottom: 16, background: '#FFFBEB', border: '1.5px solid #FDE68A', borderRadius: 9, padding: '12px 14px', fontSize: 12.5, color: '#92400E', lineHeight: 1.6 }}>
+              ⚠ <strong>No BSC perspectives configured</strong> for this org yet. Go back to the <strong>BSC Perspectives</strong> step to set them up before building libraries — KRAs must belong to a valid perspective.
+            </div>
+          )}
+
+          {/* Perspective mismatch sync banner */}
+          {showPerspSyncBanner && (
+            <div style={{ marginBottom: 16, background: '#FEF2F2', border: '1.5px solid #FECACA', borderRadius: 9, padding: '12px 14px' }}>
+              <div style={{ fontSize: 12.5, fontWeight: 600, color: '#991B1B', marginBottom: 6 }}>
+                ⚠ Perspective mismatch
+              </div>
+              <div style={{ fontSize: 12, color: '#7F1D1D', lineHeight: 1.6, marginBottom: 8 }}>
+                This library uses perspectives that don't match what's currently configured for this org.
+                <br />
+                <strong>Configured:</strong> {configPerspNames.join(' · ')}
+                <br />
+                <strong>In this library:</strong> {perspectives.map(p => p.name).join(' · ')}
+              </div>
+              <div style={{ display: 'flex', gap: 8 }}>
+                <button type="button" onClick={syncPerspectivesToConfig} style={{ padding: '6px 14px', background: '#DC2626', color: '#fff', border: 'none', borderRadius: 7, fontSize: 12, fontWeight: 600, cursor: 'pointer', fontFamily: 'inherit' }}>
+                  Sync to configured perspectives
+                </button>
+                <button type="button" onClick={() => setShowPerspSyncBanner(false)} style={{ padding: '6px 14px', background: '#fff', color: '#374151', border: '1px solid #E2E8F0', borderRadius: 7, fontSize: 12, cursor: 'pointer', fontFamily: 'inherit' }}>
+                  Dismiss
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Save-time perspective error */}
+          {perspSaveError && (
+            <div style={{ marginBottom: 12, background: '#FEF2F2', border: '1px solid #FECACA', borderRadius: 8, padding: '9px 12px', fontSize: 12.5, color: '#DC2626', fontWeight: 600 }}>
+              {perspSaveError}
+            </div>
+          )}
+
           {/* Perspectives + KRAs */}
-          {perspectives.map((persp, pi) => (
-            <div key={persp.id} style={{ border: '1.5px solid #E2E8F0', borderRadius: 10, marginBottom: 14, overflow: 'hidden' }}>
-              <div style={{ padding: '10px 14px', background: '#F8FAFC', borderBottom: '1px solid #E9EDF2', display: 'flex', alignItems: 'center', gap: 10 }}>
-                <div style={{ width: 8, height: 8, borderRadius: '50%', background: '#2563EB', flexShrink: 0 }} />
-                <div style={{ flex: 1, fontWeight: 600, color: '#0F172A', fontSize: 13 }}>
+          {perspectives.map((persp, pi) => {
+            const perspIsValid = configPerspNames.length === 0 ||
+              configPerspNamesLower.includes(String(persp.name || '').trim().toLowerCase());
+            return (
+            <div key={persp.id} style={{ border: `1.5px solid ${perspIsValid ? '#E2E8F0' : '#FECACA'}`, borderRadius: 10, marginBottom: 14, overflow: 'hidden' }}>
+              <div style={{ padding: '10px 14px', background: perspIsValid ? '#F8FAFC' : '#FEF2F2', borderBottom: `1px solid ${perspIsValid ? '#E9EDF2' : '#FECACA'}`, display: 'flex', alignItems: 'center', gap: 10 }}>
+                <div style={{ width: 8, height: 8, borderRadius: '50%', background: perspIsValid ? '#2563EB' : '#DC2626', flexShrink: 0 }} />
+                <div style={{ flex: 1, fontWeight: 600, color: perspIsValid ? '#0F172A' : '#991B1B', fontSize: 13 }}>
                   {persp.name || `Perspective ${pi + 1}`}
+                  {!perspIsValid && <span style={{ marginLeft: 8, fontSize: 11, fontWeight: 600, background: '#FEE2E2', color: '#DC2626', borderRadius: 5, padding: '1px 6px' }}>not in config</span>}
                 </div>
                 {weightType !== 'none' && (
                   <>
@@ -3768,12 +4482,24 @@ function AddLibraryModal({ config, initialLibrary = null, fixedName = '', sugges
                 <button type="button" onClick={() => addKRA(persp.id)} style={{ fontSize: 12.5, color: '#2563EB', background: 'none', border: 'none', cursor: 'pointer', fontWeight: 600, padding: '4px 0', fontFamily: 'inherit' }}>+ Add KRA</button>
               </div>
             </div>
-          ))}
+          ); })}
         </div>
 
         <div style={{ padding: '16px 24px', borderTop: '1px solid #E9EDF2', display: 'flex', justifyContent: 'flex-end', gap: 10 }}>
           <button type="button" onClick={onClose} style={{ padding: '9px 20px', border: '1px solid #E2E8F0', borderRadius: 8, background: '#fff', fontSize: 13, cursor: 'pointer', fontFamily: 'inherit' }}>Cancel</button>
           <button type="button" disabled={!canSave} onClick={() => {
+            // Validate perspective names against configured perspectives before saving
+            if (configPerspNames.length > 0) {
+              const badNames = perspectives
+                .map(p => String(p.name || '').trim())
+                .filter(n => n && !configPerspNamesLower.includes(n.toLowerCase()));
+              if (badNames.length > 0) {
+                setPerspSaveError(`Perspective${badNames.length > 1 ? 's' : ''} "${badNames.join('", "')}" ${badNames.length > 1 ? 'are' : 'is'} not in this org's configured perspectives (${configPerspNames.join(', ')}). Use "Sync to configured perspectives" above to fix this.`);
+                setShowPerspSyncBanner(true);
+                return;
+              }
+            }
+            setPerspSaveError('');
             const clampWeights = persp => ({
               ...persp,
               kras: (persp.kras || []).map(k => ({
@@ -3803,6 +4529,7 @@ function StepGoalLibraries({ config, update }) {
   const libraries = config.goalLibraries || [];
   const groups = config.goalGroups || [];
   const groupsNeedingLib = groups.filter(isGroupLibraryEnabled);
+  const canShowAllGroups = groupsNeedingLib.length > 1;
   const [showAddModal, setShowAddModal] = useState(false);
   const [editingLibraryId, setEditingLibraryId] = useState(null);
   const [showAllGroups, setShowAllGroups] = useState(false);
@@ -3813,25 +4540,38 @@ function StepGoalLibraries({ config, update }) {
     ...group,
     libraryAssignments: getGroupLibraryAssignments(group),
   }));
-  const isValid = groupsWithAssignments.length === 0 || groupsWithAssignments.every(group =>
+  const configPerspNamesLower = (config.perspectives || [])
+    .filter(p => p.name)
+    .map(p => String(p.name).trim().toLowerCase());
+  const allSlotsAssigned = groupsWithAssignments.length === 0 || groupsWithAssignments.every(group =>
     group.libraryAssignments.every(assignment => assignment.libraryId && libraries.some(library => library.id === assignment.libraryId))
   );
+  const assignedLibraries = Array.from(new Map(
+    groupsWithAssignments.flatMap(group =>
+      group.libraryAssignments
+        .map(a => libraries.find(l => l.id === a.libraryId))
+        .filter(Boolean)
+        .map(l => [l.id, l])
+    )
+  ).values());
+  const mismatchedLibraries = assignedLibraries.filter(l => libraryHasPerspectiveMismatch(l, configPerspNamesLower));
+  const isValid = allSlotsAssigned && mismatchedLibraries.length === 0;
   const isApplied = !!config.goalLibrariesAppliedSnapshot && isValid;
 
   useEffect(() => {
-    if (showAllGroups) return;
+    if (showAllGroups && canShowAllGroups) return;
     if (!groupsWithAssignments.some(group => group.id === selectedGroupId)) {
       setSelectedGroupId(groupsWithAssignments[0]?.id || '');
     }
-  }, [groupsWithAssignments, selectedGroupId, showAllGroups]);
+  }, [groupsWithAssignments, selectedGroupId, showAllGroups, canShowAllGroups]);
 
   const selectedGroup = groupsWithAssignments.find(group => group.id === selectedGroupId) || groupsWithAssignments[0] || null;
-  const templateScopeConfig = showAllGroups || !selectedGroup
+  const templateScopeConfig = (showAllGroups && canShowAllGroups) || !selectedGroup
     ? config
     : { ...config, goalGroups: [selectedGroup] };
   const selectedGroupIndex = Math.max(0, groupsWithAssignments.findIndex(group => group.id === selectedGroup?.id));
   const editingLibrary = libraries.find(library => library.id === editingLibraryId) || null;
-  const boardSlots = (showAllGroups ? groupsWithAssignments : (selectedGroup ? [selectedGroup] : []))
+  const boardSlots = ((showAllGroups && canShowAllGroups) ? groupsWithAssignments : (selectedGroup ? [selectedGroup] : []))
     .flatMap((group, groupIndex) =>
       group.libraryAssignments.map((assignment, assignmentIndex) => ({
         group,
@@ -3988,34 +4728,61 @@ function StepGoalLibraries({ config, update }) {
 
       <div style={{ background: 'linear-gradient(180deg, #FFFFFF 0%, #FCFDFE 100%)', border: '1px solid #E2E8F0', borderRadius: 34, padding: 30, marginBottom: 22, boxShadow: '0 20px 45px rgba(15,23,42,.05)' }}>
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 220px', gap: 24, alignItems: 'stretch' }}>
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: 18 }}>
-            {boardSlots.map((slot, index) => {
-              const { group, assignment, library } = slot;
-              const accent = slot.accent || LIBRARY_BOARD_COLORS[(selectedGroupIndex + index) % LIBRARY_BOARD_COLORS.length];
-              const groupLabel = group.segmentAttr ? `${group.segmentAttr}` : group.name;
-              return (
-                <LibraryCard
-                  key={`${group.id}:${assignment.slotKey}`}
-                  library={library || { name: assignment.label, type: 'kra-kpi', perspectives: [] }}
-                  groupLabel={assignment.label}
-                  assignedText={showAllGroups ? (group.name || 'Group') : (group.segmentAttr || (library ? 'Configured' : 'Pending'))}
-                  accent={accent}
-                  active={!!library}
-                  empty={!library}
-                  onSelect={() => openSlotEditor(group, assignment, library?.id || null)}
-                  onEdit={() => openSlotEditor(group, assignment, library?.id || null)}
-                  onDelete={library ? () => deleteLibrary(library.id) : null}
-                  selectionHint={
-                    library
-                      ? `${group.name}${group.segmentAttr ? ` · ${group.segmentAttr}` : ''}`
-                      : `Create library for ${assignment.label}`
-                  }
-                />
-              );
-            })}
-
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+            {(() => {
+              const groupedSlots = [];
+              const groupIdToIndex = {};
+              boardSlots.forEach(slot => {
+                if (groupIdToIndex[slot.group.id] === undefined) {
+                  groupIdToIndex[slot.group.id] = groupedSlots.length;
+                  groupedSlots.push({ group: slot.group, slots: [] });
+                }
+                groupedSlots[groupIdToIndex[slot.group.id]].slots.push(slot);
+              });
+              return groupedSlots.map(({ group, slots }) => (
+                <div key={group.id}>
+                  {(group.segmentAttr || ((showAllGroups && canShowAllGroups) && group.name)) && (
+                    <div style={{ marginBottom: 10, display: 'flex', alignItems: 'center', gap: 6 }}>
+                      {(showAllGroups && canShowAllGroups) && group.name && (
+                        <span style={{ fontSize: 12, fontWeight: 700, color: '#374151' }}>{group.name}</span>
+                      )}
+                      {group.segmentAttr && (
+                        <span style={{ background: '#F1F5F9', border: '1px solid #E2E8F0', borderRadius: 6, padding: '2px 8px', fontSize: 11, fontWeight: 600, color: '#64748B' }}>{group.segmentAttr}</span>
+                      )}
+                    </div>
+                  )}
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: 18 }}>
+                    {slots.map((slot, index) => {
+                      const { group, assignment, library } = slot;
+                      const accent = slot.accent || LIBRARY_BOARD_COLORS[(selectedGroupIndex + index) % LIBRARY_BOARD_COLORS.length];
+                      const hasMismatch = !!library && libraryHasPerspectiveMismatch(library, configPerspNamesLower);
+                      return (
+                        <LibraryCard
+                          key={`${group.id}:${assignment.slotKey}`}
+                          library={library || { name: assignment.label, type: 'kra-kpi', perspectives: [] }}
+                          groupLabel={assignment.label}
+                          assignedText={null}
+                          accent={accent}
+                          active={!!library}
+                          empty={!library}
+                          warning={hasMismatch ? 'Perspective mismatch — open and sync' : null}
+                          onSelect={() => openSlotEditor(group, assignment, library?.id || null)}
+                          onEdit={() => openSlotEditor(group, assignment, library?.id || null)}
+                          onDelete={library ? () => deleteLibrary(library.id) : null}
+                          selectionHint={
+                            library
+                              ? `${group.name}${group.segmentAttr ? ` · ${group.segmentAttr}` : ''}`
+                              : `Create library for ${assignment.label}`
+                          }
+                        />
+                      );
+                    })}
+                  </div>
+                </div>
+              ));
+            })()}
             {boardSlots.length === 0 && (
-              <div style={{ gridColumn: '1 / -1', minHeight: 220, borderRadius: 24, border: '1px dashed #D7E3F4', background: '#FAFCFF', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '24px 28px', textAlign: 'center' }}>
+              <div style={{ minHeight: 220, borderRadius: 24, border: '1px dashed #D7E3F4', background: '#FAFCFF', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '24px 28px', textAlign: 'center' }}>
                 <div>
                   <div style={{ fontSize: 15.5, fontWeight: 700, color: '#374151', marginBottom: 6 }}>No cards yet</div>
                   <div style={{ fontSize: 13.5, color: '#94A3B8', lineHeight: 1.6 }}>
@@ -4029,7 +4796,7 @@ function StepGoalLibraries({ config, update }) {
           <div style={{ display: 'flex', flexDirection: 'column', justifyContent: 'space-between', gap: 18 }}>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
               {groupsWithAssignments.map((group, index) => {
-                const active = !showAllGroups && selectedGroup?.id === group.id;
+                const active = selectedGroup?.id === group.id && !(showAllGroups && canShowAllGroups);
                 return (
                   <button
                     key={group.id}
@@ -4053,24 +4820,26 @@ function StepGoalLibraries({ config, update }) {
                 );
               })}
 
-              <button
-                type="button"
-                onClick={() => setShowAllGroups(true)}
-                style={{
-                  borderRadius: 16,
-                  border: `1px solid ${showAllGroups ? '#93C5FD' : '#E2E8F0'}`,
-                  background: showAllGroups ? '#EFF6FF' : '#FFFFFF',
-                  color: showAllGroups ? '#2563EB' : '#334155',
-                  padding: '12px 16px',
-                  fontSize: 14,
-                  fontWeight: 700,
-                  cursor: 'pointer',
-                  fontFamily: 'inherit',
-                  boxShadow: showAllGroups ? '0 10px 22px rgba(37,99,235,.08)' : 'none',
-                }}
-              >
-                View all
-              </button>
+              {canShowAllGroups && (
+                <button
+                  type="button"
+                  onClick={() => setShowAllGroups(true)}
+                  style={{
+                    borderRadius: 16,
+                    border: `1px solid ${showAllGroups ? '#93C5FD' : '#E2E8F0'}`,
+                    background: showAllGroups ? '#EFF6FF' : '#FFFFFF',
+                    color: showAllGroups ? '#2563EB' : '#334155',
+                    padding: '12px 16px',
+                    fontSize: 14,
+                    fontWeight: 700,
+                    cursor: 'pointer',
+                    fontFamily: 'inherit',
+                    boxShadow: showAllGroups ? '0 10px 22px rgba(37,99,235,.08)' : 'none',
+                  }}
+                >
+                  View all
+                </button>
+              )}
             </div>
 
             <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
@@ -4089,7 +4858,15 @@ function StepGoalLibraries({ config, update }) {
         applied={isApplied}
         valid={isValid}
         appliedMessage="Libraries configured — proceed to Goal Limits."
-        pendingMessage={groupsWithAssignments.length > 0 && !isValid ? 'Open each card and configure a library for every attribute value.' : 'Click confirm to proceed.'}
+        pendingMessage={
+          groupsWithAssignments.length === 0
+            ? 'Click confirm to proceed.'
+            : !allSlotsAssigned
+              ? 'Open each card and configure a library for every attribute value.'
+              : mismatchedLibraries.length > 0
+                ? `Fix perspective mismatch on ${mismatchedLibraries.length === 1 ? 'library' : 'libraries'}: ${mismatchedLibraries.map(l => l.name || 'Untitled').join(', ')}. Open the library and use "Sync to configured perspectives".`
+                : 'Click confirm to proceed.'
+        }
         buttonLabel="Confirm Libraries"
         onApply={() => update('goalLibrariesAppliedSnapshot', `confirmed_${Date.now()}`)}
       />
@@ -4305,6 +5082,7 @@ function StepLimits({ config, update }) {
 
 /* ─── STEP SUMMARY ───────────────────────────────────────────────────────── */
 function StepSummary({ config, onLaunched }) {
+  const SUMMARY_MAX_WIDTH = 1120;
   const groups = config.goalGroups || [];
   const libraries = config.goalLibraries || [];
   const employees = config.employeeUploadData?.employees || [];
@@ -4316,11 +5094,12 @@ function StepSummary({ config, onLaunched }) {
   const employeeCodeSet = new Set(
     employees.map((employee) => String(employee['Employee Code'] || '').trim().toLowerCase()).filter(Boolean)
   );
-  const [expandedGroupIds, setExpandedGroupIds] = useState(() => {
-    const firstId = groups[0]?.id;
-    return firstId ? [firstId] : [];
-  });
-
+  const employeeByCode = new Map(
+    employees
+      .map((employee) => [String(employee['Employee Code'] || '').trim().toLowerCase(), employee])
+      .filter(([code]) => code)
+  );
+  const [expandedGroupIds, setExpandedGroupIds] = useState([]);
   const groupSummary = groups.map(g => {
     const assignments = getGroupLibraryAssignments(g);
     const configuredAssignments = assignments
@@ -4332,42 +5111,99 @@ function StepSummary({ config, onLaunched }) {
     return { ...g, configuredAssignments, assignmentCount: assignments.length };
   });
 
+  const outsideManagerWarningCategories = new Set([
+    'manager_not_in_file',
+    'l2_manager_not_in_file',
+    'manager_outside_pms',
+    'l2_manager_outside_pms',
+  ]);
+  const intentionalOutsideManagerCodes = new Set(
+    employeeWarnings
+      .filter((warning) => outsideManagerWarningCategories.has(warning.category) && isIntentionalOutsideManagerWarning(warning))
+      .map((warning) => {
+        const match = String(warning.message || '').match(/Manager "([^"]+)"/i);
+        return String(match?.[1] || warning.code || '').trim().toLowerCase();
+      })
+      .filter(Boolean)
+  );
+
   const coverageByGroup = groupSummary.map((group) => {
     const members = employees.filter((employee) => String(employee.assignedGoalGroupName || employee['Group Name'] || '').trim().toLowerCase() === String(group.name || '').trim().toLowerCase());
-    const memberCodeSet = new Set(
-      members.map((employee) => String(employee['Employee Code'] || '').trim().toLowerCase()).filter(Boolean)
+    const memberCodeMap = new Map(
+      members
+        .map((employee) => [String(employee['Employee Code'] || '').trim().toLowerCase(), employee])
+        .filter(([code]) => code)
     );
     const directReportsMap = new Map();
+    const externalManagerMap = new Map();
 
     members.forEach((employee) => {
-      const managerCode = String(employee['Reporting Manager Code'] || '').trim().toLowerCase();
-      if (!managerCode || !memberCodeSet.has(managerCode)) return;
+      const managerCodeRaw = String(employee['Reporting Manager Code'] || '').trim();
+      const managerCode = managerCodeRaw.toLowerCase();
+      if (!managerCode) return;
       const list = directReportsMap.get(managerCode) || [];
       list.push(employee);
       directReportsMap.set(managerCode, list);
+
+      if (!memberCodeMap.has(managerCode)) {
+        const managerName = String(employee['Reporting Manager Name'] || '').trim();
+        const managerEmployee = employeeByCode.get(managerCode);
+        const existing = externalManagerMap.get(managerCode) || {
+          code: managerCodeRaw || managerCode,
+          name: managerEmployee?.['Employee Name'] || managerName || `Manager ${managerCodeRaw || managerCode}`,
+          kind: managerEmployee ? 'cross-group' : (intentionalOutsideManagerCodes.has(managerCode) ? 'outside' : 'unresolved'),
+        };
+        if (!existing.name && (managerEmployee?.['Employee Name'] || managerName)) {
+          existing.name = managerEmployee?.['Employee Name'] || managerName;
+        }
+        if (existing.kind === 'unresolved' && managerEmployee) existing.kind = 'cross-group';
+        if (existing.kind !== 'outside' && intentionalOutsideManagerCodes.has(managerCode)) {
+          existing.kind = 'outside';
+        }
+        externalManagerMap.set(managerCode, existing);
+      }
     });
 
-    const buildNode = (employee, trail = new Set()) => {
+    const buildMemberNode = (employee, trail = new Set()) => {
       const code = String(employee['Employee Code'] || '').trim().toLowerCase();
-      if (!code || trail.has(code)) {
-        return { employee, reports: [], reportCount: 0 };
-      }
+      if (!code || trail.has(code)) return { type: 'employee', employee, reports: [], reportCount: 0 };
       const nextTrail = new Set(trail);
       nextTrail.add(code);
       const reports = (directReportsMap.get(code) || [])
         .slice()
         .sort((left, right) => String(left['Employee Name'] || '').localeCompare(String(right['Employee Name'] || '')))
-        .map((item) => buildNode(item, nextTrail));
-      return { employee, reports, reportCount: reports.length };
+        .map((item) => buildMemberNode(item, nextTrail));
+      return { type: 'employee', employee, reports, reportCount: reports.length };
     };
 
-    const rootNodes = members
+    const internalRootNodes = members
       .filter((employee) => {
         const managerCode = String(employee['Reporting Manager Code'] || '').trim().toLowerCase();
-        return !managerCode || !memberCodeSet.has(managerCode);
+        return !managerCode || !memberCodeMap.has(managerCode);
       })
       .sort((left, right) => String(left['Employee Name'] || '').localeCompare(String(right['Employee Name'] || '')))
-      .map((employee) => buildNode(employee));
+      .filter((employee) => {
+        const managerCode = String(employee['Reporting Manager Code'] || '').trim().toLowerCase();
+        return !managerCode;
+      })
+      .map((employee) => buildMemberNode(employee));
+
+    const externalRootNodes = Array.from(externalManagerMap.entries())
+      .sort((left, right) => String(left[1].name || left[1].code).localeCompare(String(right[1].name || right[1].code)))
+      .map(([managerCode, manager]) => {
+        const reports = (directReportsMap.get(managerCode) || [])
+          .slice()
+          .sort((left, right) => String(left['Employee Name'] || '').localeCompare(String(right['Employee Name'] || '')))
+          .map((employee) => buildMemberNode(employee, new Set([managerCode])));
+        return {
+          type: 'manager-placeholder',
+          manager,
+          reports,
+          reportCount: reports.length,
+        };
+      });
+
+    const rootNodes = [...internalRootNodes, ...externalRootNodes];
 
     const assignmentSummaries = group.configuredAssignments.map((assignment) => {
       const employeeCount = members.filter((employee) => {
@@ -4387,22 +5223,12 @@ function StepSummary({ config, onLaunched }) {
     };
   });
 
-  const outsidePmsManagers = employeeWarnings
-    .filter((warning) => warning.category === 'manager_not_in_file' || warning.category === 'l2_manager_not_in_file')
-    .map((warning) => {
-      const match = String(warning.message || '').match(/Manager "([^"]+)"/i);
-      return {
-        code: match?.[1] || warning.code || '—',
-        message: warning.message,
-      };
-    })
-    .filter((entry, index, list) => list.findIndex((item) => item.code === entry.code) === index);
-
   const warnings = [];
   const groupsNeedingLib = groups.filter(g => isGroupLibraryEnabled(g) && getGroupLibraryAssignments(g).some(assignment => !assignment.libraryId));
   if (groupsNeedingLib.length > 0) warnings.push(`${groupsNeedingLib.length} group(s) have Goal Library enabled but no library assigned.`);
   if (employees.length === 0) warnings.push('No employees uploaded yet.');
   if (missingGoalGroupNames.length > 0) warnings.push(`No employees were uploaded for: ${missingGoalGroupNames.join(', ')}. The current employee upload is treated as the full master list.`);
+
 
   function toggleGroupDetails(groupId) {
     setExpandedGroupIds((prev) => (
@@ -4412,39 +5238,8 @@ function StepSummary({ config, onLaunched }) {
     ));
   }
 
-  function renderOrgNode(node, depth = 0) {
-    const employee = node.employee || {};
-    const name = employee['Employee Name'] || employee['Employee Code'] || 'Employee';
-    const code = employee['Employee Code'] || '—';
-    const title = employee.Designation || employee.Department || employee['Group Name'] || '';
-    const managerCode = String(employee['Reporting Manager Code'] || '').trim().toLowerCase();
-    const managerMissingInPms = managerCode && !employeeCodeSet.has(managerCode);
-
-    return (
-      <div key={`${code}_${depth}`} style={{ marginLeft: depth > 0 ? 18 : 0, paddingLeft: depth > 0 ? 14 : 0, borderLeft: depth > 0 ? '2px solid #E2E8F0' : 'none' }}>
-        <div style={{ padding: '9px 11px', borderRadius: 10, background: depth === 0 ? '#F8FAFC' : '#fff', border: '1px solid #E2E8F0', marginTop: 8 }}>
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, flexWrap: 'wrap' }}>
-            <div>
-              <div style={{ fontSize: 12.5, fontWeight: 700, color: '#0F172A' }}>{name}</div>
-              <div style={{ fontSize: 11.5, color: '#64748B', marginTop: 2 }}>
-                {code}{title ? ` · ${title}` : ''}
-              </div>
-              {managerMissingInPms && (
-                <div style={{ fontSize: 11, color: '#B45309', marginTop: 4 }}>Reports to outside-PMS / cross-group manager</div>
-              )}
-            </div>
-            <div style={{ fontSize: 11.5, fontWeight: 700, color: node.reportCount > 0 ? '#2563EB' : '#94A3B8' }}>
-              {node.reportCount} reportee{node.reportCount !== 1 ? 's' : ''}
-            </div>
-          </div>
-        </div>
-        {node.reports.map((child) => renderOrgNode(child, depth + 1))}
-      </div>
-    );
-  }
-
   return (
-    <div style={{ maxWidth: 820, margin: '0 auto', paddingBottom: 60 }}>
+    <div style={{ maxWidth: SUMMARY_MAX_WIDTH, margin: '0 auto', paddingBottom: 60 }}>
       <div style={{ marginBottom: 28 }}>
         <div style={{ fontSize: 11, fontWeight: 700, color: '#94A3B8', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 6 }}>Final Step</div>
         <h2 style={{ margin: 0, fontSize: 22, fontWeight: 800, color: '#0F172A' }}>Review & Launch</h2>
@@ -4452,7 +5247,7 @@ function StepSummary({ config, onLaunched }) {
       </div>
 
       {/* Framework */}
-      <div style={{ background: '#fff', border: '1.5px solid #E2E8F0', borderRadius: 12, padding: '14px 18px', marginBottom: 14 }}>
+      <div style={{ background: 'linear-gradient(180deg, #FFFFFF 0%, #F8FBFF 100%)', border: '1.5px solid #DCE8F8', borderRadius: 12, padding: '14px 18px', marginBottom: 14, boxShadow: '0 10px 24px rgba(37,99,235,.05)' }}>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, flexWrap: 'wrap' }}>
           <div style={{ fontSize: 13, fontWeight: 700, color: '#0F172A' }}>Performance Framework</div>
           <span style={{ fontSize: 12.5, fontWeight: 600, color: '#2563EB', background: '#EFF6FF', padding: '3px 10px', borderRadius: 20 }}>{fw?.name || config.frameworkId}</span>
@@ -4470,92 +5265,106 @@ function StepSummary({ config, onLaunched }) {
       </div>
 
       {/* Groups */}
-      <div style={{ background: '#fff', border: '1.5px solid #E2E8F0', borderRadius: 12, padding: '18px 22px', marginBottom: 14 }}>
+      <div style={{ background: 'linear-gradient(180deg, #FFFFFF 0%, #FAFCFF 100%)', border: '1.5px solid #E2E8F0', borderRadius: 12, padding: '18px 22px', marginBottom: 14, boxShadow: '0 12px 28px rgba(15,23,42,.04)' }}>
         <div style={{ fontSize: 13, fontWeight: 700, color: '#0F172A', marginBottom: 14 }}>Employee Groups ({groups.length})</div>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-          {groupSummary.map(g => (
-            <div key={g.id} style={{ padding: '10px 14px', background: '#F8FAFC', borderRadius: 8, border: '1px solid #E9EDF2' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 12, justifyContent: 'space-between' }}>
+          {groupSummary.map((g) => {
+            const groupCoverage = coverageByGroup.find((item) => item.id === g.id);
+            const isExpanded = expandedGroupIds.includes(g.id);
+            return (
+              <div key={g.id} style={{ padding: '10px 14px', background: '#FFFFFF', borderRadius: 10, border: '1px solid #E4ECF4', boxShadow: '0 6px 14px rgba(15,23,42,.03)' }}>
                 <button
                   type="button"
                   onClick={() => toggleGroupDetails(g.id)}
-                  style={{ flex: 1, textAlign: 'left', background: 'none', border: 'none', padding: 0, cursor: 'pointer', fontFamily: 'inherit' }}
+                  aria-label={isExpanded ? `Collapse ${g.name}` : `Expand ${g.name}`}
+                  style={{
+                    width: '100%',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    gap: 10,
+                    marginBottom: isExpanded && groupCoverage?.assignmentSummaries?.length ? 10 : 0,
+                    background: 'none',
+                    border: 'none',
+                    padding: 0,
+                    cursor: 'pointer',
+                    textAlign: 'left',
+                    fontFamily: 'inherit',
+                  }}
                 >
-                  <div style={{ fontSize: 13, fontWeight: 600, color: '#374151' }}>{g.name}</div>
-                  {g.segmentAttr && g.segmentValues?.length > 0 && (
-                    <div style={{ fontSize: 12, color: '#9CA3AF', marginTop: 2 }}>{g.segmentAttr}: {g.segmentValues.join(', ')}</div>
-                  )}
+                  <div style={{ fontSize: 13, fontWeight: 700, color: '#1E293B' }}>{g.name}</div>
+                  <div style={{ fontSize: 11.5, fontWeight: 700, color: '#2563EB', background: '#EFF6FF', border: '1px solid #BFDBFE', borderRadius: 999, padding: '3px 9px' }}>
+                    {groupCoverage?.members?.length || 0}
+                  </div>
                 </button>
-                <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', justifyContent: 'flex-end', alignItems: 'center' }}>
-                  <span style={{ fontSize: 11.5, fontWeight: 600, padding: '3px 10px', borderRadius: 20, background: g.mode === 'prefill' ? '#EFF6FF' : '#FFFBEB', color: g.mode === 'prefill' ? '#2563EB' : '#D97706', border: `1px solid ${g.mode === 'prefill' ? '#BFDBFE' : '#FDE68A'}` }}>
-                    {g.mode === 'prefill' ? '📋 Prefill' : '✏️ Scratch'}
-                  </span>
-                  {isGroupLibraryEnabled(g) && (
-                    <span style={{ fontSize: 11.5, fontWeight: 600, padding: '3px 10px', borderRadius: 20, background: '#F5F3FF', color: '#7C3AED', border: '1px solid #DDD6FE' }}>
-                      📚 {g.configuredAssignments.length}/{g.assignmentCount} library slots mapped
-                    </span>
-                  )}
-                  <span style={{ fontSize: 12, color: '#64748B' }}>{expandedGroupIds.includes(g.id) ? 'Hide' : 'Show'} details</span>
-                </div>
-              </div>
-              {expandedGroupIds.includes(g.id) && (() => {
-                const groupCoverage = coverageByGroup.find((item) => item.id === g.id);
-                return (
-                  <div style={{ marginTop: 12, paddingTop: 12, borderTop: '1px solid #E2E8F0' }}>
+                {isExpanded && (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                    {g.prefillType && (
+                      <div>
+                        <div style={{ fontSize: 11.5, fontWeight: 700, color: '#64748B', textTransform: 'uppercase', letterSpacing: '.05em', marginBottom: 8 }}>Pre-fill Setup</div>
+                        <div style={{ padding: '8px 10px', borderRadius: 8, background: '#fff', border: '1px solid #E2E8F0', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
+                          <div>
+                            <div style={{ fontSize: 12.5, fontWeight: 700, color: '#0F172A' }}>
+                              {g.prefillType === 'kra-kpi' ? 'KRAs + KPIs' : 'KRAs only'}
+                              <span style={{ fontSize: 11, fontWeight: 600, marginLeft: 8, color: '#64748B' }}>
+                                · {g.prefillEditability === 'locked' ? 'Locked' : g.prefillEditability === 'edit-freely' ? 'Free edit' : 'Add KPIs'}
+                              </span>
+                            </div>
+                          </div>
+                          <div style={{ fontSize: 11.5, fontWeight: 700, color: '#2563EB' }}>
+                            {getGroupPrefillAssignments(g).filter(assignment => (assignment.data || []).length > 0).length}/{getGroupPrefillAssignments(g).length} cards
+                          </div>
+                        </div>
+                      </div>
+                    )}
                     {groupCoverage?.assignmentSummaries?.length > 0 && (
-                      <div style={{ marginBottom: 12 }}>
+                      <div>
                         <div style={{ fontSize: 11.5, fontWeight: 700, color: '#64748B', textTransform: 'uppercase', letterSpacing: '.05em', marginBottom: 8 }}>Associated Libraries</div>
                         <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
                           {groupCoverage.assignmentSummaries.map((assignment) => (
                             <div key={`${g.id}_${assignment.slotKey || assignment.library?.id}`} style={{ padding: '8px 10px', borderRadius: 8, background: '#fff', border: '1px solid #E2E8F0', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
                               <div>
-                                <div style={{ fontSize: 12.5, fontWeight: 700, color: '#0F172A' }}>{assignment.library?.name || assignment.label}</div>
-                                <div style={{ fontSize: 11.5, color: '#64748B', marginTop: 2 }}>
-                                  {assignment.label}{assignment.library?.type ? ` · ${assignment.library.type === 'kra-kpi' ? 'KRA+KPI' : 'KRA only'}` : ''}
+                                <div style={{ fontSize: 12.5, fontWeight: 700, color: '#0F172A' }}>
+                                  {assignment.library?.name || assignment.label}
+                                  {assignment.library?.type && <span style={{ fontSize: 11, fontWeight: 600, marginLeft: 8, color: '#64748B' }}>· {assignment.library.type === 'kra-kpi' ? 'KRA+KPI' : 'KRA only'}</span>}
                                 </div>
                               </div>
-                              <div style={{ fontSize: 11.5, fontWeight: 700, color: '#2563EB' }}>{assignment.employeeCount} employee{assignment.employeeCount !== 1 ? 's' : ''}</div>
+                              <div style={{ fontSize: 11.5, fontWeight: 700, color: '#2563EB' }}>{assignment.employeeCount}</div>
                             </div>
                           ))}
                         </div>
                       </div>
                     )}
                   </div>
-                );
-              })()}
-            </div>
-          ))}
-        </div>
-      </div>
-
-      {/* Limits */}
-      <div style={{ background: '#fff', border: '1.5px solid #E2E8F0', borderRadius: 12, padding: '18px 22px', marginBottom: 14 }}>
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-          <div style={{ fontSize: 13, fontWeight: 700, color: '#0F172A' }}>Goal Limits</div>
-          <span style={{ fontSize: 12.5, fontWeight: 600, color: config.limitsEnabled ? '#16A34A' : '#9CA3AF' }}>
-            {config.limitsEnabled ? '✓ Enabled' : 'Disabled'}
-          </span>
-        </div>
-      </div>
-
-      {/* Employees */}
-      <div style={{ background: '#fff', border: '1.5px solid #E2E8F0', borderRadius: 12, padding: '18px 22px', marginBottom: 20 }}>
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-          <div style={{ fontSize: 13, fontWeight: 700, color: '#0F172A' }}>Employees</div>
-          <span style={{ fontSize: 20, fontWeight: 800, color: employees.length > 0 ? '#2563EB' : '#9CA3AF' }}>{employees.length}</span>
+                )}
+              </div>
+            );
+          })}
         </div>
       </div>
 
       {/* Rollout structure */}
-      <div style={{ background: '#fff', border: '1.5px solid #E2E8F0', borderRadius: 12, padding: '18px 22px', marginBottom: 20 }}>
-        <div style={{ fontSize: 13, fontWeight: 700, color: '#0F172A', marginBottom: 14 }}>PMS Rollout Structure</div>
+      <div style={{ background: 'linear-gradient(180deg, #FFFFFF 0%, #F7FAFF 100%)', border: '1.5px solid #DCE7F5', borderRadius: 12, padding: '18px 22px', marginBottom: 20, boxShadow: '0 18px 40px rgba(37,99,235,.08)' }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, marginBottom: 14, flexWrap: 'wrap' }}>
+          <div style={{ fontSize: 13, fontWeight: 700, color: '#0F172A' }}>PMS Rollout Structure</div>
+          <span style={{
+            fontSize: 11.5,
+            fontWeight: 700,
+            color: config.limitsEnabled ? '#16A34A' : '#64748B',
+            background: config.limitsEnabled ? '#F0FDF4' : '#F8FAFC',
+            border: `1px solid ${config.limitsEnabled ? '#BBF7D0' : '#E2E8F0'}`,
+            padding: '4px 10px',
+            borderRadius: 999,
+          }}>
+            Goal limits: {config.limitsEnabled ? 'Enabled' : 'Disabled'}
+          </span>
+        </div>
 
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 10, marginBottom: 16 }}>
           {[
             { label: 'Employees In PMS', value: employees.length, color: '#2563EB', bg: '#EFF6FF' },
-            { label: 'Groups Covered', value: `${coverageByGroup.filter((group) => group.members.length > 0).length}/${groups.length || 0}`, color: '#16A34A', bg: '#F0FDF4' },
+            { label: 'Groups In Rollout', value: `${coverageByGroup.filter((group) => group.members.length > 0).length}/${groups.length || 0}`, color: '#16A34A', bg: '#F0FDF4' },
             { label: 'Deferred Groups', value: deferredGoalGroupNames.length, color: '#D97706', bg: '#FFFBEB' },
-            { label: 'Outside-PMS Managers', value: outsidePmsManagers.length, color: '#7C3AED', bg: '#F5F3FF' },
           ].map((item) => (
             <div key={item.label} style={{ padding: '12px 14px', borderRadius: 10, background: item.bg, border: '1px solid #E5E7EB' }}>
               <div style={{ fontSize: 11.5, color: '#64748B', marginBottom: 6 }}>{item.label}</div>
@@ -4564,26 +5373,7 @@ function StepSummary({ config, onLaunched }) {
           ))}
         </div>
 
-        <div style={{ marginBottom: 16 }}>
-          <div style={{ fontSize: 12, fontWeight: 700, color: '#64748B', textTransform: 'uppercase', letterSpacing: '.05em', marginBottom: 8 }}>Group organogram</div>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-            {coverageByGroup.map((group) => (
-              <div key={group.name} style={{ padding: '10px 12px', borderRadius: 10, border: '1px solid #E9EDF2', background: '#F8FAFC' }}>
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, marginBottom: 8 }}>
-                  <div style={{ fontSize: 13, fontWeight: 700, color: '#0F172A' }}>{group.name}</div>
-                  <div style={{ fontSize: 12, fontWeight: 700, color: group.members.length > 0 ? '#2563EB' : '#9CA3AF' }}>{group.members.length} employee{group.members.length !== 1 ? 's' : ''}</div>
-                </div>
-                {group.rootNodes.length > 0 ? (
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                    {group.rootNodes.map((node) => renderOrgNode(node))}
-                  </div>
-                ) : (
-                  <div style={{ fontSize: 12, color: '#9CA3AF' }}>No employees in current PMS rollout.</div>
-                )}
-              </div>
-            ))}
-          </div>
-        </div>
+        <OrgChartPanel employees={employees} groups={groups} />
 
         {deferredGoalGroupNames.length > 0 && (
           <div style={{ marginBottom: 16 }}>
@@ -4597,22 +5387,6 @@ function StepSummary({ config, onLaunched }) {
             </div>
           </div>
         )}
-
-        <div>
-          <div style={{ fontSize: 12, fontWeight: 700, color: '#64748B', textTransform: 'uppercase', letterSpacing: '.05em', marginBottom: 8 }}>Outside-PMS managers</div>
-          {outsidePmsManagers.length > 0 ? (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-              {outsidePmsManagers.map((manager) => (
-                <div key={manager.code} style={{ padding: '10px 12px', borderRadius: 10, background: '#F5F3FF', border: '1px solid #DDD6FE' }}>
-                  <div style={{ fontSize: 12.5, fontWeight: 700, color: '#6D28D9', marginBottom: 4 }}>{manager.code}</div>
-                  <div style={{ fontSize: 11.5, color: '#6B21A8' }}>{manager.message}</div>
-                </div>
-              ))}
-            </div>
-          ) : (
-            <div style={{ fontSize: 12, color: '#9CA3AF' }}>No outside-PMS manager references detected in the current upload.</div>
-          )}
-        </div>
       </div>
 
       {/* Warnings */}
@@ -4622,15 +5396,6 @@ function StepSummary({ config, onLaunched }) {
           {warnings.map((w, i) => <div key={i} style={{ fontSize: 12.5, color: '#78350F', marginBottom: 3 }}>· {w}</div>)}
         </div>
       )}
-      {deferredGoalGroupNames.length > 0 && (
-        <div style={{ background: '#EFF6FF', border: '1.5px solid #BFDBFE', borderRadius: 10, padding: '14px 18px', marginBottom: 20 }}>
-          <div style={{ fontSize: 12.5, fontWeight: 700, color: '#1D4ED8', marginBottom: 6 }}>Deferred For Later</div>
-          <div style={{ fontSize: 12.5, color: '#1E3A8A' }}>
-            {deferredGoalGroupNames.join(', ')} will stay outside the current PMS rollout until the admin returns and uploads them.
-          </div>
-        </div>
-      )}
-
       {/* Launch */}
       <div style={{ background: 'linear-gradient(135deg,#1E293B,#0F172A)', borderRadius: 14, padding: '28px 32px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
         <div>
@@ -4754,10 +5519,10 @@ function StepGoalLibrary({ config, update }) {
     <div style={{ maxWidth: 860, margin: '0 auto', paddingBottom: 40 }}>
       {/* Page header */}
       <div style={{ marginBottom: 24 }}>
-        <div style={{ fontSize: 12, fontWeight: 700, color: '#94A3B8', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 6 }}>Goals Step</div>
+        <div style={{ fontSize: 12, fontWeight: 700, color: '#94A3B8', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 6 }}>Flat KRA / KPI Structure</div>
         <h2 style={{ margin: 0, fontSize: 22, fontWeight: 800, color: '#0F172A' }}>Goal Creation Strategy</h2>
         <p style={{ margin: '8px 0 0', fontSize: 14, color: '#64748B', lineHeight: 1.6 }}>
-          Define how employees create and manage their goals. You can mix and match three modes — and configure different groups of employees differently.
+          Define how employees create and manage KRAs and KPIs. This follows the BSC setup rhythm, without the perspective layer.
         </p>
       </div>
 
@@ -5303,19 +6068,23 @@ function GoalLibraryMaster({ parsedData, config, onChange }) {
     }
   }
 
-  function startEditKra(kra) {
+  const startEditKra = useCallback((kra) => {
     setEditId(`kra__${kra.id}`);
     setDraft({ name: kra.name, weight: kra.weight, perspName: kra.perspName });
     setEditError('');
-  }
+  }, []);
 
-  function startEditKpi(kra, kpi) {
+  const startEditKpi = useCallback((kra, kpi) => {
     setEditId(`kpi__${kra.id}__${kpi.id}`);
     setDraft({ name: kpi.name, weight: kpi.weight });
     setEditError('');
-  }
+  }, []);
 
-  function cancelEdit() { setEditId(null); setDraft({}); setEditError(''); }
+  const cancelEdit = useCallback(() => {
+    setEditId(null);
+    setDraft({});
+    setEditError('');
+  }, []);
 
   function getTrimmedCurrentKras() {
     return getCurrentKras().map((kra) => ({
@@ -5399,27 +6168,29 @@ function GoalLibraryMaster({ parsedData, config, onChange }) {
   const currentKras = getCurrentKras();
   const totalWeight = currentKras.reduce((s, k) => s + (parseFloat(k.weight) || 0), 0);
   const weightOk = Math.abs(totalWeight - 100) <= 0.5;
-  const validationErrors = validateGoalLibraryData(masterData, config);
+  const validationErrors = useMemo(() => validateGoalLibraryData(masterData, config), [masterData, config]);
   const libraryIsValid = validationErrors.length === 0;
 
-  // Group by perspective (preserve configured order)
-  const groupedByPersp = {};
-  for (const p of perspectives) groupedByPersp[p.name] = [];
-  for (const kra of currentKras) {
-    if (groupedByPersp[kra.perspName] !== undefined) groupedByPersp[kra.perspName].push(kra);
-    else {
-      if (!groupedByPersp['__other__']) groupedByPersp['__other__'] = [];
-      groupedByPersp['__other__'].push(kra);
+  // Group by perspective (preserve configured order) - MEMOIZED
+  const perspSections = useMemo(() => {
+    const groupedByPersp = {};
+    for (const p of perspectives) groupedByPersp[p.name] = [];
+    for (const kra of currentKras) {
+      if (groupedByPersp[kra.perspName] !== undefined) groupedByPersp[kra.perspName].push(kra);
+      else {
+        if (!groupedByPersp['__other__']) groupedByPersp['__other__'] = [];
+        groupedByPersp['__other__'].push(kra);
+      }
     }
-  }
-  const perspSections = Object.entries(groupedByPersp)
-    .filter(([, kras]) => kras.length > 0 || perspectives.find(p => p.name !== '__other__'))
-    .map(([name, kras]) => ({
-      name,
-      kras,
-      color: perspectives.find(p => p.name === name)?.color || '#94A3B8',
-      sectionWeight: kras.reduce((s, k) => s + (parseFloat(k.weight) || 0), 0),
-    }));
+    return Object.entries(groupedByPersp)
+      .filter(([, kras]) => kras.length > 0 || perspectives.find(p => p.name !== '__other__'))
+      .map(([name, kras]) => ({
+        name,
+        kras,
+        color: perspectives.find(p => p.name === name)?.color || '#94A3B8',
+        sectionWeight: kras.reduce((s, k) => s + (parseFloat(k.weight) || 0), 0),
+      }));
+  }, [perspectives, currentKras]);
 
   const totalKraCount = currentKras.length;
 
@@ -5517,11 +6288,11 @@ function GoalLibraryMaster({ parsedData, config, onChange }) {
                       {/* KRA row */}
                       {isEditingKra ? (
                         <div style={{display:'grid',gridTemplateColumns:'1fr 160px 80px auto',gap:'6px 8px',alignItems:'center',padding:'10px 14px',background:'#F8FBFF'}}>
-                          <input autoFocus style={inputStyle} placeholder="KRA name" value={draft.name||''} onChange={e=>{ setEditError(''); setDraft(d=>({...d,name:e.target.value})); }} onKeyDown={e=>{if(e.key==='Enter')saveKra(kra.id);if(e.key==='Escape')cancelEdit();}} />
+                          <input autoFocus style={inputStyle} placeholder="KRA name" value={draft.name||''} onChange={e=>setDraft(d=>({...d,name:e.target.value}))} onFocus={()=>setEditError('')} onKeyDown={e=>{if(e.key==='Enter')saveKra(kra.id);if(e.key==='Escape')cancelEdit();}} />
                           <select style={selectStyle} value={draft.perspName||''} onChange={e=>setDraft(d=>({...d,perspName:e.target.value}))}>
                             {perspectives.map(p=><option key={p.id} value={p.name}>{p.name}</option>)}
                           </select>
-                          <input style={{...inputStyle,textAlign:'center'}} inputMode="decimal" placeholder="%" value={draft.weight||''} onChange={e=>{ setEditError(''); setDraft(d=>({...d,weight:sanitizeWeightInput(e.target.value)})); }} />
+                          <input style={{...inputStyle,textAlign:'center'}} inputMode="decimal" placeholder="%" value={draft.weight||''} onChange={e=>setDraft(d=>({...d,weight:sanitizeWeightInput(e.target.value)}))} onFocus={()=>setEditError('')} />
                           <div style={{display:'flex',gap:6}}>
                             <button onClick={()=>saveKra(kra.id)} style={{padding:'5px 10px',background:TREE_BLUE,color:'#fff',border:'none',borderRadius:6,fontSize:12,fontWeight:600,cursor:'pointer',fontFamily:'inherit'}}>Save</button>
                             <button onClick={cancelEdit} style={{padding:'5px 10px',background:'#F1F5F9',color:'#64748B',border:'none',borderRadius:6,fontSize:12,cursor:'pointer',fontFamily:'inherit'}}>Cancel</button>
@@ -5548,8 +6319,8 @@ function GoalLibraryMaster({ parsedData, config, onChange }) {
                                 <span style={{fontSize:12,color:'#CBD5E1',flexShrink:0}}>└─</span>
                                 {isEditingKpi ? (
                                   <>
-                                    <input autoFocus style={{...inputStyle,fontSize:12,flex:1}} placeholder="KPI name" value={draft.name||''} onChange={e=>{ setEditError(''); setDraft(d=>({...d,name:e.target.value})); }} onKeyDown={e=>{if(e.key==='Enter')saveKpi(kra.id,kpi.id);if(e.key==='Escape')cancelEdit();}} />
-                                    <input style={{...inputStyle,textAlign:'center',fontSize:12,width:70}} inputMode="decimal" placeholder="%" value={draft.weight||''} onChange={e=>{ setEditError(''); setDraft(d=>({...d,weight:sanitizeWeightInput(e.target.value)})); }} />
+                                    <input autoFocus style={{...inputStyle,fontSize:12,flex:1}} placeholder="KPI name" value={draft.name||''} onChange={e=>setDraft(d=>({...d,name:e.target.value}))} onFocus={()=>setEditError('')} onKeyDown={e=>{if(e.key==='Enter')saveKpi(kra.id,kpi.id);if(e.key==='Escape')cancelEdit();}} />
+                                    <input style={{...inputStyle,textAlign:'center',fontSize:12,width:70}} inputMode="decimal" placeholder="%" value={draft.weight||''} onChange={e=>setDraft(d=>({...d,weight:sanitizeWeightInput(e.target.value)}))} onFocus={()=>setEditError('')} />
                                     <button onClick={()=>saveKpi(kra.id,kpi.id)} style={{padding:'4px 9px',background:TREE_BLUE,color:'#fff',border:'none',borderRadius:6,fontSize:11.5,fontWeight:600,cursor:'pointer',fontFamily:'inherit'}}>Save</button>
                                     <button onClick={cancelEdit} style={{padding:'4px 9px',background:'#F1F5F9',color:'#64748B',border:'none',borderRadius:6,fontSize:11.5,cursor:'pointer',fontFamily:'inherit'}}>Cancel</button>
                                   </>
@@ -6254,13 +7025,26 @@ function StepEmployeeUpload({ config, update }) {
           status: 'done',
           message: getEmployeeUploadMessage(result),
           result,
-          warnings: [...(result.validationWarnings || []), ...(result.mappingWarnings || [])],
+          warnings: getVisibleEmployeeUploadWarnings(result),
         }
       : null
   );
   const [uploadState, setUploadState] = useState(() => (
     buildUploadState(config.employeeUploadData)
   ));
+  const [previewExpanded, setPreviewExpanded] = useState(false);
+  const uploadFileRef = useRef(null);
+  const uploadBtnWrapRef = useRef(null);
+  const [uploadBtnOpen, setUploadBtnOpen] = useState(false);
+
+  useEffect(() => {
+    if (!uploadBtnOpen) return;
+    function handleOutside(e) {
+      if (uploadBtnWrapRef.current && !uploadBtnWrapRef.current.contains(e.target)) setUploadBtnOpen(false);
+    }
+    document.addEventListener('mousedown', handleOutside);
+    return () => document.removeEventListener('mousedown', handleOutside);
+  }, [uploadBtnOpen]);
 
   const routingColumns = getEmployeeRoutingColumns(config);
   const routingLabels = routingColumns.map(column => column.label);
@@ -6302,7 +7086,14 @@ function StepEmployeeUpload({ config, update }) {
         ? `${employee.assignedGoalLibraryName} (${employee.assignedGoalLibraryCount || 0})`
         : 'No library',
     }] : []),
-    { key: 'manager', label: 'Manager', width: '1fr', render: (employee) => employee['Reporting Manager Code'] || '—' },
+    { key: 'manager', label: 'Manager', width: '1fr', render: (employee) => {
+      const code = employee['Reporting Manager Code'] || '';
+      if (!code) return '—';
+      const allEmps = uploadState?.result?.employees || [];
+      const found = allEmps.find(e => String(e['Employee Code'] || '').trim() === code.trim());
+      const name = found?.['Employee Name'] || String(employee['Reporting Manager Name'] || '').trim();
+      return name ? <span>{name}<span style={{ display: 'block', fontSize: 10.5, color: '#94A3B8', fontFamily: 'monospace' }}>{code}</span></span> : code;
+    }},
   ] : [];
   const previewGridTemplate = previewColumns.map(column => column.width).join(' ');
   const getIssueRowLabel = (issue) => (typeof issue?.row === 'number' ? `Row ${issue.row}` : (issue?.row || 'Summary'));
@@ -6352,11 +7143,13 @@ function StepEmployeeUpload({ config, update }) {
       const result = attachGoalLibraryToEmployees(parsed, config);
       const persistedResult = { ...result, validationWarnings: warnings };
       update('employeeUploadData', persistedResult);
+      setPreviewExpanded(false);
+      setUploadBtnOpen(false);
       setUploadState({
         status: 'done',
         message: getEmployeeUploadMessage(persistedResult),
         result: persistedResult,
-        warnings: [...warnings, ...(persistedResult.mappingWarnings || [])],
+        warnings: getVisibleEmployeeUploadWarnings(persistedResult),
       });
     } catch (err) {
       update('employeeUploadData', null);
@@ -6458,17 +7251,31 @@ function StepEmployeeUpload({ config, update }) {
             );
           })()}
 
-          {/* Action bar */}
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 10, flexWrap: 'wrap', marginBottom: 2 }}>
-            <button
-              onClick={() => downloadEmployeeTemplate(config)}
-              style={{ padding: '9px 18px', background: '#2563EB', color: '#fff', border: 'none', borderRadius: 9, fontSize: 12.5, fontWeight: 600, cursor: 'pointer', fontFamily: 'inherit', whiteSpace: 'nowrap', boxShadow: '0 4px 12px rgba(37,99,235,.2)' }}>
-              Download Template
-            </button>
-            <label style={{ padding: '9px 18px', border: '1.5px solid #CBD5E1', borderRadius: 9, fontSize: 12.5, cursor: 'pointer', background: '#fff', fontFamily: 'inherit', color: '#334155', display: 'inline-flex', alignItems: 'center', fontWeight: 600, whiteSpace: 'nowrap' }}>
-              Upload Employee File
-              <input type="file" accept=".xlsx,.xls,.csv" onChange={handleUpload} style={{ display: 'none' }} />
-            </label>
+          {/* Action bar — Upload Sheet slider */}
+          <input ref={uploadFileRef} type="file" accept=".xlsx,.xls,.csv" onChange={handleUpload} style={{ display: 'none' }} />
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', marginBottom: 2 }}>
+            <div ref={uploadBtnWrapRef} style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+              <button
+                type="button"
+                onClick={() => setUploadBtnOpen(prev => !prev)}
+                style={{ fontSize: 12.5, color: uploadState?.status === 'parsing' ? '#94A3B8' : '#2563EB', background: uploadBtnOpen ? '#FFFFFF' : '#F8FAFC', border: '1px solid #D7E3F4', borderRadius: 12, padding: '7px 13px', minWidth: 108, cursor: 'pointer', fontWeight: 700, fontFamily: 'inherit' }}
+              >
+                {uploadState?.status === 'parsing' ? 'Uploading…' : 'Upload Sheet'}
+              </button>
+              <button
+                type="button"
+                onClick={() => downloadEmployeeTemplate(config)}
+                title="Download template"
+                style={{ width: uploadBtnOpen ? 34 : 0, opacity: uploadBtnOpen ? 1 : 0, overflow: 'hidden', padding: '7px 0', border: uploadBtnOpen ? '1px solid #D6E4FF' : '1px solid transparent', background: '#FFFFFF', color: '#2563EB', borderRadius: 10, cursor: uploadBtnOpen ? 'pointer' : 'default', fontSize: 17, lineHeight: 1, transition: 'width .18s ease, opacity .18s ease', pointerEvents: uploadBtnOpen ? 'auto' : 'none', fontFamily: 'inherit' }}
+              >⬇</button>
+              <button
+                type="button"
+                onClick={() => uploadFileRef.current?.click()}
+                title="Upload sheet"
+                disabled={!uploadBtnOpen || uploadState?.status === 'parsing'}
+                style={{ width: uploadBtnOpen ? 34 : 0, opacity: uploadBtnOpen ? 1 : 0, overflow: 'hidden', padding: '7px 0', border: uploadBtnOpen ? '1px solid #D6E4FF' : '1px solid transparent', background: '#F8FBFF', color: uploadState?.status === 'parsing' ? '#94A3B8' : '#2563EB', borderRadius: 10, cursor: (!uploadBtnOpen || uploadState?.status === 'parsing') ? 'default' : 'pointer', fontSize: 17, lineHeight: 1, transition: 'width .18s ease, opacity .18s ease', pointerEvents: uploadBtnOpen ? 'auto' : 'none', fontFamily: 'inherit' }}
+              >⬆</button>
+            </div>
           </div>
 
           {uploadState && uploadState.status !== 'parsing' && (
@@ -6486,15 +7293,17 @@ function StepEmployeeUpload({ config, update }) {
                       <div style={{ display: 'grid', gridTemplateColumns: previewGridTemplate, gap: 0, background: '#ECFDF5', padding: '6px 12px', fontSize: 11, fontWeight: 700, color: '#059669', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
                         {previewColumns.map(column => <span key={column.key}>{column.label}</span>)}
                       </div>
-                      {uploadState.result.employees.slice(0, 5).map((emp, i) => (
-                        <div key={i} style={{ display: 'grid', gridTemplateColumns: previewGridTemplate, gap: 0, padding: '6px 12px', fontSize: 12, color: '#374151', borderTop: '1px solid #D1FAE5' }}>
-                          {previewColumns.map(column => <span key={column.key}>{column.render(emp)}</span>)}
-                        </div>
-                      ))}
+                      <div style={{ maxHeight: previewExpanded ? 'none' : 220, overflowY: previewExpanded ? 'visible' : 'auto' }}>
+                        {(previewExpanded ? uploadState.result.employees : uploadState.result.employees.slice(0, 5)).map((emp, i) => (
+                          <div key={i} style={{ display: 'grid', gridTemplateColumns: previewGridTemplate, gap: 0, padding: '6px 12px', fontSize: 12, color: '#374151', borderTop: '1px solid #D1FAE5' }}>
+                            {previewColumns.map(column => <span key={column.key}>{column.render(emp)}</span>)}
+                          </div>
+                        ))}
+                      </div>
                       {uploadState.result.count > 5 && (
-                        <div style={{ padding: '6px 12px', fontSize: 11.5, color: '#6B7280', borderTop: '1px solid #D1FAE5' }}>
-                          + {uploadState.result.count - 5} more employee{uploadState.result.count - 5 !== 1 ? 's' : ''}
-                        </div>
+                        <button type="button" onClick={() => setPreviewExpanded(v => !v)} style={{ width: '100%', padding: '7px 12px', fontSize: 11.5, color: '#2563EB', fontWeight: 600, background: '#F0FDF4', border: 'none', borderTop: '1px solid #D1FAE5', cursor: 'pointer', fontFamily: 'inherit', textAlign: 'left' }}>
+                          {previewExpanded ? '▲ Show less' : `▼ Show all ${uploadState.result.count} employees`}
+                        </button>
                       )}
                     </div>
                   )}
@@ -7154,6 +7963,7 @@ const INITIAL = {
   goalsAppliedSnapshot: null,
   goalLibraryData: null,
   goalLibraryAppliedSnapshot: null,
+  prefillDataAppliedSnapshot: null,
   employeeUploadData: null,
   // New goal groups system
   goalGroups: [
@@ -7221,6 +8031,7 @@ function normalizeConfig(raw) {
   if (!Array.isArray(merged.goalSegmentValues))merged.goalSegmentValues= INITIAL.goalSegmentValues;
   if (!Array.isArray(merged.goalLimitValues))  merged.goalLimitValues  = INITIAL.goalLimitValues;
   if (!Array.isArray(merged.selectedCompetencies)) merged.selectedCompetencies = INITIAL.selectedCompetencies;
+  if (merged.prefillDataAppliedSnapshot === undefined) merged.prefillDataAppliedSnapshot = INITIAL.prefillDataAppliedSnapshot;
   merged.goalLibraries = normalizeGoalLibraries(merged.goalLibraries);
   merged.deferredGoalGroupNames = normalizeDeferredGoalGroups(merged.deferredGoalGroupNames);
   return merged;
@@ -7249,11 +8060,16 @@ function isStepComplete(stepId, config) {
       return isGoalSettingsValid(config) && config.goalsAppliedSnapshot === getGoalsSnapshot(config);
     case 'groups':
       return (config.goalGroups || []).length > 0 &&
-        (config.goalGroups || []).every(g => g.mode) &&
+        (config.goalGroups || []).every(g => g.prefillType || g.canEditOwn !== false) &&
         config.goalGroupsAppliedSnapshot === getNewGroupsSnapshot(config);
+    case 'prefill_data': {
+      const groupsNeedingPrefill = groupsNeedingPrefillData(config);
+      if (groupsNeedingPrefill.length === 0) return true;
+      return isPrefillDataValid(config) && !!config.prefillDataAppliedSnapshot;
+    }
     case 'goal_libraries': {
-      const groupsNeedingLib = (config.goalGroups || []).filter(isGroupLibraryEnabled);
-      if (groupsNeedingLib.length === 0) return !!config.goalLibrariesAppliedSnapshot;
+      const groupsNeedingLib = groupsNeedingLibraryData(config);
+      if (groupsNeedingLib.length === 0) return true;
       return groupsNeedingLib.every(group =>
         getGroupLibraryAssignments(group).every(assignment =>
           assignment.libraryId && (config.goalLibraries || []).some(library => library.id === assignment.libraryId)
@@ -7293,13 +8109,18 @@ function isStepComplete(stepId, config) {
   }
 }
 
-export default function PMSWizard({ onLaunched }) {
-  const persistedState = useMemo(() => loadWizardState(), []);
+export default function PMSWizard({ onLaunched, orgKeyOverride, orgNameOverride }) {
+  const persistedState = useMemo(() => loadWizardState(orgKeyOverride), [orgKeyOverride]);
   const [step, setStep]       = useState(() => persistedState && typeof persistedState.step === 'number' ? persistedState.step : 0);
   const [config, setConfig]   = useState(() => persistedState?.config ? normalizeConfig(persistedState.config) : INITIAL);
   const [visited, setVisited] = useState(() => new Set(Array.isArray(persistedState?.visited) ? persistedState.visited : []));
   const [stepNotice, setStepNotice] = useState(null); // { message, type: 'warn'|'info' }
-  const workspace = useMemo(() => getWorkspaceContext(), []);
+  const workspace = useMemo(() => {
+    if (orgKeyOverride != null) {
+      return { orgKey: orgKeyOverride, orgName: orgNameOverride || orgKeyOverride };
+    }
+    return getWorkspaceContext();
+  }, [orgKeyOverride, orgNameOverride]);
 
   function saveAndExitSetup() {
     saveWizardState(workspace.orgKey, {
@@ -7325,7 +8146,15 @@ export default function PMSWizard({ onLaunched }) {
 
   function canAccessStep(targetStep) {
     if (targetStep < 0 || targetStep >= navSteps.length) return false;
+    const targetStepId = navSteps[targetStep]?.id;
     for (let i = 0; i < targetStep; i += 1) {
+      const priorStepId = navSteps[i]?.id;
+      if (
+        targetStepId === 'goal_libraries' &&
+        priorStepId === 'prefill_data'
+      ) {
+        continue;
+      }
       if (!isStepComplete(navSteps[i].id, config)) {
         return false;
       }
@@ -7424,42 +8253,50 @@ export default function PMSWizard({ onLaunched }) {
     }
   }
 
-  const stepComponents = (() => {
-    if (config.frameworkId === 'bsc') {
-      return [
-        <StepFramework        key="framework"      config={config} update={update} />,
-        <StepPerspectives     key="perspectives"   config={config} update={update} />,
-        <StepGroups           key="groups"         config={config} update={update} />,
-        <StepGoalLibraries    key="goal_libraries" config={config} update={update} />,
-        <StepLimits           key="limits"         config={config} update={update} />,
-        <StepEmployeeSettings key="emp_settings"   config={config} update={update} />,
-        <StepEmployeeUpload   key="upload"         config={config} update={update} />,
-        <StepSummary          key="summary"        config={config} onLaunched={onLaunched} />,
-      ];
+  const stepComponents = navSteps.map((navStep) => {
+    switch (navStep.id) {
+      case 'framework':
+        return <StepFramework key="framework" config={config} update={update} />;
+      case 'perspectives':
+        return <StepPerspectives key="perspectives" config={config} update={update} />;
+      case 'groups':
+        return <StepGroups key="groups" config={config} update={update} />;
+      case 'prefill_data':
+        return <StepPrefillData key="prefill_data" config={config} update={update} />;
+      case 'goal_libraries':
+        return <StepGoalLibraries key="goal_libraries" config={config} update={update} />;
+      case 'limits':
+        return config.frameworkId === 'bsc'
+          ? <StepLimits key="limits" config={config} update={update} />
+          : <StepLimitsRules key="limits" config={config} update={update} />;
+      case 'emp_settings':
+        return <StepEmployeeSettings key="emp_settings" config={config} update={update} />;
+      case 'upload':
+        return <StepEmployeeUpload key="upload" config={config} update={update} />;
+      case 'summary':
+        return <StepSummary key="summary" config={config} onLaunched={onLaunched} />;
+      case 'goals':
+        return <StepGoalLibrary key="goals" config={config} update={update} />;
+      case 'kra_library':
+        return <StepKRALibrary key="kra_library" config={config} update={update} />;
+      case 'hierarchy':
+        return <StepHierarchy key="hierarchy" config={config} update={update} />;
+      case 'scale':
+        return <StepScale key="scale" config={config} update={update} />;
+      case 'targets':
+        return <StepTargets key="targets" config={config} update={update} />;
+      case 'competencies':
+        return <StepCompetencies key="competencies" config={config} update={update} />;
+      case 'bellcurve':
+        return <StepBellCurve key="bellcurve" config={config} update={update} />;
+      case 'phases':
+        return <StepPhases key="phases" config={config} update={update} />;
+      case 'export':
+        return <StepExport key="export" config={config} />;
+      default:
+        return <div key={navStep.id} />;
     }
-    const comps = [
-      <StepFramework   key="framework" config={config} update={update} />,
-      <StepGoalLibrary key="goals"     config={config} update={update} />,
-    ];
-    if (config.goalGroups?.length > 0 ? groupsNeedingDataUpload(config).length > 0 : config.goalCreationMode === 'admin-library') {
-      comps.push(<StepKRALibrary key="kra_library" config={config} update={update} />);
-    }
-    comps.push(
-      <StepLimitsRules key="limits"    config={config} update={update} />,
-      <StepHierarchy   key="hierarchy" config={config} update={update} />,
-      <StepScale       key="scale"     config={config} update={update} />,
-    );
-    if (config.frameworkId !== 'kra') {
-      comps.push(<StepTargets key="targets" config={config} update={update} />);
-    }
-    comps.push(
-      <StepCompetencies key="competencies" config={config} update={update} />,
-      <StepBellCurve    key="bellcurve"    config={config} update={update} />,
-      <StepPhases       key="phases"       config={config} update={update} />,
-      <StepExport       key="export" config={config} />,
-    );
-    return comps;
-  })();
+  });
 
   const completedCount = navSteps.filter((s, i) => visited.has(i) && isStepComplete(s.id, config)).length;
   const pct = Math.round((completedCount / totalSteps) * 100);
@@ -7468,6 +8305,14 @@ export default function PMSWizard({ onLaunched }) {
 
   useEffect(() => {
     const firstIncompleteStep = navSteps.findIndex((navStep) => !isStepComplete(navStep.id, config));
+    const currentStepId = navSteps[safeStep]?.id;
+    const firstIncompleteStepId = firstIncompleteStep >= 0 ? navSteps[firstIncompleteStep]?.id : null;
+    const allowAdjacentGoalDataNavigation =
+      (currentStepId === 'goal_libraries' && firstIncompleteStepId === 'prefill_data') ||
+      (currentStepId === 'prefill_data' && firstIncompleteStepId === 'goal_libraries');
+    if (allowAdjacentGoalDataNavigation) {
+      return;
+    }
     if (firstIncompleteStep !== -1 && safeStep > firstIncompleteStep) {
       setStep(firstIncompleteStep);
     }
@@ -7547,46 +8392,27 @@ export default function PMSWizard({ onLaunched }) {
               <div style={{ fontWeight: 600, color: '#374151', marginBottom: 1 }}>HR Admin</div>
               <div>{workspace.orgName}</div>
             </div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-              <button
-                type="button"
-                onClick={saveAndExitSetup}
-                style={{
-                  padding: '7px 10px',
-                  borderRadius: 8,
-                  border: '1px solid #E2E8F0',
-                  background: '#fff',
-                  color: '#475569',
-                  fontSize: 11.5,
-                  fontWeight: 600,
-                  cursor: 'pointer',
-                  fontFamily: 'inherit',
-                  whiteSpace: 'nowrap',
-                }}
-              >
-                Save & Exit
-              </button>
-              <button
-                type="button"
-                onClick={exitToLogin}
-                title="Sign out"
-                style={{
-                  width: 32,
-                  height: 32,
-                  borderRadius: 999,
-                  border: '1px solid #E2E8F0',
-                  background: '#fff',
-                  color: '#64748B',
-                  fontSize: 15,
-                  lineHeight: 1,
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                }}
-              >
-                ⏻
-              </button>
-            </div>
+            <button
+              type="button"
+              onClick={saveAndExitSetup}
+              style={{
+                padding: '7px 12px',
+                borderRadius: 8,
+                border: '1px solid #CBD5E1',
+                background: '#F8FAFC',
+                color: '#374151',
+                fontSize: 12,
+                fontWeight: 700,
+                cursor: 'pointer',
+                fontFamily: 'inherit',
+                whiteSpace: 'nowrap',
+                display: 'flex',
+                alignItems: 'center',
+                gap: 5,
+              }}
+            >
+              💾 Save & Exit
+            </button>
           </div>
         </div>
       </aside>
@@ -7651,7 +8477,7 @@ export function LaunchOverview({ config, workspace, onClose }) {
   const groupSummary = hasNewGroups ? groups.map(g => ({
     name: g.name,
     modes: (g.modes || []).map(m => GOAL_MODES.find(gm => gm.id === m)?.title || m).join(' + '),
-    prefillCount: (g.prefillData || []).length,
+    prefillCount: getGroupPrefillAssignments(g).filter(assignment => (assignment.data || []).length > 0).length,
     libraryCount: (g.libraryData || []).length,
     limits: g.goalLimitsEnabled ? `${g.goalMin}–${g.goalMax} KRAs` : 'No limits',
   })) : [];
@@ -7701,7 +8527,7 @@ export function LaunchOverview({ config, workspace, onClose }) {
                     <div style={{ fontWeight: 700, fontSize: 13, color: '#0F172A', marginBottom: 4 }}>{g.name}</div>
                     <div style={{ fontSize: 12, color: '#2563EB', fontWeight: 600, marginBottom: 4 }}>{g.modes}</div>
                     <div style={{ fontSize: 12, color: '#6B7280', display: 'flex', gap: 16 }}>
-                      {g.prefillCount > 0 && <span>📋 {g.prefillCount} pre-fill KRAs</span>}
+                      {g.prefillCount > 0 && <span>📋 {g.prefillCount} pre-fill cards</span>}
                       {g.libraryCount > 0 && <span>📚 {g.libraryCount} library KRAs</span>}
                       <span>⚖️ {g.limits}</span>
                     </div>
@@ -7758,4 +8584,456 @@ export function LaunchOverview({ config, workspace, onClose }) {
       </div>
     </div>
   );
+}
+
+/* ── STANDALONE ORG CHART PANEL ──────────────────────────────────────────── */
+const ORG_PARTICLES = (() => {
+  const count = 32;
+  const particles = [];
+  for (let i = 0; i < count; i++) {
+    const size = 4 + Math.random() * 8;
+    const x = Math.random() * 100;
+    const dur = 10 + Math.random() * 16;
+    const delay = -(Math.random() * dur);
+    const drift = -40 + Math.random() * 80;
+    const opacity = 0.18 + Math.random() * 0.28;
+    const colors = ['99,102,241','59,130,246','139,92,246','14,165,233','16,185,129','245,158,11'];
+    const color = colors[i % colors.length];
+    const startY = Math.random() * 90;
+    particles.push({ size, x, dur, delay, drift, opacity, color, id: i, startY });
+  }
+  return particles;
+})();
+
+const ORG_ANIM_CSS = ORG_PARTICLES.map(p => `
+@keyframes orgP${p.id}{
+  0%{transform:translateY(0) translateX(0) scale(1);opacity:0}
+  8%{opacity:${p.opacity}}
+  50%{opacity:${p.opacity * 0.8};transform:translateY(-250px) translateX(${p.drift * 0.5}px) scale(1.1)}
+  100%{transform:translateY(-550px) translateX(${p.drift}px) scale(0.7);opacity:0}
+}`).join('') + `
+@keyframes orgTwinkle{
+  0%,100%{opacity:0.5}
+  50%{opacity:1}
+}`;
+
+function orgNid(node) {
+  return node.type === 'manager-placeholder'
+    ? `mgr:${String(node.manager?.code || '').trim().toLowerCase()}`
+    : `emp:${String(node.employee?.['Employee Code'] || '').trim().toLowerCase()}`;
+}
+
+function orgFilterNode(node, q) {
+  if (!q) return node;
+  const reps = (node.reports || []).map((c) => orgFilterNode(c, q)).filter(Boolean);
+  const text = node.type === 'manager-placeholder'
+    ? `${node.manager?.name || ''} ${node.manager?.code || ''}`.toLowerCase()
+    : `${node.employee?.['Employee Name'] || ''} ${node.employee?.['Employee Code'] || ''} ${node.employee?.Designation || ''}`.toLowerCase();
+  return (text.includes(q) || reps.length > 0) ? { ...node, reports: reps, reportCount: reps.length } : null;
+}
+
+function OrgNode({ node, depth = 0, gid = '', expandedOrgNodeIds, toggleNode, searchActive }) {
+  const rawId = orgNid(node);
+  const id = gid ? `${gid}:${rawId}` : rawId;
+  const expandable = node.reportCount > 0;
+  const expanded = expandable ? (searchActive ? true : expandedOrgNodeIds[id] !== false) : false;
+
+  let name, code, title, isPlaceholder, placeholderKind;
+  if (node.type === 'manager-placeholder') {
+    const mgr = node.manager || {};
+    name = mgr.name || mgr.code; code = mgr.code || '—'; title = '';
+    isPlaceholder = true; placeholderKind = mgr.kind;
+  } else {
+    const emp = node.employee || {};
+    name = emp['Employee Name'] || emp['Employee Code'] || 'Employee';
+    code = emp['Employee Code'] || '—';
+    title = String(emp.Designation || emp.Department || emp['Group Name'] || '').trim();
+    isPlaceholder = false;
+  }
+
+  const cardBg = isPlaceholder
+    ? (placeholderKind === 'cross-group' ? '#F5F3FF' : '#FFFBEB')
+    : (depth === 0 ? '#F8FAFC' : '#fff');
+  const cardBorder = isPlaceholder
+    ? (placeholderKind === 'cross-group' ? '#DDD6FE' : '#FDE68A')
+    : '#E2E8F0';
+  const titleColor = isPlaceholder
+    ? (placeholderKind === 'cross-group' ? '#312E81' : '#78350F')
+    : '#0F172A';
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', minWidth: 220 }}>
+      <div style={{
+        width: 200, maxWidth: '100%',
+        padding: '9px 11px', borderRadius: 10, background: cardBg,
+        border: `1px solid ${cardBorder}`, fontFamily: 'inherit',
+        boxShadow: depth === 0 ? '0 2px 6px rgba(15,23,42,.06)' : '0 1px 3px rgba(15,23,42,.04)',
+      }}>
+        <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 8 }}>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 12.5, fontWeight: 700, color: titleColor, lineHeight: 1.3, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{name}</div>
+            <div style={{ fontSize: 11, color: '#64748B', marginTop: 2, lineHeight: 1.3, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+              {code}{title ? ` · ${title}` : ''}
+            </div>
+            {isPlaceholder && (
+              <div style={{ fontSize: 10.5, color: placeholderKind === 'cross-group' ? '#5B21B6' : '#B45309', marginTop: 3 }}>
+                {placeholderKind === 'cross-group' ? 'Cross-group manager' : 'Outside-PMS manager'}
+              </div>
+            )}
+          </div>
+          {expandable && (
+            <button type="button" onClick={() => toggleNode(id)} aria-label={expanded ? 'Collapse' : 'Expand'}
+              title={`${node.reportCount} reportee${node.reportCount === 1 ? '' : 's'}`}
+              style={{ background: '#EFF6FF', border: '1px solid #BFDBFE', borderRadius: 999, cursor: 'pointer',
+                padding: '1px 7px', color: '#2563EB', fontSize: 10.5, fontWeight: 700, lineHeight: 1.4, fontFamily: 'inherit',
+                display: 'inline-flex', alignItems: 'center', gap: 3, flexShrink: 0 }}>
+              <span>{node.reportCount}</span>
+              <span style={{ display: 'inline-block', transform: expanded ? 'rotate(180deg)' : 'rotate(0deg)', transition: 'transform 220ms ease' }}>▾</span>
+            </button>
+          )}
+        </div>
+      </div>
+      {expandable && (
+        <OrgNodeChildren kids={node.reports} depth={depth} gid={gid} expanded={expanded}
+          expandedOrgNodeIds={expandedOrgNodeIds} toggleNode={toggleNode} searchActive={searchActive} />
+      )}
+    </div>
+  );
+}
+
+function OrgNodeChildren({ kids, depth, gid, expanded, expandedOrgNodeIds, toggleNode, searchActive }) {
+  if (!kids || !kids.length) return null;
+  const lineColor = '#CBD5E1'; const lineW = 2;
+  const single = kids.length === 1; const gap = 14; const trunk = 18;
+
+  const content = (
+    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', width: 'max-content', minWidth: '100%' }}>
+      <div style={{ width: lineW, height: trunk, background: lineColor, flexShrink: 0 }} />
+      {single
+        ? <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
+            <OrgNode node={kids[0]} depth={depth + 1} gid={gid} expandedOrgNodeIds={expandedOrgNodeIds} toggleNode={toggleNode} searchActive={searchActive} />
+          </div>
+        : <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'center', width: 'max-content', minWidth: '100%' }}>
+            {kids.map((child, i) => {
+              const isF = i === 0, isL = i === kids.length - 1;
+              return (
+                <div key={orgNid(child)} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', width: 'max-content', minWidth: 230, padding: `0 ${gap / 2}px` }}>
+                  <div style={{ width: '100%', height: trunk, position: 'relative', flexShrink: 0 }}>
+                    <div style={{ position: 'absolute', top: 0, left: isF ? '50%' : 0, right: isL ? '50%' : 0, height: lineW, background: lineColor }} />
+                    <div style={{ position: 'absolute', top: 0, left: '50%', transform: 'translateX(-50%)', width: lineW, height: '100%', background: lineColor }} />
+                  </div>
+                  <OrgNode node={child} depth={depth + 1} gid={gid} expandedOrgNodeIds={expandedOrgNodeIds} toggleNode={toggleNode} searchActive={searchActive} />
+                </div>
+              );
+            })}
+          </div>
+      }
+    </div>
+  );
+
+  return (
+    <div style={{
+      display: 'grid',
+      gridTemplateRows: expanded ? '1fr' : '0fr',
+      opacity: expanded ? 1 : 0,
+      width: 'max-content', minWidth: '100%', overflow: 'visible',
+      pointerEvents: expanded ? 'auto' : 'none',
+      transition: 'grid-template-rows 600ms cubic-bezier(0.22,1,0.36,1), opacity 400ms ease',
+      willChange: 'grid-template-rows, opacity',
+    }}>
+      <div style={{ overflow: 'hidden', width: 'max-content', minWidth: '100%', padding: '0 4px 6px' }}>
+        {content}
+      </div>
+    </div>
+  );
+}
+
+const ORG_GROUP_PALETTE = [
+  { dot: '#4F46E5', bg: '#EEF2FF', border: '#C7D2FE', text: '#3730A3', avatarFrom: '#4F46E5', avatarTo: '#7C3AED' },
+  { dot: '#0891B2', bg: '#ECFEFF', border: '#A5F3FC', text: '#0E7490', avatarFrom: '#0891B2', avatarTo: '#0284C7' },
+  { dot: '#16A34A', bg: '#F0FDF4', border: '#BBF7D0', text: '#15803D', avatarFrom: '#16A34A', avatarTo: '#059669' },
+  { dot: '#D97706', bg: '#FFFBEB', border: '#FDE68A', text: '#92400E', avatarFrom: '#D97706', avatarTo: '#F59E0B' },
+  { dot: '#DC2626', bg: '#FEF2F2', border: '#FECACA', text: '#991B1B', avatarFrom: '#DC2626', avatarTo: '#E11D48' },
+  { dot: '#7C3AED', bg: '#F5F3FF', border: '#DDD6FE', text: '#5B21B6', avatarFrom: '#7C3AED', avatarTo: '#A855F7' },
+];
+
+export function OrgChartPanel({ employees, groups }) {
+  const [expandedOrgNodeIds, setExpandedOrgNodeIds] = useState({});
+  const [organogramSearch, setOrganogramSearch]     = useState('');
+  const [orgViewMode, setOrgViewMode]               = useState('tree');
+  const [expandedGroupIds, setExpandedGroupIds]     = useState([]);
+  const [isFullscreen, setIsFullscreen]             = useState(false);
+  const [orgZoom, setOrgZoom]                       = useState(1);
+  const zoomOut = () => setOrgZoom((z) => Math.max(0.5, +(z - 0.1).toFixed(2)));
+  const zoomIn  = () => setOrgZoom((z) => Math.min(1.6, +(z + 0.1).toFixed(2)));
+  const zoomReset = () => setOrgZoom(1);
+
+  const coverageByGroup = useMemo(() => {
+    function buildCoverage({ id, name, members, pal }) {
+      const memberCodeMap = new Map(members.map((e) => [String(e['Employee Code'] || '').trim().toLowerCase(), e]));
+      const directReportsMap = new Map();
+      const externalManagerMap = new Map();
+      members.forEach((emp) => {
+        const mgrCodeRaw = String(emp['Reporting Manager Code'] || '').trim();
+        const mgrCode = mgrCodeRaw.toLowerCase();
+        if (!mgrCode) return;
+        const list = directReportsMap.get(mgrCode) || [];
+        list.push(emp);
+        directReportsMap.set(mgrCode, list);
+        if (!memberCodeMap.has(mgrCode)) {
+          const mgrName = String(emp['Reporting Manager Name'] || '').trim();
+          const crossEmp = employees.find((x) => String(x['Employee Code'] || '').trim().toLowerCase() === mgrCode);
+          const existing = externalManagerMap.get(mgrCode) || {
+            code: mgrCodeRaw,
+            name: crossEmp?.['Employee Name'] || mgrName || mgrCodeRaw,
+            kind: crossEmp ? 'cross-group' : 'outside',
+          };
+          externalManagerMap.set(mgrCode, existing);
+        }
+      });
+      function buildNode(emp, trail = new Set()) {
+        const code = String(emp['Employee Code'] || '').trim().toLowerCase();
+        if (!code || trail.has(code)) return { type: 'employee', employee: emp, reports: [], reportCount: 0 };
+        const t2 = new Set(trail); t2.add(code);
+        const reports = (directReportsMap.get(code) || [])
+          .slice().sort((a, b) => String(a['Employee Name'] || '').localeCompare(String(b['Employee Name'] || '')))
+          .map((x) => buildNode(x, t2));
+        return { type: 'employee', employee: emp, reports, reportCount: reports.length };
+      }
+      const internalRoots = members
+        .filter((e) => { const c = String(e['Reporting Manager Code'] || '').trim().toLowerCase(); return !c; })
+        .sort((a, b) => String(a['Employee Name'] || '').localeCompare(String(b['Employee Name'] || '')))
+        .map((e) => buildNode(e));
+      const externalRoots = Array.from(externalManagerMap.entries())
+        .sort(([, a], [, b]) => String(a.name || a.code).localeCompare(String(b.name || b.code)))
+        .map(([mgrCode, mgr]) => {
+          const reports = (directReportsMap.get(mgrCode) || [])
+            .slice().sort((a, b) => String(a['Employee Name'] || '').localeCompare(String(b['Employee Name'] || '')))
+            .map((e) => buildNode(e, new Set([mgrCode])));
+          return { type: 'manager-placeholder', manager: mgr, reports, reportCount: reports.length };
+        });
+      return { id, name, members, rootNodes: [...internalRoots, ...externalRoots], pal };
+    }
+
+    const knownNames = new Set(groups.map((g) => String(g?.name || '').trim().toLowerCase()).filter(Boolean));
+    const list = groups.map((group, gi) => {
+      const gName = String(group?.name || '').trim().toLowerCase();
+      const members = employees.filter((e) =>
+        String(e.assignedGoalGroupName || e['Group Name'] || '').trim().toLowerCase() === gName
+      );
+      return buildCoverage({
+        id: group.id || String(gi),
+        name: group.name || `Group ${gi + 1}`,
+        members,
+        pal: ORG_GROUP_PALETTE[gi % ORG_GROUP_PALETTE.length],
+      });
+    });
+    const unassignedMembers = employees.filter((e) => {
+      const g = String(e.assignedGoalGroupName || e['Group Name'] || '').trim().toLowerCase();
+      return !knownNames.has(g);
+    });
+    if (unassignedMembers.length) {
+      list.push(buildCoverage({
+        id: '__unassigned__',
+        name: 'Unassigned',
+        members: unassignedMembers,
+        pal: { dot: '#64748B', bg: '#F8FAFC', border: '#E2E8F0', text: '#475569', avatarFrom: '#64748B', avatarTo: '#94A3B8' },
+      }));
+    }
+    return list;
+  }, [employees, groups]);
+
+  const populatedGroups = useMemo(() => coverageByGroup.filter((g) => g.members.length > 0), [coverageByGroup]);
+
+  useEffect(() => {
+    function collect(nodes, bucket = []) {
+      nodes.forEach((n) => { if (n.reportCount > 0) { bucket.push(orgNid(n)); collect(n.reports || [], bucket); } });
+      return bucket;
+    }
+    // Scope IDs per group so the same person in different groups gets independent expand/collapse.
+    // Also drop keys that no longer correspond to any node so state doesn't leak across reorgs.
+    const ids = populatedGroups.flatMap((g) => collect(g.rootNodes).map((id) => `${g.id}:${id}`));
+    setExpandedOrgNodeIds((prev) => {
+      const next = {};
+      const valid = new Set(ids);
+      ids.forEach((id) => { next[id] = prev[id] !== undefined ? prev[id] : true; });
+      // Preserve keys we still know about; drop the rest.
+      Object.keys(prev).forEach((k) => { if (valid.has(k) && next[k] === undefined) next[k] = prev[k]; });
+      return next;
+    });
+  }, [populatedGroups]);
+
+  useEffect(() => {
+    if (populatedGroups.length > 0) setExpandedGroupIds(populatedGroups.map(g => g.id));
+  }, [populatedGroups]);
+
+  function toggleNode(id) { setExpandedOrgNodeIds((p) => ({ ...p, [id]: p[id] === undefined ? false : !p[id] })); }
+  function toggleGroup(id) { setExpandedGroupIds((p) => p.includes(id) ? p.filter((x) => x !== id) : [...p, id]); }
+
+  const q = organogramSearch.trim().toLowerCase();
+  const allEmpty = populatedGroups.length===0;
+
+  const VIEW_MODES=[
+    {id:'tree',label:'Tree',icon:<svg width="15" height="15" viewBox="0 0 32 32" fill="none"><path d="M5 15.4C5 8.2 9.9 4 16 4s11 4.2 11 11.4" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round"/><path d="M16 4c-2.8 3.5-4.2 7.3-4.2 11.4M16 4c2.8 3.5 4.2 7.3 4.2 11.4" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round"/><path d="M6.8 10.6h18.4M5.5 14.4h21" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round"/><circle cx="8.6" cy="19.6" r="2.8" stroke="currentColor" strokeWidth="2.4"/><path d="M2.8 28v-2.1c0-2.7 2.6-4.8 5.8-4.8s5.8 2.1 5.8 4.8V28H2.8Z" stroke="currentColor" strokeWidth="2.4" strokeLinejoin="round"/><circle cx="23.4" cy="19.6" r="2.8" stroke="currentColor" strokeWidth="2.4"/><path d="M17.6 28v-2.1c0-2.7 2.6-4.8 5.8-4.8s5.8 2.1 5.8 4.8V28H17.6Z" stroke="currentColor" strokeWidth="2.4" strokeLinejoin="round"/></svg>},
+    {id:'by-group',label:'By Group',icon:<svg width="14" height="14" viewBox="0 0 16 16" fill="none"><rect x="1" y="2" width="14" height="3.5" rx="1.5" stroke="currentColor" strokeWidth="1.3"/><rect x="1" y="7.5" width="14" height="3" rx="1.5" stroke="currentColor" strokeWidth="1.3"/><rect x="1" y="12" width="14" height="2.5" rx="1.25" stroke="currentColor" strokeWidth="1.3"/></svg>},
+  ];
+
+  const orgContent = (fsMode) => (
+    <div style={{fontFamily:"'Geist','Inter','Segoe UI',Arial,sans-serif",position:'relative',minHeight:fsMode?'100vh':200,
+      background:fsMode?'linear-gradient(135deg,#F8FAFF 0%,#F0F4FF 30%,#F5F0FF 60%,#F8FAFC 100%)':'transparent'}}>
+      <style>{ORG_ANIM_CSS}</style>
+      {/* Floating particles background — covers entire content area */}
+      <div style={{position:'absolute',top:0,left:0,right:0,bottom:0,overflow:'hidden',pointerEvents:'none',zIndex:0}}>
+        {ORG_PARTICLES.map(p=>(
+          <div key={p.id} style={{position:'absolute',bottom:`${p.startY}%`,left:`${p.x}%`,width:p.size,height:p.size,borderRadius:'50%',background:`rgba(${p.color},${p.opacity + 0.15})`,boxShadow:`0 0 ${p.size*2}px ${p.size}px rgba(${p.color},${p.opacity*0.4})`,animation:`orgP${p.id} ${p.dur}s ease-in-out ${p.delay}s infinite`}} />
+        ))}
+      </div>
+
+      <div style={{position:'relative',zIndex:1,padding:fsMode?'20px 28px':0}}>
+      {/* Fullscreen header */}
+      {fsMode&&(
+        <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:18}}>
+          <div>
+            <div style={{fontSize:18,fontWeight:800,color:'#0F172A'}}>Organogram</div>
+            <div style={{fontSize:12,color:'#64748B',fontWeight:600,marginTop:2}}>{employees.length} employees · {populatedGroups.length} groups</div>
+          </div>
+          <button type="button" onClick={()=>setIsFullscreen(false)}
+            style={{padding:'7px 16px',border:'1.5px solid #E2E8F0',borderRadius:8,fontSize:12.5,fontWeight:600,cursor:'pointer',background:'#fff',color:'#374151',fontFamily:'inherit',display:'flex',alignItems:'center',gap:6}}>
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M6 2H3.5A1.5 1.5 0 0 0 2 3.5V6m8-4h2.5A1.5 1.5 0 0 1 14 3.5V6M2 10v2.5A1.5 1.5 0 0 0 3.5 14H6m4 0h2.5a1.5 1.5 0 0 0 1.5-1.5V10" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round"/></svg>
+            Exit Full Screen
+          </button>
+        </div>
+      )}
+      <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',gap:10,flexWrap:'wrap',marginBottom:14}}>
+        <div style={{position:'relative',display:'flex',alignItems:'center'}}>
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" style={{position:'absolute',left:8,pointerEvents:'none',color:'#94A3B8'}}><circle cx="6.5" cy="6.5" r="4.5" stroke="currentColor" strokeWidth="1.4"/><line x1="10" y1="10" x2="14" y2="14" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round"/></svg>
+          <input type="text" value={organogramSearch} onChange={(e)=>setOrganogramSearch(e.target.value)} placeholder="Search employees…"
+            style={{width:180,border:'1px solid #E2E8F0',borderRadius:8,padding:'6px 28px 6px 26px',fontSize:12,color:'#334155',outline:'none',fontFamily:'inherit',background:'rgba(255,255,255,.85)',backdropFilter:'blur(6px)'}}/>
+          {organogramSearch&&<button type="button" onClick={()=>setOrganogramSearch('')} style={{position:'absolute',right:6,background:'none',border:'none',cursor:'pointer',color:'#94A3B8',fontSize:13,lineHeight:1,padding:2}}>✕</button>}
+        </div>
+        <div style={{display:'flex',alignItems:'center',gap:6,flexWrap:'wrap'}}>
+          {/* Zoom controls */}
+          <div style={{display:'flex',alignItems:'center',gap:0,background:'rgba(241,245,249,.85)',backdropFilter:'blur(6px)',borderRadius:10,padding:3}}>
+            <button type="button" onClick={zoomOut} disabled={orgZoom <= 0.5} title="Zoom out"
+              style={{width:28,height:28,display:'flex',alignItems:'center',justifyContent:'center',border:'none',borderRadius:7,background:'transparent',cursor:orgZoom<=0.5?'not-allowed':'pointer',color:orgZoom<=0.5?'#CBD5E1':'#475569'}}>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round"><path d="M5 12h14"/></svg>
+            </button>
+            <button type="button" onClick={zoomReset} title="Reset zoom"
+              style={{minWidth:44,padding:'0 8px',height:28,background:'transparent',border:'none',borderRadius:7,cursor:'pointer',fontSize:11,fontWeight:700,color:'#475569',fontFamily:'inherit'}}>
+              {Math.round(orgZoom * 100)}%
+            </button>
+            <button type="button" onClick={zoomIn} disabled={orgZoom >= 1.6} title="Zoom in"
+              style={{width:28,height:28,display:'flex',alignItems:'center',justifyContent:'center',border:'none',borderRadius:7,background:'transparent',cursor:orgZoom>=1.6?'not-allowed':'pointer',color:orgZoom>=1.6?'#CBD5E1':'#475569'}}>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round"><path d="M5 12h14M12 5v14"/></svg>
+            </button>
+          </div>
+
+          {/* View mode (Tree / By Group) */}
+          <div style={{display:'flex',background:'rgba(241,245,249,.85)',backdropFilter:'blur(6px)',borderRadius:10,padding:3,gap:2}}>
+            {VIEW_MODES.map((vm)=>{
+              const active=orgViewMode===vm.id;
+              return(
+                <button key={vm.id} type="button" onClick={()=>setOrgViewMode(vm.id)}
+                  style={{display:'flex',alignItems:'center',gap:5,padding:'5px 10px',borderRadius:7,border:'none',cursor:'pointer',fontFamily:'inherit',fontSize:12,fontWeight:active?600:500,background:active?'rgba(255,255,255,.9)':'transparent',color:active?'#1E293B':'#64748B',boxShadow:active?'0 1px 4px rgba(15,23,42,.1)':'none',transition:'all 180ms ease'}}>
+                  {vm.icon}{vm.label}
+                </button>
+              );
+            })}
+          </div>
+
+          {!fsMode&&(
+            <button type="button" onClick={()=>setIsFullscreen(true)} title="Full screen"
+              style={{width:32,height:32,display:'flex',alignItems:'center',justifyContent:'center',border:'1px solid #E2E8F0',borderRadius:8,background:'rgba(255,255,255,.85)',backdropFilter:'blur(6px)',cursor:'pointer',color:'#64748B',flexShrink:0}}>
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M2 6V3.5A1.5 1.5 0 0 1 3.5 2H6m4 0h2.5A1.5 1.5 0 0 1 14 3.5V6M2 10v2.5A1.5 1.5 0 0 0 3.5 14H6m4 0h2.5a1.5 1.5 0 0 0 1.5-1.5V10" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round"/></svg>
+            </button>
+          )}
+        </div>
+      </div>
+
+      {orgViewMode==='tree'&&populatedGroups.length>1&&(
+        <div style={{display:'flex',gap:12,flexWrap:'wrap',marginBottom:12}}>
+          {populatedGroups.map((g)=>(
+            <div key={g.id} style={{display:'flex',alignItems:'center',gap:5}}>
+              <span style={{width:8,height:8,borderRadius:'50%',background:g.pal.dot,display:'inline-block',flexShrink:0}}/>
+              <span style={{fontSize:11.5,color:'#475569',fontWeight:500}}>{g.name}</span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {allEmpty&&<div style={{padding:'14px',borderRadius:10,border:'1px solid #E9EDF2',background:'rgba(248,250,252,.85)',fontSize:12,color:'#64748B'}}>No employees uploaded yet.</div>}
+
+      {/* ── TREE VIEW ─────────────────────────────── */}
+      {!allEmpty && orgViewMode === 'tree' && (
+        <div style={{ overflow: 'auto', paddingBottom: 20 }}>
+          <div style={{ zoom: orgZoom, padding: '8px 32px 16px', display: 'flex', justifyContent: 'center', width: 'max-content', minWidth: '100%' }}>
+            {(() => {
+              const allRoots = populatedGroups.flatMap((group) => {
+                const filtered = q ? group.rootNodes.map((n) => orgFilterNode(n, q)).filter(Boolean) : group.rootNodes;
+                return filtered.length > 0 ? filtered : (q ? [] : group.members.map((m) => ({ type: 'employee', employee: m, reports: [], reportCount: 0 })));
+              });
+              if (q && allRoots.length === 0) {
+                return <div style={{ padding: '10px 14px', borderRadius: 10, border: '1px dashed #D7E2EE', background: 'rgba(250,252,255,.85)', fontSize: 12, color: '#64748B' }}>No matching employees.</div>;
+              }
+              const balaRoot = {
+                type: 'employee',
+                employee: { 'Employee Name': 'Balakumaran', 'Employee Code': 'BALA001', Designation: 'CEO' },
+                reports: allRoots,
+                reportCount: allRoots.length,
+              };
+              return <OrgNode node={balaRoot} depth={0} gid="__bala__" expandedOrgNodeIds={expandedOrgNodeIds} toggleNode={toggleNode} searchActive={!!q} />;
+            })()}
+          </div>
+        </div>
+      )}
+
+      {/* ── BY-GROUP VIEW ─────────────────────────── */}
+      {!allEmpty && orgViewMode === 'by-group' && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          {populatedGroups.map((group) => {
+            const isExp = expandedGroupIds.includes(group.id);
+            const filtered = q ? group.rootNodes.map((n) => orgFilterNode(n, q)).filter(Boolean) : group.rootNodes;
+            const groupRoots = filtered.length > 0 ? filtered : (q ? [] : group.members.map((m) => ({ type: 'employee', employee: m, reports: [], reportCount: 0 })));
+            const balaForGroup = {
+              type: 'employee',
+              employee: { 'Employee Name': 'Balakumaran', 'Employee Code': 'BALA001', Designation: 'CEO' },
+              reports: groupRoots,
+              reportCount: groupRoots.length,
+            };
+            return (
+              <div key={group.id} style={{ borderRadius: 12, border: `1.5px solid ${group.pal.border}`, background: 'rgba(255,255,255,.8)', backdropFilter: 'blur(4px)' }}>
+                <button type="button" onClick={() => toggleGroup(group.id)}
+                  style={{ width: '100%', display: 'flex', alignItems: 'center', gap: 10, padding: '12px 14px', background: 'none', border: 'none', cursor: 'pointer', textAlign: 'left', fontFamily: 'inherit' }}>
+                  <span style={{ width: 10, height: 10, borderRadius: '50%', background: group.pal.dot, flexShrink: 0 }} />
+                  <span style={{ fontSize: 13.5, fontWeight: 700, color: '#0F172A', flex: 1 }}>{group.name}</span>
+                  <span style={{ fontSize: 12, fontWeight: 700, color: group.pal.text, background: group.pal.bg, border: `1px solid ${group.pal.border}`, borderRadius: 999, padding: '3px 10px' }}>{group.members.length}</span>
+                  <span style={{ color: '#94A3B8', fontSize: 12, transform: isExp ? 'rotate(180deg)' : 'none', transition: 'transform 240ms ease' }}>&#9662;</span>
+                </button>
+                <div style={{ display: 'grid', gridTemplateRows: isExp ? '1fr' : '0fr', transition: 'grid-template-rows 900ms cubic-bezier(0.22,1,0.36,1),opacity 600ms ease', opacity: isExp ? 1 : 0 }}>
+                  <div style={{ overflow: 'hidden', minWidth: 0 }}>
+                    <div style={{ overflow: 'auto', padding: '4px 18px 24px', scrollBehavior: 'smooth' }}>
+                      <div style={{ zoom: orgZoom, display: 'flex', justifyContent: 'center', width: 'max-content', minWidth: '100%', padding: '8px 0' }}>
+                        {q && filtered.length === 0
+                          ? <div style={{ fontSize: 12, color: '#94A3B8', padding: '8px 0' }}>No matches in this group.</div>
+                          : <OrgNode node={balaForGroup} depth={0} gid={`${group.id}__bala`} expandedOrgNodeIds={expandedOrgNodeIds} toggleNode={toggleNode} searchActive={!!q} />}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      </div>
+    </div>
+  );
+
+  return isFullscreen ? (
+    <div style={{ position: 'fixed', inset: 0, zIndex: 9999, background: '#F8FAFC', overflowY: 'auto', animation: 'orgFsIn 250ms ease' }}>
+      <style>{`@keyframes orgFsIn{from{opacity:0;transform:scale(0.97)}to{opacity:1;transform:scale(1)}}`}</style>
+      {orgContent(true)}
+    </div>
+  ) : orgContent(false);
 }

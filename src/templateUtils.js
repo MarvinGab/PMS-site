@@ -539,6 +539,217 @@ export async function downloadGoalLibraryBulkTemplate(configOrPerspectives = [])
   await writeAndDownload(wb, 'zaro_goal_libraries_template.xlsx');
 }
 
+export async function downloadPrefillBulkTemplate(configOrPerspectives = []) {
+  const { default: ExcelJS } = await getExcelJS();
+  const wb = makeWorkbook(ExcelJS);
+
+  const config = Array.isArray(configOrPerspectives)
+    ? { perspectives: configOrPerspectives }
+    : (configOrPerspectives || {});
+
+  const perspectives = config.perspectives || [];
+  const goalGroups = config.goalGroups || [];
+  const perspNames = perspectives.filter(p => p.name).map(p => p.name);
+  const p1 = perspNames[0] || 'Financial';
+  const p2 = perspNames[1] || 'Customer';
+  const p3 = perspNames[2] || 'Internal Process';
+
+  const activeGroups = goalGroups.filter(g => g.prefillType);
+
+  const headers = ['Group Name', 'Card Name', 'Perspective', 'KRA Name', 'KRA Description', 'KRA Weight %', 'KPI Name', 'KPI Weight %'];
+  const colWidths = [24, 28, 22, 30, 36, 14, 30, 14];
+  const n = headers.length;
+  const KPI_COLS = [7, 8];
+  const GREY_FILL = 'FFE5E7EB';
+  const GREY_TEXT = 'FF9CA3AF';
+
+  const ws = wb.addWorksheet('Pre-fill Data', {
+    views: [{ showGridLines: false, state: 'frozen', xSplit: 0, ySplit: 1, topLeftCell: 'A2' }],
+    properties: { tabColor: { argb: C.BLUE_DARK } },
+  });
+  ws.columns = colWidths.map(w => ({ width: w }));
+
+  const hRow = ws.addRow(headers);
+  styleHeaderRow(hRow, n);
+
+  function greyKpiCells(row) {
+    for (const c of KPI_COLS) {
+      const cell = row.getCell(c);
+      applyFill(cell, GREY_FILL);
+      cell.value = '—';
+      font(cell, { color: { argb: GREY_TEXT }, italic: true });
+      applyBorder(cell, 'thin', GREY_FILL);
+    }
+  }
+
+  const GROUP_COLORS = [
+    { fill: 'FFE0E7FF', text: 'FF1E40AF', border: 'FFC7D2FE' },
+    { fill: 'FFF0FDF4', text: 'FF166534', border: 'FFBBF7D0' },
+    { fill: 'FFFDF4FF', text: 'FF701A75', border: 'FFFAE8FF' },
+    { fill: 'FFFEFCE8', text: 'FF713F12', border: 'FFFEF08A' },
+    { fill: 'FFFFF1F2', text: 'FF9F1239', border: 'FFFECDD3' },
+  ];
+
+  function groupBannerRow(groupIndex, group, prefillType) {
+    const attr = group.segmentAttr || 'All Employees';
+    const typeLabel = prefillType === 'kra-kpi' ? '📊 KRAs + KPIs — fill all columns' : '📌 KRAs only — leave KPI columns blank';
+    const text = `  ▶  GROUP: ${group.name}  |  Attribute: ${attr}  |  ${typeLabel}`;
+    const palette = GROUP_COLORS[groupIndex % GROUP_COLORS.length];
+
+    const row = ws.addRow([text]);
+    ws.mergeCells(`A${row.number}:${colLetter(n)}${row.number}`);
+    const cell = ws.getCell(`A${row.number}`);
+    applyFill(cell, palette.fill);
+    applyBorder(cell, 'medium', palette.border);
+    cell.font = { name: 'Calibri', size: 10.5, bold: true, color: { argb: palette.text } };
+    cell.alignment = { vertical: 'middle', horizontal: 'left', indent: 1 };
+    row.height = 22;
+    return row;
+  }
+
+  function styleGroupNameCell(row, groupIndex) {
+    const cell = row.getCell(1);
+    const palette = GROUP_COLORS[groupIndex % GROUP_COLORS.length];
+    applyFill(cell, palette.fill);
+    font(cell, { color: { argb: palette.text }, italic: true, size: 9.5 });
+    cell.alignment = { vertical: 'middle', horizontal: 'left', indent: 1 };
+  }
+
+  if (activeGroups.length === 0) {
+    bannerRow(ws, n, '  ↓  Example rows — delete before uploading your data', C.RED_BANNER, C.RED_TEXT);
+    const exRows = [
+      ['', 'Managing Partner to Client Director', p1, 'Revenue Growth', 'Grow quarterly revenue', '40', '', ''],
+      ['', 'Managing Partner to Client Director', p2, 'Client Satisfaction', 'Improve client relationship quality', '35', '', ''],
+      ['', 'Managing Partner to Client Director', p3, 'Delivery Excellence', 'Raise delivery standards', '25', '', ''],
+    ];
+    for (const row of exRows) {
+      const r = ws.addRow(row);
+      styleExampleRow(r, n);
+      greyKpiCells(r);
+    }
+    bannerRow(ws, n, '  ↑  Delete examples above  ·  Your pre-fill cards start here  ↓', C.BLUE_FILL, C.BLUE_DARK);
+    for (let i = 0; i < 12; i++) styleDataRow(ws.addRow(Array(n).fill('')), n, i);
+  } else {
+    activeGroups.forEach((group, gi) => {
+      const prefillType = group.prefillType || 'kra-only';
+      const isKraOnly = prefillType === 'kra-only';
+      const segValues = (group.segmentValues || []).map(v => String(v || '').trim()).filter(Boolean);
+      const cardNames = segValues.length > 0 ? segValues : [group.name || 'All Employees'];
+
+      if (gi > 0) ws.addRow([]);
+      groupBannerRow(gi, group, prefillType);
+
+      const exName = cardNames[0];
+      bannerRow(ws, n, `  ↓  Example rows for "${exName}" — delete before uploading`, C.RED_BANNER, C.RED_TEXT);
+
+      const exRows = isKraOnly
+        ? [
+            [group.name, exName, p1, 'Revenue Growth', 'Grow quarterly revenue', '40', '', ''],
+            [group.name, exName, p2, 'Customer Retention', 'Retain existing client base', '35', '', ''],
+            [group.name, exName, p3, 'Process Quality', 'Improve delivery standards', '25', '', ''],
+          ]
+        : [
+            [group.name, exName, p1, 'Revenue Growth', 'Grow quarterly revenue', '40', 'Monthly ARR', '60'],
+            [group.name, exName, p1, 'Revenue Growth', 'Grow quarterly revenue', '40', 'New Client Wins', '40'],
+            [group.name, exName, p2, 'Customer NPS', 'Net promoter score improvement', '35', 'Survey Rate', '100'],
+            [group.name, exName, p3, 'Process Quality', 'Improve delivery standards', '25', 'On-time Rate', '100'],
+          ];
+
+      for (const row of exRows) {
+        const r = ws.addRow(row);
+        styleExampleRow(r, n);
+        styleGroupNameCell(r, gi);
+        if (isKraOnly) greyKpiCells(r);
+      }
+
+      bannerRow(ws, n, `  ↑  Delete examples above  ·  Fill your ${cardNames.length} pre-fill card${cardNames.length === 1 ? '' : 's'} below  ↓`, C.BLUE_FILL, C.BLUE_DARK);
+
+      if (cardNames.length > 1) {
+        bannerRow(ws, n, `     Expected Card Names for this group:  ${cardNames.join('  ·  ')}`, 'FFF8FAFC', 'FF64748B', 16);
+      }
+
+      const blankCount = Math.min(cardNames.length * 4, 24);
+      for (let i = 0; i < blankCount; i++) {
+        const blankRow = Array(n).fill('');
+        blankRow[0] = group.name;
+        const r = ws.addRow(blankRow);
+        styleDataRow(r, n, i);
+        styleGroupNameCell(r, gi);
+        if (isKraOnly) greyKpiCells(r);
+      }
+    });
+  }
+
+  addNoteRows(ws, [
+    ['RULES & NOTES'],
+    ['• Each employee value you configured in Groups & Strategy becomes one pre-fill card here.'],
+    ['• Group Name: pre-filled automatically — do not edit. It identifies the employee group for every card.'],
+    ['• Card Name: use the exact configured value such as the designation, band, or department name. Each unique Group Name + Card Name pair becomes one pre-fill card in the UI.'],
+    ['• Perspective: must match your configured BSC perspective names exactly.'],
+    ['• KRA Weight % and KPI Weight % can be left blank, but if filled they must be numeric.'],
+    ['• KPI columns are only for groups configured as KRAs + KPIs. Grey KPI cells should be left blank.'],
+    ['• Delete all red example rows before uploading.'],
+    ['• Do not rename, reorder, or delete column headers.'],
+    perspNames.length > 0
+      ? [`• Valid Perspectives: ${perspNames.join('  |  ')}`]
+      : ['• Perspective names must match what you set in the BSC Perspectives step.'],
+  ]);
+
+  const ref = wb.addWorksheet('Reference', {
+    properties: { tabColor: { argb: 'FF64748B' } },
+  });
+  ref.columns = [{ width: 28 }, { width: 55 }];
+
+  const addRefSection = (title, rows) => {
+    const tRow = ref.addRow([title]);
+    tRow.height = 22;
+    applyFill(tRow.getCell(1), C.LABEL_FILL);
+    tRow.getCell(1).font = { name: 'Calibri', size: 11, bold: true, color: { argb: C.BLUE_DARK } };
+    for (const [a, b] of rows) {
+      const r = ref.addRow([a, b]);
+      r.height = 18;
+      font(r.getCell(1), { bold: true, color: { argb: C.GRAY_TEXT } });
+      font(r.getCell(2), { color: { argb: C.NOTE_TEXT } });
+    }
+    ref.addRow([]);
+  };
+
+  addRefSection('Column Guide', [
+    ['Group Name', 'Pre-filled automatically — identifies the employee group this pre-fill card belongs to. Do not edit.'],
+    ['Card Name', 'The exact designation / segment value that should receive this pre-fill setup. All rows for one card use the same Card Name.'],
+    ['Perspective', 'BSC perspective this KRA belongs to. Must match your configured perspective names.'],
+    ['KRA Name', 'Key Result Area that should appear ready-made for employees in this card.'],
+    ['KRA Description', 'Optional brief description of the KRA.'],
+    ['KRA Weight %', 'Optional suggested KRA weight.'],
+    ['KPI Name', 'Only for KRAs + KPIs pre-fill groups. Leave blank for KRA-only groups.'],
+    ['KPI Weight %', 'Optional suggested KPI weight.'],
+  ]);
+
+  if (activeGroups.length > 0) {
+    addRefSection('Configured Pre-fill Groups', activeGroups.map((g) => {
+      const cardNames = (g.segmentValues || []).filter(Boolean);
+      return [
+        g.name,
+        `${g.prefillType === 'kra-kpi' ? 'KRAs + KPIs' : 'KRAs only'}  |  Cards: ${(cardNames.length > 0 ? cardNames : [g.name]).join(', ')}`,
+      ];
+    }));
+  }
+
+  if (perspNames.length > 0) {
+    addRefSection('Configured Perspectives', perspNames.map(name => [name, 'Use this exact name in the Perspective column.']));
+  }
+
+  addRefSection('Common Mistakes', [
+    ['Wrong Card Name', 'Card Name must match the configured segment value exactly, otherwise the site cannot map it to the right card.'],
+    ['Edited Group Name', 'Changing Group Name breaks the mapping between the uploaded rows and the configured employee group.'],
+    ['Perspective mismatch', 'Perspective names must match your BSC configuration exactly.'],
+    ['Non-numeric weight', 'If you enter weights, use numbers only such as 40 or 12.5.'],
+    ['Filling grey KPI cells', 'Grey KPI cells belong to KRA-only groups and should be left blank.'],
+  ]);
+
+  await writeAndDownload(wb, 'zaro_prefill_data_template.xlsx');
+}
+
 /* ── PARSE BULK GOAL LIBRARY UPLOAD ─────────────────────────────────────── */
 export function parseGoalLibraryBulkXlsx(file, goalGroups = []) {
   return new Promise((resolve, reject) => {
@@ -557,7 +768,8 @@ export function parseGoalLibraryBulkXlsx(file, goalGroups = []) {
 
         const headers = (allRows[0] || []).map(h => String(h || '').trim().toLowerCase());
         const idxGroupName = headers.indexOf('group name');
-        const idxLibrary = headers.indexOf('library name');
+        let idxLibrary = headers.indexOf('library name');
+        if (idxLibrary === -1) idxLibrary = headers.indexOf('card name');
         const idxPersp = headers.indexOf('perspective');
         const idxKraName = headers.indexOf('kra name');
         const idxKraDesc = headers.indexOf('kra description');
@@ -1235,7 +1447,7 @@ export function employeeTemplateMeta(config) {
     [codeNote],
     ['• Employee Name must be a real person name. Use letters, spaces, dots, apostrophes, or hyphens only.'],
     ...(hasGoalGroups ? [['• Group Name is required on every row and must match the configured group names in the Reference sheet exactly.']] : []),
-    ['• Reporting Manager Code must match an Employee Code in this file (or an existing manager already present in the system). If the real manager is outside PMS, leave it blank for the top-most PMS participant under them.'],
+    ['• Reporting Manager Code can point to an employee in this file or to a manager outside this PMS rollout. If outside PMS, keep Reporting Manager Name/Email filled so it is treated as an intentional external manager reference.'],
     ...(hasL2 ? [['• L2 Manager Code is the skip-level manager (manager of the direct manager).']] : []),
     ...(routingNote ? [[routingNote]] : []),
     ...(requireEmail === false ? [['• Email ID is optional for this configuration.']] : []),
@@ -1301,8 +1513,8 @@ export async function downloadEmployeeTemplate(config) {
     ...(meta.needsEmail ? [['Email ID', 'Work email address. Used for login link and notifications. Must be unique per employee.']] : []),
     ...(meta.hasGoalGroups ? [['Group Name', 'The goal group this employee belongs to. Must exactly match one of the configured group names listed in the "Valid Group Names" section below. Determines which goal library and workflow applies to this employee.']] : []),
     ...meta.routingColumns.map(column => [column.label, `Used to identify the specific library slot within the employee's group. Must match one of the configured values listed in the "${column.label} Values" section below.`]),
-    ['Reporting Manager Code', 'Employee Code of the direct reporting manager. Must match an Employee Code in this file. Leave blank if this employee is at the top of the hierarchy (no manager above them).'],
-    ['Reporting Manager Name', 'Full name of the reporting manager (display only — code is the key). Leave blank if Reporting Manager Code is blank.'],
+    ['Reporting Manager Code', 'Employee Code of the direct reporting manager. It can be inside this upload or outside the PMS rollout. Leave blank only if this employee is at the top of the PMS hierarchy.'],
+    ['Reporting Manager Name', 'Full name of the reporting manager. If the manager is outside PMS, keep this filled so the upload treats it as an intentional external-manager reference.'],
     ...(meta.needsEmail ? [['Reporting Manager Email', 'Work email of the reporting manager. Used for manager summary emails.']] : []),
     ...(meta.hasL2 ? [
       ['L2 Manager Code', 'Employee Code of the skip-level manager (manager\'s manager). Optional — leave blank if the employee has no L2 reviewer.'],
@@ -1382,6 +1594,15 @@ export function validateEmployeeData(employees, config) {
   );
   const missingL1Managers = new Map();
   const missingL2Managers = new Map();
+  const outsideL1Managers = new Map();
+  const outsideL2Managers = new Map();
+
+  const addMissingManagerRef = (bucket, key, managerCode, row, employeeCode) => {
+    const entry = bucket.get(key) || { managerCode, rows: [], employeeCodes: [] };
+    entry.rows.push(row);
+    if (employeeCode) entry.employeeCodes.push(employeeCode);
+    bucket.set(key, entry);
+  };
 
   employees.forEach((emp, idx) => {
     const row = idx + 2; // 1-based, +1 for header row
@@ -1502,23 +1723,64 @@ export function validateEmployeeData(employees, config) {
 
     // Reporting Manager (blank = top of hierarchy, allowed)
     const l1Code = getEmployeeRowValue(emp, 'Reporting Manager Code');
-    if (l1Code && !allCodes.has(l1Code.toLowerCase())) {
-      const key = l1Code.toLowerCase();
-      const entry = missingL1Managers.get(key) || { managerCode: l1Code, rows: [], employeeCodes: [] };
-      entry.rows.push(row);
-      if (code) entry.employeeCodes.push(code);
-      missingL1Managers.set(key, entry);
+    if (l1Code) {
+      const l1Key = l1Code.toLowerCase();
+      if (!allCodes.has(l1Key)) {
+        const l1Name = getEmployeeRowValue(emp, 'Reporting Manager Name');
+        const l1Email = getEmployeeRowValue(emp, 'Reporting Manager Email');
+        const hasExternalManagerContext = !!(l1Name || l1Email);
+        addMissingManagerRef(
+          hasExternalManagerContext ? outsideL1Managers : missingL1Managers,
+          l1Key,
+          l1Code,
+          row,
+          code
+        );
+      } else {
+        // Manager code exists in file — check name consistency
+        const l1Name = getEmployeeRowValue(emp, 'Reporting Manager Name');
+        if (l1Name) {
+          const empRecord = seenCodes.get(l1Key);
+          if (empRecord && empRecord.normalizedName && normalizeEmployeeNameForCompare(l1Name) !== empRecord.normalizedName) {
+            warnings.push({
+              row, code: code || '—', field: 'l1_manager',
+              category: 'manager_name_mismatch',
+              message: `Reporting Manager Name "${l1Name}" doesn't match Employee Name "${empRecord.name}" for code "${l1Code}" (row ${empRecord.row}). Verify the correct name.`,
+            });
+          }
+        }
+      }
     }
 
     // L2 Manager (optional per employee)
     if (hasL2) {
       const l2Code = getEmployeeRowValue(emp, 'L2 Manager Code');
-      if (l2Code && !allCodes.has(l2Code.toLowerCase())) {
-        const key = l2Code.toLowerCase();
-        const entry = missingL2Managers.get(key) || { managerCode: l2Code, rows: [], employeeCodes: [] };
-        entry.rows.push(row);
-        if (code) entry.employeeCodes.push(code);
-        missingL2Managers.set(key, entry);
+      if (l2Code) {
+        const l2Key = l2Code.toLowerCase();
+        if (!allCodes.has(l2Key)) {
+          const l2Name = getEmployeeRowValue(emp, 'L2 Manager Name');
+          const hasExternalL2Context = !!l2Name;
+          addMissingManagerRef(
+            hasExternalL2Context ? outsideL2Managers : missingL2Managers,
+            l2Key,
+            l2Code,
+            row,
+            code
+          );
+        } else {
+          // L2 Manager code exists in file — check name consistency
+          const l2Name = getEmployeeRowValue(emp, 'L2 Manager Name');
+          if (l2Name) {
+            const empRecord = seenCodes.get(l2Key);
+            if (empRecord && empRecord.normalizedName && normalizeEmployeeNameForCompare(l2Name) !== empRecord.normalizedName) {
+              warnings.push({
+                row, code: code || '—', field: 'l2_manager',
+                category: 'manager_name_mismatch',
+                message: `L2 Manager Name "${l2Name}" doesn't match Employee Name "${empRecord.name}" for code "${l2Code}" (row ${empRecord.row}). Verify the correct name.`,
+              });
+            }
+          }
+        }
       }
     }
   });
@@ -1529,7 +1791,7 @@ export function validateEmployeeData(employees, config) {
       code: entry.employeeCodes[0] || '—',
       field: 'l1_manager',
       category: 'manager_not_in_file',
-      message: `Manager "${entry.managerCode}" is referenced in ${formatIssueRowList(entry.rows)} but is not in this upload. Keep this only if that manager already exists in the system. If they are outside PMS, do not upload them as an employee; blank Reporting Manager Code for the top-most PMS participant under them instead.`,
+      message: `Manager "${entry.managerCode}" is referenced in ${formatIssueRowList(entry.rows)} but is not in this upload. If this is intentional (outside current PMS rollout), fill Reporting Manager Name (and email when used) on those rows; otherwise fix the manager code.`,
     });
   }
 
@@ -1539,7 +1801,27 @@ export function validateEmployeeData(employees, config) {
       code: entry.employeeCodes[0] || '—',
       field: 'l2_manager',
       category: 'l2_manager_not_in_file',
-      message: `L2 Manager "${entry.managerCode}" is referenced in ${formatIssueRowList(entry.rows)} but is not in this upload. Keep this only if that manager already exists in the system; otherwise leave L2 blank for those employees instead of uploading a non-PMS manager row.`,
+      message: `L2 Manager "${entry.managerCode}" is referenced in ${formatIssueRowList(entry.rows)} but is not in this upload. If this is intentional (outside current PMS rollout), fill L2 Manager Name on those rows; otherwise fix the L2 manager code.`,
+    });
+  }
+
+  for (const entry of outsideL1Managers.values()) {
+    warnings.push({
+      row: entry.rows[0],
+      code: entry.employeeCodes[0] || '—',
+      field: 'l1_manager',
+      category: 'manager_outside_pms',
+      message: `Manager "${entry.managerCode}" is referenced in ${formatIssueRowList(entry.rows)} and is outside the current PMS upload. This is allowed and those employees will remain top-level within this rollout.`,
+    });
+  }
+
+  for (const entry of outsideL2Managers.values()) {
+    warnings.push({
+      row: entry.rows[0],
+      code: entry.employeeCodes[0] || '—',
+      field: 'l2_manager',
+      category: 'l2_manager_outside_pms',
+      message: `L2 Manager "${entry.managerCode}" is referenced in ${formatIssueRowList(entry.rows)} and is outside the current PMS upload. This is allowed.`,
     });
   }
 

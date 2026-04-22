@@ -1,12 +1,13 @@
-import { useState, useEffect, Component } from 'react';
+import { useState, useEffect, Component, lazy, Suspense } from 'react';
 import { AppProvider, useApp } from './AppContext';
 import LoginPage from './pages/LoginPage';
 import DashboardPage from './pages/DashboardPage';
 import OrganizationsPage from './pages/OrganizationsPage';
 import CreateOrgPage from './pages/CreateOrgPage';
-import PMSWizard from './PMSWizard';
 import EmployeePage from './pages/EmployeePage';
-import HRCycleDashboard from './pages/HRCycleDashboard';
+
+const PMSWizard = lazy(() => import('./PMSWizard'));
+const HRCycleDashboard = lazy(() => import('./pages/HRCycleDashboard'));
 
 class ErrorBoundary extends Component {
   constructor(props) {
@@ -138,7 +139,9 @@ function Router() {
   }, []);
 
   useEffect(() => {
-    if (authReady && !role && route !== 'login') {
+    // The employee route owns its own session (EMP_SESSION_KEY) independent of the app-level role,
+    // so don't bounce refreshes on #employee to login based on the app-level role being empty.
+    if (authReady && !role && route !== 'login' && route !== 'employee') {
       window.location.hash = '#login';
       setRoute('login');
     }
@@ -197,7 +200,9 @@ export default function App() {
     <ErrorBoundary>
       <AppProvider>
         <ErrorBoundary>
-          <Router />
+          <Suspense fallback={<BootScreen />}>
+            <Router />
+          </Suspense>
         </ErrorBoundary>
       </AppProvider>
     </ErrorBoundary>
