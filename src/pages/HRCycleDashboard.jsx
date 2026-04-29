@@ -1,10 +1,20 @@
 import { useState, useMemo, useEffect, useRef } from 'react';
-import { APP_DATA_KEY, useApp } from '../AppContext';
+import { useApp } from '../AppContext';
 import { LaunchOverview, OrgChartPanel } from '../PMSWizard';
 import zaroLogo from '../../images/final zaro logo.png';
-import { EMP_SESSION_KEY } from '../AppContext';
 import { downloadEmployeeTemplate, parseEmployeeXlsx } from '../templateUtils';
 import { BRAND_PALETTES, resolveBrandPalette, deriveCustomPalette, buildHeroGradient, buildSwatchGradient, buildHeroBackground, resolveHero, fillAccent, CARD_ACCENT_MODES, CARD_PREVIEW_TINTS, normalizeCardsMode, cardStripeWidth } from '../brandPalettes';
+import {
+  readWorkflowSync,
+  persistWorkflow,
+  hydrateWorkflow,
+  readWizardStateSync,
+  persistWizardState,
+  hydrateWizardState,
+  readEmployeeCredentialsSync,
+  persistEmployeeCredentials,
+  persistEmployeeSession,
+} from '../backend/stateStore';
 
 const WIZARD_STATE_KEY = 'zarohr_pms_wizard_state_v1';
 const GOAL_WORKFLOW_KEY = 'zarohr_goal_workflow_v1';
@@ -14,15 +24,23 @@ function normalizeCodeStr(value) { return String(value || '').trim().toLowerCase
 function workflowStorageKey(orgKey) { return `${GOAL_WORKFLOW_KEY}:${orgKey || 'default'}`; }
 function loadWorkflowState(orgKey) {
   if (!orgKey) return { submissions: {}, notifications: [] };
-  try {
-    const raw = localStorage.getItem(workflowStorageKey(orgKey));
-    const parsed = raw ? JSON.parse(raw) : null;
-    return { submissions: parsed?.submissions || {}, notifications: Array.isArray(parsed?.notifications) ? parsed.notifications : [] };
-  } catch { return { submissions: {}, notifications: [] }; }
+  return readWorkflowSync(orgKey);
 }
 function saveWorkflowState(orgKey, wf) {
   if (!orgKey) return;
-  try { localStorage.setItem(workflowStorageKey(orgKey), JSON.stringify(wf)); } catch (_) {}
+  persistWorkflow(orgKey, wf);
+}
+
+function resolveEmployeeEmail(emp = {}) {
+  return (
+    emp['Email ID'] ||
+    emp.Email ||
+    emp.email ||
+    emp['Work Email'] ||
+    emp['Official Email'] ||
+    emp['Email Address'] ||
+    ''
+  );
 }
 // Map a PMS stage id → the matching submission.status.
 function stageToStatus(stageId) {
@@ -215,18 +233,12 @@ function getEmpStage(emp) { return emp._pmsStage || 'goal-creation'; }
 
 /* ── persistence ─────────────────────────────────────────── */
 function loadWizardConfig(orgKey) {
-  try {
-    const raw = localStorage.getItem(`${WIZARD_STATE_KEY}:${orgKey}`);
-    if (raw) { const p = JSON.parse(raw); if (p?.config) return p.config; }
-  } catch {}
-  return null;
+  const p = readWizardStateSync(orgKey);
+  return p?.config || null;
 }
 function saveWizardConfig(orgKey, newConfig) {
-  try {
-    const raw  = localStorage.getItem(`${WIZARD_STATE_KEY}:${orgKey}`);
-    const base = raw ? JSON.parse(raw) : {};
-    localStorage.setItem(`${WIZARD_STATE_KEY}:${orgKey}`, JSON.stringify({ ...base, config: newConfig }));
-  } catch {}
+  const base = readWizardStateSync(orgKey) || {};
+  persistWizardState(orgKey, { ...base, config: newConfig });
 }
 
 /* ── confetti ─────────────────────────────────────────────── */
@@ -342,7 +354,8 @@ const NAV_MODULES = [
   { id: 'mgr-change',  icon: '👤', label: 'Manager Change',      group: 'ops' },
   { id: 'grp-transfer',icon: '📦', label: 'Group Transfer',      group: 'ops' },
   { id: 'roster',      icon: '📋', label: 'Add / Remove',        group: 'ops' },
-  { id: 'test-creds',  icon: '🧪', label: 'Test Credentials',    group: 'dev' },
+  { id: 'test-creds',  icon: '👁',  label: 'View as Proxy',       group: 'dev' },
+  { id: 'hr-team',     icon: '🛡',  label: 'HR Team',             group: 'dev' },
   { id: 'config',      icon: '⚙️',  label: 'Configuration',       group: 'dev' },
 ];
 
@@ -541,10 +554,124 @@ function ModuleOverview({ employees, groups, orgName, congratsDismissed, onDismi
 }
 
 /* ── Employee Status ────────────────────────────────────────── */
-function ModuleEmpStatus({ employees, groups }) {
-  const [search, setSearch] = useState('');
+function LoginStatusPill({ status }) {
+  const map = {
+    permanent: { label: 'Password Set',   color: '#15803D', bg: '#F0FDF4', border: '#BBF7D0' },
+    temp:      { label: 'Temp Password',  color: '#B45309', bg: '#FFFBEB', border: '#FDE68A' },
+    none:      { label: 'Not Activated',  color: '#64748B', bg: '#F8FAFC', border: '#E2E8F0' },
+  };
+  const s = map[status] || map.none;
+  return (
+    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 11, fontWeight: 600, color: s.color, background: s.bg, border: `1px solid ${s.border}`, borderRadius: 999, padding: '3px 9px', whiteSpace: 'nowrap' }}>
+      <span style={{ width: 6, height: 6, borderRadius: '50%', background: s.color, flexShrink: 0 }} />
+      {s.label}
+    </span>
+  );
+}
+
+async function downloadEmpStatusExcel({ employees, credentials, workflow, orgName }) {
+  const ExcelJS = (await import('exceljs')).default;
+  const wb = new ExcelJS.Workbook();
+  wb.creator = 'Zaro HR';
+  wb.created = new Date();
+
+  const ws = wb.addWorksheet('Employee Status', { views: [{ state: 'frozen', ySplit: 2 }] });
+
+  const COLS = [
+    { header: 'Employee Name',      key: 'name',       width: 24 },
+    { header: 'Employee Code',      key: 'code',       width: 14 },
+    { header: 'Designation',        key: 'desig',      width: 22 },
+    { header: 'Group',              key: 'group',      width: 18 },
+    { header: 'Manager Name',       key: 'mgrName',    width: 22 },
+    { header: 'Manager Code',       key: 'mgrCode',    width: 14 },
+    { header: 'PMS Stage',          key: 'stage',      width: 20 },
+    { header: 'Login Status',       key: 'loginStatus',width: 18 },
+    { header: 'Goals Submitted',    key: 'goalsCount', width: 16 },
+    { header: 'Submission Status',  key: 'subStatus',  width: 20 },
+  ];
+  ws.columns = COLS;
+
+  // Title row
+  ws.insertRow(1, []);
+  ws.mergeCells(`A1:${String.fromCharCode(64 + COLS.length)}1`);
+  const titleCell = ws.getCell('A1');
+  titleCell.value = `${orgName || 'Organization'} — Employee Status Report`;
+  titleCell.font = { name: 'Calibri', size: 13, bold: true, color: { argb: 'FFFFFFFF' } };
+  titleCell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1D4ED8' } };
+  titleCell.alignment = { vertical: 'middle', horizontal: 'left', indent: 2 };
+  ws.getRow(1).height = 28;
+
+  // Header row (row 2)
+  const hRow = ws.getRow(2);
+  COLS.forEach((col, i) => {
+    const cell = hRow.getCell(i + 1);
+    cell.value = col.header;
+    cell.font = { name: 'Calibri', size: 10.5, bold: true, color: { argb: 'FFFFFFFF' } };
+    cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1E3A8A' } };
+    cell.alignment = { vertical: 'middle', horizontal: 'left', indent: 1 };
+    cell.border = { bottom: { style: 'thin', color: { argb: 'FF1D4ED8' } } };
+  });
+  hRow.height = 20;
+
+  const loginStatusLabel = (code) => {
+    const cred = credentials[code] || credentials[String(code || '').toLowerCase()];
+    if (!cred) return 'Not Activated';
+    return cred.isTemp ? 'Temp Password' : 'Password Set';
+  };
+
+  employees.forEach((emp, i) => {
+    const code = String(emp['Employee Code'] || '').trim();
+    const sub  = workflow?.submissions?.[code.toLowerCase()] || workflow?.submissions?.[code] || {};
+    const goals = Array.isArray(sub.goals) ? sub.goals.length : 0;
+    const stage = EMP_STAGES.find((s) => s.id === getEmpStage(emp))?.label || getEmpStage(emp);
+
+    const dataRow = ws.addRow({
+      name:       emp['Employee Name'] || '',
+      code,
+      desig:      emp.Designation || emp.Role || '',
+      group:      emp['Group Name'] || emp.assignedGoalGroupName || '',
+      mgrName:    emp['Reporting Manager Name'] || '',
+      mgrCode:    emp['Reporting Manager Code'] || '',
+      stage,
+      loginStatus: loginStatusLabel(code),
+      goalsCount:  goals,
+      subStatus:   sub.status || 'not started',
+    });
+    const isAlt = i % 2 !== 0;
+    dataRow.eachCell((cell) => {
+      cell.font = { name: 'Calibri', size: 10.5 };
+      cell.alignment = { vertical: 'middle', horizontal: 'left', indent: 1 };
+      if (isAlt) cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF8FAFC' } };
+      cell.border = { bottom: { style: 'hair', color: { argb: 'FFE2E8F0' } } };
+    });
+    dataRow.height = 18;
+  });
+
+  // Auto-filter on header row
+  ws.autoFilter = { from: { row: 2, column: 1 }, to: { row: 2, column: COLS.length } };
+
+  const buf = await wb.xlsx.writeBuffer();
+  const blob = new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = `employee-status-${new Date().toISOString().slice(0, 10)}.xlsx`;
+  a.click(); URL.revokeObjectURL(url);
+}
+
+function ModuleEmpStatus({ employees, groups, orgKey, org }) {
+  const [search, setSearch]           = useState('');
   const [filterStage, setFilterStage] = useState('');
   const [filterGroup, setFilterGroup] = useState('');
+  const [filterLogin, setFilterLogin] = useState('');
+  const [filtersOpen, setFiltersOpen] = useState(false);
+  const [downloading, setDownloading] = useState(false);
+
+  // Read credentials once on mount and whenever orgKey changes
+  const credentials = useMemo(() => {
+    return readEmployeeCredentialsSync();
+  }, [orgKey]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const workflow = useMemo(() => loadWorkflowState(orgKey), [orgKey]);
 
   const empByCode = useMemo(() => {
     const m = {};
@@ -552,67 +679,173 @@ function ModuleEmpStatus({ employees, groups }) {
     return m;
   }, [employees]);
 
+  function getLoginStatus(code) {
+    const c = String(code || '').trim();
+    const cred = credentials[c] || credentials[c.toLowerCase()];
+    if (!cred) return 'none';
+    return cred.isTemp ? 'temp' : 'permanent';
+  }
+
+  // Summary counts for the stat bar
+  const counts = useMemo(() => {
+    let permanent = 0, temp = 0, none = 0;
+    employees.forEach((e) => {
+      const s = getLoginStatus(e['Employee Code']);
+      if (s === 'permanent') permanent++;
+      else if (s === 'temp') temp++;
+      else none++;
+    });
+    return { permanent, temp, none };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [employees, credentials]);
+
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
     return employees.filter((e) => {
       const matchSearch = !q || `${e['Employee Name'] || ''} ${e['Employee Code'] || ''}`.toLowerCase().includes(q);
       const matchStage  = !filterStage || getEmpStage(e) === filterStage;
       const matchGroup  = !filterGroup || (e['Group Name'] || e.assignedGoalGroupName || '') === filterGroup;
-      return matchSearch && matchStage && matchGroup;
+      const matchLogin  = !filterLogin || getLoginStatus(e['Employee Code']) === filterLogin;
+      return matchSearch && matchStage && matchGroup && matchLogin;
     });
-  }, [employees, search, filterStage, filterGroup]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [employees, search, filterStage, filterGroup, filterLogin, credentials]);
 
   const selectStyle = { border: '1.5px solid #E2E8F0', borderRadius: 8, padding: '7px 10px', fontSize: 12.5, fontFamily: 'inherit', background: '#fff', color: '#0D1117', outline: 'none' };
 
+  async function handleDownload() {
+    setDownloading(true);
+    try {
+      await downloadEmpStatusExcel({ employees: filtered, credentials, workflow, orgName: org?.name });
+    } finally { setDownloading(false); }
+  }
+
   return (
     <div>
-      <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginBottom: 16, alignItems: 'center' }}>
-        <div style={{ position: 'relative', flex: '1 1 200px' }}>
-          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" style={{ position: 'absolute', left: 9, top: '50%', transform: 'translateY(-50%)', pointerEvents: 'none', color: '#94A3B8' }}>
-            <circle cx="6.5" cy="6.5" r="4.5" stroke="currentColor" strokeWidth="1.4"/><line x1="10" y1="10" x2="14" y2="14" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round"/>
-          </svg>
-          <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search name or code…"
-            style={{ ...selectStyle, width: '100%', boxSizing: 'border-box', paddingLeft: 28 }} />
-        </div>
-        <select value={filterStage} onChange={(e) => setFilterStage(e.target.value)} style={selectStyle}>
-          <option value="">All Stages</option>
-          {EMP_STAGES.map((s) => <option key={s.id} value={s.id}>{s.label}</option>)}
-        </select>
-        <select value={filterGroup} onChange={(e) => setFilterGroup(e.target.value)} style={selectStyle}>
-          <option value="">All Groups</option>
-          {groups.map((g) => <option key={g.id} value={g.name}>{g.name}</option>)}
-        </select>
-        <span style={{ fontSize: 12, color: '#94A3B8', marginLeft: 'auto' }}>{filtered.length} of {employees.length}</span>
+      {/* Stat bar */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(160px,1fr))', gap: 10, marginBottom: 16 }}>
+        {[
+          { label: 'Password Set',  value: counts.permanent, color: '#15803D', bg: '#F0FDF4', border: '#BBF7D0', filter: 'permanent' },
+          { label: 'Temp Password', value: counts.temp,      color: '#B45309', bg: '#FFFBEB', border: '#FDE68A', filter: 'temp' },
+          { label: 'Not Activated', value: counts.none,      color: '#64748B', bg: '#F8FAFC', border: '#E2E8F0', filter: 'none' },
+          { label: 'Total',         value: employees.length, color: '#1D4ED8', bg: '#EFF6FF', border: '#BFDBFE', filter: ''    },
+        ].map(({ label, value, color, bg, border, filter }) => (
+          <button key={label} type="button" onClick={() => setFilterLogin(filterLogin === filter && filter ? '' : filter)}
+            style={{ textAlign: 'left', background: filterLogin === filter && filter ? bg : '#fff', border: `1.5px solid ${filterLogin === filter && filter ? border : '#E9EDF2'}`, borderRadius: 10, padding: '12px 14px', cursor: filter ? 'pointer' : 'default', transition: 'all 160ms ease', fontFamily: 'inherit' }}>
+            <div style={{ fontSize: 22, fontWeight: 800, color, lineHeight: 1 }}>{value}</div>
+            <div style={{ fontSize: 11.5, color: '#64748B', marginTop: 4, fontWeight: 500 }}>{label}</div>
+          </button>
+        ))}
       </div>
 
+      {/* Search + Filters toggle + Download */}
+      {(() => {
+        const activeFilterCount = (filterStage ? 1 : 0) + (filterGroup ? 1 : 0) + (filterLogin ? 1 : 0);
+        const anyActive = !!(search || activeFilterCount);
+        return (
+          <>
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: filtersOpen ? 8 : 12 }}>
+              <div style={{ position: 'relative', flex: '1 1 200px' }}>
+                <svg width="14" height="14" viewBox="0 0 16 16" fill="none" style={{ position: 'absolute', left: 9, top: '50%', transform: 'translateY(-50%)', pointerEvents: 'none', color: '#94A3B8' }}>
+                  <circle cx="6.5" cy="6.5" r="4.5" stroke="currentColor" strokeWidth="1.4"/><line x1="10" y1="10" x2="14" y2="14" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round"/>
+                </svg>
+                <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search name or code…"
+                  style={{ ...selectStyle, width: '100%', boxSizing: 'border-box', paddingLeft: 28 }} />
+              </div>
+
+              {/* Filters toggle */}
+              <button type="button" onClick={() => setFiltersOpen(v => !v)}
+                style={{ display: 'inline-flex', alignItems: 'center', gap: 7, padding: '7px 13px', background: filtersOpen || activeFilterCount > 0 ? '#EEF2FF' : '#fff', color: filtersOpen || activeFilterCount > 0 ? '#4338CA' : '#475569', border: `1.5px solid ${filtersOpen || activeFilterCount > 0 ? '#C7D2FE' : '#E2E8F0'}`, borderRadius: 8, fontSize: 12.5, fontWeight: 600, cursor: 'pointer', fontFamily: 'inherit', transition: 'all 160ms ease', flexShrink: 0 }}>
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/></svg>
+                Filters
+                {activeFilterCount > 0 && <span style={{ background: '#4338CA', color: '#fff', borderRadius: 999, fontSize: 10.5, fontWeight: 700, padding: '1px 7px' }}>{activeFilterCount}</span>}
+                <svg width="10" height="10" viewBox="0 0 16 16" fill="none" style={{ transform: filtersOpen ? 'rotate(180deg)' : 'none', transition: 'transform 200ms ease' }}><path d="M3 6l5 5 5-5" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"/></svg>
+              </button>
+
+              {anyActive && (
+                <button type="button" onClick={() => { setSearch(''); setFilterStage(''); setFilterGroup(''); setFilterLogin(''); }}
+                  style={{ padding: '7px 12px', background: '#fff', color: '#475569', border: '1.5px solid #E2E8F0', borderRadius: 8, fontSize: 12.5, cursor: 'pointer', fontFamily: 'inherit', flexShrink: 0 }}>
+                  Clear
+                </button>
+              )}
+
+              <div style={{ marginLeft: 'auto', display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 3, flexShrink: 0 }}>
+                <button type="button" onClick={handleDownload} disabled={downloading}
+                  style={{ display: 'inline-flex', alignItems: 'center', gap: 6, padding: '7px 14px', background: downloading ? '#F1F5F9' : '#0F172A', color: downloading ? '#94A3B8' : '#fff', border: 'none', borderRadius: 8, fontSize: 12.5, fontWeight: 600, cursor: downloading ? 'default' : 'pointer', fontFamily: 'inherit' }}>
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                  {downloading ? 'Preparing…' : 'Download Excel'}
+                </button>
+                <span style={{ fontSize: 11, color: filtered.length < employees.length ? '#B45309' : '#94A3B8' }}>
+                  {filtered.length < employees.length
+                    ? `${filtered.length} of ${employees.length} employees (filtered)`
+                    : `All ${employees.length} employees`}
+                </span>
+              </div>
+            </div>
+
+            {/* Collapsible filter panel */}
+            <div style={{ display: 'grid', gridTemplateRows: filtersOpen ? '1fr' : '0fr', opacity: filtersOpen ? 1 : 0, transition: 'grid-template-rows 260ms cubic-bezier(0.22,1,0.36,1), opacity 200ms ease', marginBottom: filtersOpen ? 12 : 0 }}>
+              <div style={{ overflow: 'hidden', minHeight: 0 }}>
+                <div style={{ background: '#FAFBFF', border: '1px solid #E2E8F0', borderRadius: 10, padding: '12px 14px', display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 10 }}>
+                  <div>
+                    <div style={{ fontSize: 11, fontWeight: 700, color: '#94A3B8', textTransform: 'uppercase', letterSpacing: '.05em', marginBottom: 5 }}>Stage</div>
+                    <select value={filterStage} onChange={(e) => setFilterStage(e.target.value)} style={{ ...selectStyle, width: '100%' }}>
+                      <option value="">All Stages</option>
+                      {EMP_STAGES.map((s) => <option key={s.id} value={s.id}>{s.label}</option>)}
+                    </select>
+                  </div>
+                  <div>
+                    <div style={{ fontSize: 11, fontWeight: 700, color: '#94A3B8', textTransform: 'uppercase', letterSpacing: '.05em', marginBottom: 5 }}>Group</div>
+                    <select value={filterGroup} onChange={(e) => setFilterGroup(e.target.value)} style={{ ...selectStyle, width: '100%' }}>
+                      <option value="">All Groups</option>
+                      {groups.map((g) => <option key={g.id} value={g.name}>{g.name}</option>)}
+                    </select>
+                  </div>
+                  <div>
+                    <div style={{ fontSize: 11, fontWeight: 700, color: '#94A3B8', textTransform: 'uppercase', letterSpacing: '.05em', marginBottom: 5 }}>Login Status</div>
+                    <select value={filterLogin} onChange={(e) => setFilterLogin(e.target.value)} style={{ ...selectStyle, width: '100%' }}>
+                      <option value="">All</option>
+                      <option value="permanent">Password Set</option>
+                      <option value="temp">Temp Password</option>
+                      <option value="none">Not Activated</option>
+                    </select>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </>
+        );
+      })()}
+
+      {/* Table */}
       <div style={{ border: '1px solid #E9EDF2', borderRadius: 10, overflow: 'hidden' }}>
         <table style={{ width: '100%', fontSize: 12.5, borderCollapse: 'collapse', tableLayout: 'fixed' }}>
           <colgroup>
-            <col style={{ width: '18%' }} />
+            <col style={{ width: '17%' }} />
             <col style={{ width: '8%' }} />
-            <col style={{ width: '20%' }} />
-            <col style={{ width: '14%' }} />
             <col style={{ width: '16%' }} />
-            <col style={{ width: '24%' }} />
+            <col style={{ width: '11%' }} />
+            <col style={{ width: '14%' }} />
+            <col style={{ width: '14%' }} />
+            <col style={{ width: '20%' }} />
           </colgroup>
           <thead>
             <tr style={{ background: '#F8FAFC' }}>
-              {['Employee', 'Code', 'Designation', 'Group', 'Manager', 'Stage'].map((h) => (
+              {['Employee', 'Code', 'Designation', 'Group', 'Manager', 'Login', 'Stage'].map((h) => (
                 <th key={h} style={{ padding: '9px 12px', textAlign: 'left', fontSize: 11, fontWeight: 700, color: '#94A3B8', textTransform: 'uppercase', letterSpacing: '0.05em', borderBottom: '1px solid #E9EDF2' }}>{h}</th>
               ))}
             </tr>
           </thead>
           <tbody>
-            {filtered.length === 0 && <tr><td colSpan={6} style={{ padding: '20px', textAlign: 'center', color: '#94A3B8' }}>No employees match your filter.</td></tr>}
-            {filtered.slice(0, 50).map((emp, i) => {
+            {filtered.length === 0 && <tr><td colSpan={7} style={{ padding: '20px', textAlign: 'center', color: '#94A3B8' }}>No employees match your filter.</td></tr>}
+            {filtered.slice(0, 100).map((emp, i) => {
               const code = emp['Employee Code'] || '—';
               const name = emp['Employee Name'] || code;
-              const desig = emp.Designation || emp['Designation'] || emp.Role || '—';
+              const desig = emp.Designation || emp.Role || '—';
               const grp   = emp['Group Name'] || emp.assignedGoalGroupName || '—';
               const mgrCode = String(emp['Reporting Manager Code'] || '').trim();
               const mgrEmp  = mgrCode ? empByCode[mgrCode.toLowerCase()] : null;
-              const mgrStoredName = String(emp['Reporting Manager Name'] || '').trim();
-              const mgrName = mgrEmp?.['Employee Name'] || mgrStoredName || mgrCode || '—';
+              const mgrName = mgrEmp?.['Employee Name'] || String(emp['Reporting Manager Name'] || '').trim() || mgrCode || '—';
               return (
                 <tr key={code + i} style={{ borderTop: '1px solid #F1F5F9', background: i % 2 === 0 ? '#fff' : '#FAFBFC' }}>
                   <td style={{ padding: '9px 12px' }}>
@@ -622,19 +855,20 @@ function ModuleEmpStatus({ employees, groups }) {
                     </div>
                   </td>
                   <td style={{ padding: '9px 12px', fontFamily: 'monospace', fontWeight: 700, color: '#4F46E5' }}>{code}</td>
-                  <td style={{ padding: '9px 12px', color: '#64748B' }}>{desig}</td>
-                  <td style={{ padding: '9px 12px', color: '#64748B' }}>{grp}</td>
+                  <td style={{ padding: '9px 12px', color: '#64748B', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{desig}</td>
+                  <td style={{ padding: '9px 12px', color: '#64748B', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{grp}</td>
                   <td style={{ padding: '9px 12px' }}>
-                    <div style={{ fontSize: 12.5, fontWeight: 500, color: '#374151' }}>{mgrName}</div>
-                    {mgrCode && <div style={{ fontSize: 11, color: '#94A3B8', fontFamily: 'monospace' }}>{mgrCode}</div>}
+                    <div style={{ fontSize: 12, fontWeight: 500, color: '#374151', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{mgrName}</div>
+                    {mgrCode && <div style={{ fontSize: 10.5, color: '#94A3B8', fontFamily: 'monospace' }}>{mgrCode}</div>}
                   </td>
+                  <td style={{ padding: '9px 12px' }}><LoginStatusPill status={getLoginStatus(code)} /></td>
                   <td style={{ padding: '9px 12px' }}><StagePill stageId={getEmpStage(emp)} /></td>
                 </tr>
               );
             })}
           </tbody>
         </table>
-        {filtered.length > 50 && <div style={{ padding: '8px 12px', fontSize: 11.5, color: '#94A3B8', borderTop: '1px solid #F1F5F9' }}>Showing 50 of {filtered.length} — use search to narrow down</div>}
+        {filtered.length > 100 && <div style={{ padding: '8px 12px', fontSize: 11.5, color: '#94A3B8', borderTop: '1px solid #F1F5F9' }}>Showing 100 of {filtered.length} — use search to narrow down</div>}
       </div>
     </div>
   );
@@ -2134,11 +2368,17 @@ function ModuleTestCreds({ employees, org, orgKey }) {
   function copyPass() { navigator.clipboard?.writeText(pass).catch(() => {}); setPassCopied(true); setTimeout(() => setPassCopied(false), 1500); }
 
   function openEmp(emp) {
-    try {
-      const s = JSON.stringify({ isLoggedIn: true, role: 'employee', empCode: emp['Employee Code'], userName: emp['Employee Name'], designation: emp.Designation || '', managerCode: emp['Reporting Manager Code'] || '', orgKey, _impersonatedFromAdmin: true });
-      localStorage.setItem(EMP_SESSION_KEY, s); sessionStorage.setItem(EMP_SESSION_KEY, s);
-      window.location.hash = '#employee';
-    } catch {}
+    persistEmployeeSession({
+      isLoggedIn: true,
+      role: 'employee',
+      empCode: emp['Employee Code'],
+      userName: emp['Employee Name'],
+      designation: emp.Designation || '',
+      managerCode: emp['Reporting Manager Code'] || '',
+      orgKey,
+      _impersonatedFromAdmin: true,
+    });
+    window.location.hash = '#employee';
   }
 
   const empByCode = useMemo(() => {
@@ -2231,21 +2471,7 @@ function ModuleTestCreds({ employees, org, orgKey }) {
 
   return (
     <div>
-      {/* Shared password card */}
-      <div style={{ background: 'linear-gradient(135deg,#FFFBEB 0%,#FFFFFF 100%)', border: '1px solid #FDE68A', borderRadius: 12, padding: '14px 18px', marginBottom: 16, display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
-        <div style={{ width: 36, height: 36, borderRadius: 10, background: '#FEF3C7', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#92400E', flexShrink: 0 }}>
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="8" cy="15" r="4"/><path d="m10.85 12.15 4.65-4.65"/><path d="m18 5-3 3"/><path d="m15 8 4 4"/></svg>
-        </div>
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ fontSize: 13.5, fontWeight: 700, color: '#78350F' }}>Shared test password</div>
-          <div style={{ fontSize: 12, color: '#92400E', marginTop: 2 }}>Use this to log in as any of the employees below.</div>
-        </div>
-        <button type="button" onClick={copyPass} style={{ fontFamily: 'monospace', fontWeight: 700, fontSize: 13, color: passCopied ? '#15803D' : '#78350F', background: passCopied ? '#F0FDF4' : '#FFFFFF', border: `1.5px solid ${passCopied ? '#BBF7D0' : '#FDE68A'}`, borderRadius: 8, padding: '8px 14px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6 }}>
-          {passCopied ? '✓ copied' : pass}
-        </button>
-      </div>
-
-      {/* Search + Filter button row */}
+      {/* Search + Filter + temp-password pill row */}
       <div style={{ display: 'flex', gap: 10, alignItems: 'center', marginBottom: filtersOpen ? 10 : 12, flexWrap: 'wrap' }}>
         <div style={{ position: 'relative', flex: '1 1 240px', minWidth: 200 }}>
           <svg width="14" height="14" viewBox="0 0 16 16" fill="none" style={{ position: 'absolute', left: 10, top: '50%', transform: 'translateY(-50%)', pointerEvents: 'none', color: '#94A3B8' }}>
@@ -2266,7 +2492,15 @@ function ModuleTestCreds({ employees, org, orgKey }) {
           <button type="button" onClick={() => { setSearch(''); setFilterGroup(''); setFilterStage(''); setFilterManager(''); }}
             style={{ padding: '8px 14px', background: '#fff', color: '#475569', border: '1.5px solid #E2E8F0', borderRadius: 8, fontSize: 12.5, cursor: 'pointer', fontFamily: 'inherit' }}>Clear all</button>
         )}
-        <span style={{ fontSize: 12, color: '#94A3B8', marginLeft: 'auto' }}>{filtered.length} of {allRows.length}{externalManagers.length > 0 ? ` · ${externalManagers.length} external mgr${externalManagers.length !== 1 ? 's' : ''}` : ''}</span>
+        <span style={{ fontSize: 12, color: '#94A3B8' }}>{filtered.length} of {allRows.length}{externalManagers.length > 0 ? ` · ${externalManagers.length} external mgr${externalManagers.length !== 1 ? 's' : ''}` : ''}</span>
+        {/* Temp password — compact pill, pushed to the far right */}
+        <button type="button" onClick={copyPass} title="Shared temp password — click to copy"
+          style={{ marginLeft: 'auto', display: 'inline-flex', alignItems: 'center', gap: 6, padding: '6px 12px', background: passCopied ? '#F0FDF4' : '#FFFBEB', color: passCopied ? '#15803D' : '#92400E', border: `1.5px solid ${passCopied ? '#BBF7D0' : '#FDE68A'}`, borderRadius: 999, fontSize: 12, fontWeight: 700, cursor: 'pointer', fontFamily: 'monospace', transition: 'all 160ms ease', flexShrink: 0 }}>
+          {passCopied
+            ? <><span style={{ fontFamily: 'inherit' }}>✓</span> copied</>
+            : <><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}><circle cx="8" cy="15" r="4"/><path d="m10.85 12.15 4.65-4.65"/><path d="m18 5-3 3"/><path d="m15 8 4 4"/></svg>{pass}</>
+          }
+        </button>
       </div>
 
       {/* Collapsible filters panel */}
@@ -3047,14 +3281,399 @@ function ModuleConfig({ config, org, onEditSetup, onBrandChange }) {
 }
 
 /* ══════════════════════════════════════════════════════════════
+   MODULE: HR TEAM
+══════════════════════════════════════════════════════════════ */
+const OPS_MODULES_LIST = [
+  { id: 'overview',      label: 'Overview' },
+  { id: 'emp-status',    label: 'Employee Status' },
+  { id: 'comms',         label: 'Communications' },
+  { id: 'stage',         label: 'Stage Control' },
+  { id: 'mgr-change',    label: 'Manager Change' },
+  { id: 'grp-transfer',  label: 'Group Transfer' },
+  { id: 'roster',        label: 'Add / Remove' },
+  { id: 'test-creds',    label: 'View as Proxy' },
+];
+
+function genTempPassword() {
+  return 'HR@' + Math.random().toString(36).slice(2, 6).toUpperCase();
+}
+
+function ModuleHRTeam({ org, orgKey, employees, groups, onOrgChange }) {
+  const hrTeam = org?.hrTeam || [];
+  const [panel, setPanel] = useState(null); // null | 'co-admin' | 'scoped-hr'
+  const [formName, setFormName] = useState('');
+  const [formEmail, setFormEmail] = useState('');
+  const [formEmpCode, setFormEmpCode] = useState('');
+  const [formIsInPMS, setFormIsInPMS] = useState(false);
+  const [formEmpSearch, setFormEmpSearch] = useState('');
+  const [formScopeType, setFormScopeType] = useState('all');
+  const [formScopeGroups, setFormScopeGroups] = useState([]);
+  const [formScopeEmps, setFormScopeEmps] = useState([]);
+  const [formModules, setFormModules] = useState(OPS_MODULES_LIST.map((m) => m.id));
+  const [error, setError] = useState('');
+  const [genPass, setGenPass] = useState('');
+  const [scopeSearch, setScopeSearch] = useState('');
+
+  const empMatches = useMemo(() => {
+    const q = formEmpSearch.trim().toLowerCase();
+    if (!q) return [];
+    return employees.filter((e) => {
+      const code = String(e['Employee Code'] || '').toLowerCase();
+      const name = String(e['Employee Name'] || '').toLowerCase();
+      return code.includes(q) || name.includes(q);
+    }).slice(0, 8);
+  }, [employees, formEmpSearch]);
+
+  const scopeEmpMatches = useMemo(() => {
+    const q = scopeSearch.trim().toLowerCase();
+    if (!q) return [];
+    return employees.filter((e) => {
+      const code = String(e['Employee Code'] || '').toLowerCase();
+      const name = String(e['Employee Name'] || '').toLowerCase();
+      return (code.includes(q) || name.includes(q)) && !formScopeEmps.includes(String(e['Employee Code'] || '').trim());
+    }).slice(0, 6);
+  }, [employees, scopeSearch, formScopeEmps]);
+
+  function resetForm() {
+    setFormName(''); setFormEmail(''); setFormEmpCode(''); setFormIsInPMS(false);
+    setFormEmpSearch(''); setFormScopeType('all'); setFormScopeGroups([]);
+    setFormScopeEmps([]); setFormModules(OPS_MODULES_LIST.map((m) => m.id)); setError(''); setGenPass('');
+    setScopeSearch('');
+  }
+
+  function openAdd(type) { resetForm(); setGenPass(genTempPassword()); setPanel(type); }
+
+  function handleSave() {
+    setError('');
+    if (formIsInPMS && !formEmpCode) { setError('Please select a PMS employee.'); return; }
+    if (!formIsInPMS && !formName.trim()) { setError('Name is required.'); return; }
+    if (!formIsInPMS && !formEmail.trim()) { setError('Email is required.'); return; }
+    const type = panel;
+    let name = formName.trim();
+    const email = formEmail.trim();
+    if (formIsInPMS) {
+      const emp = employees.find((e) => String(e['Employee Code'] || '').trim() === formEmpCode);
+      name = emp?.['Employee Name'] || formEmpCode;
+    }
+    if (!formIsInPMS) {
+      if (hrTeam.find((m) => m.email === email)) { setError('A team member with this email already exists.'); return; }
+      if (email.toLowerCase() === (org.hrAdminEmail || '').toLowerCase()) { setError('This email belongs to the primary HR Admin.'); return; }
+    }
+    const newMember = {
+      id: `hrm_${Date.now()}`,
+      type,
+      name,
+      email: formIsInPMS ? '' : email,
+      empCode: formIsInPMS ? formEmpCode : null,
+      isInPMS: formIsInPMS,
+      ...(type === 'scoped-hr' ? {
+        scopeType: formScopeType,
+        scopeGroups: formScopeType === 'group' ? formScopeGroups : [],
+        scopeEmpCodes: formScopeType === 'manual' ? formScopeEmps : [],
+        allowedModules: formModules,
+      } : {}),
+      password: formIsInPMS ? null : genPass,
+      isTemp: !formIsInPMS,
+    };
+    if (!formIsInPMS) {
+      const creds = readEmployeeCredentialsSync();
+      creds[email] = {
+        password: genPass,
+        name,
+        email,
+        designation: type === 'co-admin' ? 'Co-Admin HR' : 'Scoped HR',
+        managerCode: '',
+        orgKey: orgKey || '',
+        isTemp: true,
+        isHRTeam: true,
+        hrTeamType: type,
+      };
+      persistEmployeeCredentials(creds);
+    }
+    onOrgChange({ hrTeam: [...hrTeam, newMember] });
+    setPanel(null);
+    resetForm();
+  }
+
+  function removeMember(id) {
+    const m = hrTeam.find((x) => x.id === id);
+    if (m && !m.isInPMS && m.email) {
+      const creds = readEmployeeCredentialsSync();
+      delete creds[m.email];
+      persistEmployeeCredentials(creds);
+    }
+    onOrgChange({ hrTeam: hrTeam.filter((x) => x.id !== id) });
+  }
+
+  const S = {
+    label: { fontSize: 11.5, fontWeight: 700, color: '#64748B', textTransform: 'uppercase', letterSpacing: '0.07em', marginBottom: 6, display: 'block' },
+    input: { width: '100%', padding: '7px 10px', border: '1.5px solid #E2E8F0', borderRadius: 8, fontSize: 13, fontFamily: 'inherit', outline: 'none', boxSizing: 'border-box' },
+    btnPrimary: { padding: '8px 18px', background: '#4F46E5', color: '#fff', border: 'none', borderRadius: 8, fontSize: 13, fontWeight: 600, cursor: 'pointer', fontFamily: 'inherit' },
+    btnSecondary: { padding: '8px 16px', background: '#F1F5F9', color: '#374151', border: '1.5px solid #E2E8F0', borderRadius: 8, fontSize: 13, fontWeight: 500, cursor: 'pointer', fontFamily: 'inherit' },
+  };
+
+  function MemberCard({ m }) {
+    const [showPass, setShowPass] = useState(false);
+    const [copied, setCopied] = useState(false);
+    const livePass = useMemo(() => {
+      if (m.isInPMS || !m.email) return null;
+      return readEmployeeCredentialsSync()?.[m.email]?.password || m.password;
+    }, [m]);
+    function copy() { navigator.clipboard?.writeText(livePass || '').catch(() => {}); setCopied(true); setTimeout(() => setCopied(false), 1500); }
+    return (
+      <div style={{ background: '#fff', border: '1.5px solid #E9EDF2', borderRadius: 10, padding: '14px 16px', display: 'flex', alignItems: 'flex-start', gap: 12 }}>
+        <div style={{ width: 36, height: 36, borderRadius: '50%', background: m.type === 'co-admin' ? '#EEF2FF' : '#FEF9C3', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 16, flexShrink: 0 }}>{m.type === 'co-admin' ? '🛡' : '🔒'}</div>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 2, flexWrap: 'wrap' }}>
+            <span style={{ fontWeight: 600, fontSize: 13.5, color: '#0F172A' }}>{m.name}</span>
+            {m.type === 'co-admin'
+              ? <span style={{ fontSize: 10.5, fontWeight: 700, background: '#EEF2FF', color: '#4338CA', borderRadius: 6, padding: '2px 7px' }}>Co-Admin</span>
+              : <span style={{ fontSize: 10.5, fontWeight: 700, background: '#FEF9C3', color: '#92400E', borderRadius: 6, padding: '2px 7px' }}>Scoped HR</span>}
+            {m.isInPMS && <span style={{ fontSize: 10.5, fontWeight: 600, background: '#F0FDF4', color: '#15803D', borderRadius: 6, padding: '2px 7px' }}>PMS Employee</span>}
+          </div>
+          <div style={{ fontSize: 12, color: '#64748B' }}>{m.isInPMS ? `Employee Code: ${m.empCode}` : m.email}</div>
+          {m.type === 'scoped-hr' && (
+            <div style={{ fontSize: 11.5, color: '#94A3B8', marginTop: 3 }}>
+              Scope: {m.scopeType === 'all' ? 'All employees' : m.scopeType === 'group' ? (m.scopeGroups?.join(', ') || 'No groups') : `${m.scopeEmpCodes?.length || 0} employees`}
+              {' · '}{m.allowedModules?.length || 0} modules
+            </div>
+          )}
+          {!m.isInPMS && livePass && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 6 }}>
+              <span style={{ fontSize: 11.5, color: '#64748B' }}>Temp pass:</span>
+              <span style={{ fontSize: 12, fontFamily: 'monospace', color: '#374151', background: '#F8FAFC', border: '1px solid #E2E8F0', borderRadius: 5, padding: '1px 7px' }}>{showPass ? livePass : '••••••••'}</span>
+              <button type="button" onClick={() => setShowPass((p) => !p)} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 13, padding: 0, color: '#94A3B8' }}>{showPass ? '🙈' : '👁'}</button>
+              <button type="button" onClick={copy} style={{ border: 'none', cursor: 'pointer', fontSize: 11, padding: '1px 6px', color: copied ? '#16A34A' : '#64748B', background: copied ? '#F0FDF4' : '#F1F5F9', borderRadius: 5 }}>{copied ? '✓' : 'Copy'}</button>
+            </div>
+          )}
+        </div>
+        <button type="button" onClick={() => removeMember(m.id)} style={{ background: 'none', border: '1.5px solid #FCA5A5', borderRadius: 7, padding: '4px 10px', fontSize: 11.5, color: '#DC2626', cursor: 'pointer', fontFamily: 'inherit', flexShrink: 0 }}>Remove</button>
+      </div>
+    );
+  }
+
+  const coadmins = hrTeam.filter((m) => m.type === 'co-admin');
+  const scopedHRs = hrTeam.filter((m) => m.type === 'scoped-hr');
+
+  return (
+    <div style={{ maxWidth: 760 }}>
+      <div style={{ marginBottom: 24 }}>
+        <h2 style={{ fontSize: 20, fontWeight: 700, color: '#0F172A', margin: 0 }}>HR Team</h2>
+        <p style={{ fontSize: 13, color: '#64748B', margin: '4px 0 0' }}>Assign co-admins and scoped HR members for this organization.</p>
+      </div>
+
+      {/* Primary HR Admin */}
+      <div style={{ background: '#F0FDF4', border: '1.5px solid #BBF7D0', borderRadius: 10, padding: '12px 16px', marginBottom: 24, display: 'flex', alignItems: 'center', gap: 12 }}>
+        <div style={{ width: 36, height: 36, borderRadius: '50%', background: '#DCFCE7', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 16, flexShrink: 0 }}>👑</div>
+        <div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <span style={{ fontWeight: 600, fontSize: 13.5, color: '#15803D' }}>{org.hrAdminName}</span>
+            <span style={{ fontSize: 10.5, fontWeight: 700, background: '#DCFCE7', color: '#15803D', borderRadius: 6, padding: '2px 7px' }}>Primary HR Admin</span>
+          </div>
+          <div style={{ fontSize: 12, color: '#16A34A' }}>{org.hrAdminEmail}</div>
+        </div>
+      </div>
+
+      {/* Co-Admins */}
+      <div style={{ marginBottom: 24 }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
+          <div>
+            <div style={{ fontWeight: 700, fontSize: 14, color: '#0F172A' }}>Co-Admins</div>
+            <div style={{ fontSize: 12, color: '#64748B', marginTop: 1 }}>Full HR access, including HR team management.</div>
+          </div>
+          <button type="button" onClick={() => openAdd('co-admin')} style={S.btnPrimary}>+ Add Co-Admin</button>
+        </div>
+        {coadmins.length === 0
+          ? <div style={{ border: '1.5px dashed #E2E8F0', borderRadius: 10, padding: 20, textAlign: 'center', color: '#94A3B8', fontSize: 13 }}>No co-admins assigned yet.</div>
+          : <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>{coadmins.map((m) => <MemberCard key={m.id} m={m} />)}</div>}
+      </div>
+
+      {/* Scoped HR */}
+      <div style={{ marginBottom: 24 }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
+          <div>
+            <div style={{ fontWeight: 700, fontSize: 14, color: '#0F172A' }}>Scoped HR</div>
+            <div style={{ fontSize: 12, color: '#64748B', marginTop: 1 }}>Partial access, scoped to a subset of employees and modules.</div>
+          </div>
+          <button type="button" onClick={() => openAdd('scoped-hr')} style={S.btnPrimary}>+ Add Scoped HR</button>
+        </div>
+        {scopedHRs.length === 0
+          ? <div style={{ border: '1.5px dashed #E2E8F0', borderRadius: 10, padding: 20, textAlign: 'center', color: '#94A3B8', fontSize: 13 }}>No scoped HR members assigned yet.</div>
+          : <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>{scopedHRs.map((m) => <MemberCard key={m.id} m={m} />)}</div>}
+      </div>
+
+      {/* ADD PANEL MODAL */}
+      {panel && (
+        <div style={{ position: 'fixed', inset: 0, zIndex: 200, background: 'rgba(15,23,42,0.45)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20 }}
+          onClick={(e) => { if (e.target === e.currentTarget) { setPanel(null); resetForm(); } }}>
+          <div style={{ background: '#fff', borderRadius: 14, width: '100%', maxWidth: 500, maxHeight: '90vh', overflowY: 'auto', padding: '28px 28px 24px', boxShadow: '0 20px 60px rgba(15,23,42,0.16)' }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20 }}>
+              <h3 style={{ margin: 0, fontSize: 16, fontWeight: 700, color: '#0F172A' }}>{panel === 'co-admin' ? 'Add Co-Admin' : 'Add Scoped HR'}</h3>
+              <button type="button" onClick={() => { setPanel(null); resetForm(); }} style={{ background: 'none', border: 'none', fontSize: 18, cursor: 'pointer', color: '#94A3B8', padding: '2px 6px' }}>✕</button>
+            </div>
+
+            <div style={{ marginBottom: 18 }}>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 10, cursor: 'pointer', padding: '10px 14px', background: '#F8FAFC', border: '1.5px solid #E2E8F0', borderRadius: 8 }}>
+                <input type="checkbox" checked={formIsInPMS} onChange={(e) => { setFormIsInPMS(e.target.checked); setFormEmpCode(''); setFormEmpSearch(''); }} style={{ width: 15, height: 15, accentColor: '#4F46E5' }} />
+                <div>
+                  <div style={{ fontSize: 13, fontWeight: 600, color: '#0F172A' }}>Also a PMS Employee</div>
+                  <div style={{ fontSize: 11.5, color: '#64748B' }}>Link to an existing employee for dual-role access</div>
+                </div>
+              </label>
+            </div>
+
+            {formIsInPMS ? (
+              <div style={{ marginBottom: 18 }}>
+                <label style={S.label}>Select Employee</label>
+                <input style={S.input} placeholder="Search by name or code…" value={formEmpSearch} onChange={(e) => setFormEmpSearch(e.target.value)} />
+                {empMatches.length > 0 && (
+                  <div style={{ border: '1.5px solid #E2E8F0', borderRadius: 8, marginTop: 4, overflow: 'hidden' }}>
+                    {empMatches.map((e) => {
+                      const code = String(e['Employee Code'] || '').trim();
+                      const sel = formEmpCode === code;
+                      return (
+                        <button key={code} type="button" onClick={() => { setFormEmpCode(code); setFormEmpSearch(e['Employee Name'] || code); }}
+                          style={{ width: '100%', display: 'flex', alignItems: 'center', gap: 10, padding: '8px 12px', background: sel ? '#EEF2FF' : '#fff', border: 'none', borderBottom: '1px solid #F1F5F9', cursor: 'pointer', fontFamily: 'inherit', textAlign: 'left' }}>
+                          <span style={{ fontSize: 12.5, color: '#0F172A', fontWeight: sel ? 600 : 400 }}>{e['Employee Name']}</span>
+                          <span style={{ fontSize: 11.5, color: '#94A3B8', marginLeft: 'auto' }}>{code}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+                {formEmpCode && <div style={{ marginTop: 6, fontSize: 12, color: '#16A34A', fontWeight: 500 }}>✓ Selected: {employees.find((e) => String(e['Employee Code'] || '').trim() === formEmpCode)?.['Employee Name'] || formEmpCode}</div>}
+              </div>
+            ) : (
+              <>
+                <div style={{ marginBottom: 14 }}>
+                  <label style={S.label}>Full Name</label>
+                  <input style={S.input} placeholder="e.g. Ramesh Kumar" value={formName} onChange={(e) => setFormName(e.target.value)} />
+                </div>
+                <div style={{ marginBottom: 14 }}>
+                  <label style={S.label}>Email Address</label>
+                  <input style={S.input} type="email" placeholder="e.g. ramesh@company.com" value={formEmail} onChange={(e) => setFormEmail(e.target.value)} />
+                </div>
+                <div style={{ background: '#FFFBEB', border: '1.5px solid #FDE68A', borderRadius: 8, padding: '10px 14px', marginBottom: 18, display: 'flex', alignItems: 'center', gap: 10 }}>
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontSize: 11.5, color: '#92400E', fontWeight: 600 }}>Temporary Password</div>
+                    <div style={{ fontSize: 13, fontFamily: 'monospace', color: '#0F172A', fontWeight: 700 }}>{genPass}</div>
+                  </div>
+                  <button type="button" onClick={() => navigator.clipboard?.writeText(genPass).catch(() => {})} style={{ ...S.btnSecondary, fontSize: 11.5, padding: '5px 10px' }}>Copy</button>
+                </div>
+              </>
+            )}
+
+            {panel === 'scoped-hr' && (
+              <>
+                <div style={{ marginBottom: 18 }}>
+                  <label style={S.label}>Allowed Modules</label>
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                    {OPS_MODULES_LIST.map((m) => {
+                      const on = formModules.includes(m.id);
+                      return (
+                        <button key={m.id} type="button" onClick={() => setFormModules((prev) => on ? prev.filter((x) => x !== m.id) : [...prev, m.id])}
+                          style={{ padding: '4px 10px', borderRadius: 20, border: `1.5px solid ${on ? '#4F46E5' : '#E2E8F0'}`, background: on ? '#EEF2FF' : '#fff', color: on ? '#4338CA' : '#64748B', fontSize: 12, fontWeight: on ? 600 : 400, cursor: 'pointer', fontFamily: 'inherit' }}>
+                          {m.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+                <div style={{ marginBottom: 18 }}>
+                  <label style={S.label}>Employee Scope</label>
+                  <div style={{ display: 'flex', gap: 8, marginBottom: 10 }}>
+                    {[['all', 'All Employees'], ['group', 'By Group'], ['manual', 'Manual Select']].map(([v, l]) => (
+                      <button key={v} type="button" onClick={() => setFormScopeType(v)}
+                        style={{ padding: '5px 12px', borderRadius: 7, border: `1.5px solid ${formScopeType === v ? '#4F46E5' : '#E2E8F0'}`, background: formScopeType === v ? '#EEF2FF' : '#fff', color: formScopeType === v ? '#4338CA' : '#64748B', fontSize: 12, fontWeight: formScopeType === v ? 600 : 400, cursor: 'pointer', fontFamily: 'inherit' }}>
+                        {l}
+                      </button>
+                    ))}
+                  </div>
+                  {formScopeType === 'group' && (
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                      {groups.length === 0
+                        ? <span style={{ fontSize: 12, color: '#94A3B8' }}>No groups configured.</span>
+                        : groups.map((g) => {
+                            const on = formScopeGroups.includes(g.name);
+                            return (
+                              <button key={g.name} type="button" onClick={() => setFormScopeGroups((prev) => on ? prev.filter((x) => x !== g.name) : [...prev, g.name])}
+                                style={{ padding: '4px 10px', borderRadius: 20, border: `1.5px solid ${on ? '#4F46E5' : '#E2E8F0'}`, background: on ? '#EEF2FF' : '#fff', color: on ? '#4338CA' : '#64748B', fontSize: 12, cursor: 'pointer', fontFamily: 'inherit' }}>
+                                {g.name}
+                              </button>
+                            );
+                          })}
+                    </div>
+                  )}
+                  {formScopeType === 'manual' && (
+                    <div>
+                      <input style={S.input} placeholder="Search employees…" value={scopeSearch} onChange={(e) => setScopeSearch(e.target.value)} />
+                      {scopeEmpMatches.length > 0 && (
+                        <div style={{ border: '1.5px solid #E2E8F0', borderRadius: 8, marginTop: 4, overflow: 'hidden' }}>
+                          {scopeEmpMatches.map((e) => {
+                            const code = String(e['Employee Code'] || '').trim();
+                            return (
+                              <button key={code} type="button" onClick={() => { setFormScopeEmps((prev) => [...prev, code]); setScopeSearch(''); }}
+                                style={{ width: '100%', display: 'flex', alignItems: 'center', gap: 10, padding: '7px 12px', background: '#fff', border: 'none', borderBottom: '1px solid #F1F5F9', cursor: 'pointer', fontFamily: 'inherit', textAlign: 'left' }}>
+                                <span style={{ fontSize: 12.5, color: '#0F172A' }}>{e['Employee Name']}</span>
+                                <span style={{ fontSize: 11.5, color: '#94A3B8', marginLeft: 'auto' }}>{code}</span>
+                              </button>
+                            );
+                          })}
+                        </div>
+                      )}
+                      {formScopeEmps.length > 0 && (
+                        <div style={{ marginTop: 8, display: 'flex', flexWrap: 'wrap', gap: 5 }}>
+                          {formScopeEmps.map((code) => {
+                            const emp = employees.find((e) => String(e['Employee Code'] || '').trim() === code);
+                            return (
+                              <span key={code} style={{ display: 'inline-flex', alignItems: 'center', gap: 5, background: '#EEF2FF', border: '1px solid #C7D2FE', borderRadius: 20, padding: '2px 8px 2px 10px', fontSize: 12, color: '#3730A3' }}>
+                                {emp?.['Employee Name'] || code}
+                                <button type="button" onClick={() => setFormScopeEmps((prev) => prev.filter((c) => c !== code))} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 14, color: '#818CF8', padding: 0, lineHeight: 1 }}>×</button>
+                              </span>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              </>
+            )}
+
+            {error && <div style={{ background: '#FEF2F2', border: '1px solid #FCA5A5', borderRadius: 7, padding: '8px 12px', fontSize: 12.5, color: '#DC2626', marginBottom: 14 }}>{error}</div>}
+            <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+              <button type="button" onClick={() => { setPanel(null); resetForm(); }} style={S.btnSecondary}>Cancel</button>
+              <button type="button" onClick={handleSave} style={S.btnPrimary}>Add Member</button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ══════════════════════════════════════════════════════════════
    MAIN COMPONENT
 ══════════════════════════════════════════════════════════════ */
 export default function HRCycleDashboard() {
-  const { orgKey, orgs, setOrgs, logout } = useApp();
+  const { orgKey, orgs, setOrgs, logout, isCoAdmin, isScopedHR, allowedModules: sessionAllowedModules, empCode: sessionEmpCode, hrTeamId, userName } = useApp();
   const org = orgs.find((o) => o.key === orgKey) || {};
+  const hrTeamMember = useMemo(() => (org?.hrTeam || []).find((m) => m.id === hrTeamId) || null, [org, hrTeamId]);
 
-  const config  = useMemo(() => loadWizardConfig(orgKey), [orgKey]);
+  const [config, setConfig] = useState(() => loadWizardConfig(orgKey));
   const groups  = useMemo(() => config?.goalGroups || [], [config]);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!orgKey) return undefined;
+    hydrateWizardState(orgKey).then((state) => {
+      if (cancelled) return;
+      setConfig(state?.config || null);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [orgKey]);
 
   const [liveEmployees, setLiveEmployees] = useState(() =>
     Array.isArray(config?.employeeUploadData?.employees) ? config.employeeUploadData.employees : []
@@ -3063,9 +3682,44 @@ export default function HRCycleDashboard() {
     setLiveEmployees(Array.isArray(config?.employeeUploadData?.employees) ? config.employeeUploadData.employees : []);
   }, [config]);
 
+  // Ensure every employee in this org has a credential entry so they can log in via LoginPage.
+  // Runs whenever the employee list or org changes. Skips employees that already have credentials
+  // (preserves any permanent passwords they've already set).
+  useEffect(() => {
+    const tempPass = org?.temporaryPassword;
+    if (!tempPass || !liveEmployees.length) return;
+    const existing = readEmployeeCredentialsSync();
+    let changed = false;
+    liveEmployees.forEach((emp) => {
+      const code = String(emp['Employee Code'] || '').trim();
+      const email = String(resolveEmployeeEmail(emp) || '').trim().toLowerCase();
+      if (code && !existing[code]) {
+        existing[code] = {
+          password: tempPass,
+          name: emp['Employee Name'] || '',
+          email,
+          empCode: code,
+          designation: emp.Designation || emp.Role || '',
+          managerCode: emp['Reporting Manager Code'] || '',
+          orgKey: orgKey || '',
+          isTemp: true,
+        };
+        changed = true;
+      } else if (code && email && existing[code] && existing[code].email !== email) {
+        existing[code] = { ...existing[code], email };
+        changed = true;
+      }
+    });
+    if (changed) persistEmployeeCredentials(existing);
+  }, [liveEmployees, org?.temporaryPassword, orgKey]);
+
   function handleEmpUpdate(updated) {
     setLiveEmployees(updated);
-    if (config) saveWizardConfig(orgKey, { ...config, employeeUploadData: { ...config.employeeUploadData, employees: updated } });
+    if (config) {
+      const nextConfig = { ...config, employeeUploadData: { ...config.employeeUploadData, employees: updated } };
+      setConfig(nextConfig);
+      saveWizardConfig(orgKey, nextConfig);
+    }
   }
 
   // ── Truth-source bridge ────────────────────────────────────────────────────
@@ -3088,6 +3742,11 @@ export default function HRCycleDashboard() {
       setSubmissionStatuses(m);
     }
     reread();
+    void hydrateWorkflow(orgKey).then((wf) => {
+      const m = {};
+      Object.entries(wf?.submissions || {}).forEach(([k, s]) => { if (s?.status) m[k] = s.status; });
+      setSubmissionStatuses(m);
+    });
     const wfKey = workflowStorageKey(orgKey);
     function onStorage(e) { if (e.key === wfKey) reread(); }
     window.addEventListener('storage', onStorage);
@@ -3146,25 +3805,69 @@ export default function HRCycleDashboard() {
 
   function updateOrgBrand(patch) {
     const nextOrgs = orgs.map((o) => (o.key === orgKey ? { ...o, ...patch } : o));
-    try {
-      const raw = localStorage.getItem(APP_DATA_KEY);
-      const base = raw ? JSON.parse(raw) : {};
-      localStorage.setItem(APP_DATA_KEY, JSON.stringify({
-        ...base,
-        organizationsData: nextOrgs,
-      }));
-    } catch (_) {
-      return false;
-    }
     setOrgs(nextOrgs);
     return true;
   }
 
+  // Scoped HR: only show modules they're allowed; hide config + hr-team always.
+  // Co-admins: full access (including hr-team management).
+  const visibleNavModules = useMemo(() => {
+    if (isScopedHR) {
+      const allowed = new Set(sessionAllowedModules || []);
+      return NAV_MODULES.filter((m) => allowed.has(m.id));
+    }
+    return NAV_MODULES;
+  }, [isScopedHR, sessionAllowedModules]);
+
   const NAV_GROUPS = [
-    { label: 'Main',       items: NAV_MODULES.filter((m) => m.group === 'main') },
-    { label: 'Operations', items: NAV_MODULES.filter((m) => m.group === 'ops') },
-    { label: 'Dev',        items: NAV_MODULES.filter((m) => m.group === 'dev') },
-  ];
+    { label: 'Main',       items: visibleNavModules.filter((m) => m.group === 'main') },
+    { label: 'Operations', items: visibleNavModules.filter((m) => m.group === 'ops') },
+    { label: 'Dev',        items: visibleNavModules.filter((m) => m.group === 'dev') },
+  ].filter((g) => g.items.length > 0);
+
+  // Scoped HR: filter employees down to their assigned scope.
+  const scopedEmployees = useMemo(() => {
+    if (!isScopedHR || !hrTeamMember) return liveEmployeesWithStage;
+    const { scopeType, scopeGroups = [], scopeEmpCodes = [] } = hrTeamMember;
+    if (scopeType === 'all') return liveEmployeesWithStage;
+    if (scopeType === 'group') {
+      const groupSet = new Set(scopeGroups);
+      return liveEmployeesWithStage.filter((e) => groupSet.has(e.Group || e['Goal Group'] || e.Department || ''));
+    }
+    if (scopeType === 'manual') {
+      const codeSet = new Set(scopeEmpCodes.map((c) => String(c).trim()));
+      return liveEmployeesWithStage.filter((e) => codeSet.has(String(e['Employee Code'] || '').trim()));
+    }
+    return liveEmployeesWithStage;
+  }, [isScopedHR, hrTeamMember, liveEmployeesWithStage]);
+
+  const empsForModules = isScopedHR ? scopedEmployees : liveEmployeesWithStage;
+
+  // If active module is no longer visible (e.g. scoped HR), reset to first allowed.
+  useEffect(() => {
+    if (!visibleNavModules.find((m) => m.id === activeModule)) {
+      const first = visibleNavModules[0]?.id || 'overview';
+      setActiveModule(first);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visibleNavModules]);
+
+  // Dual-role switcher: if this HR is also a PMS employee, allow switching to employee view.
+  const canSwitchRoles = !!sessionEmpCode && (isCoAdmin || isScopedHR);
+  function switchToEmployeeView() {
+    const emp = liveEmployees.find((e) => String(e['Employee Code'] || '').trim() === String(sessionEmpCode).trim());
+    persistEmployeeSession({
+      empCode: sessionEmpCode,
+      name: emp?.['Employee Name'] || userName,
+      designation: emp?.Designation || '',
+      managerCode: emp?.['Reporting Manager Code'] || '',
+      orgKey: orgKey || '',
+      _dualRoleFromHR: true,
+    });
+    window.location.hash = '#employee';
+  }
+
+  function onHRTeamChange(patch) { updateOrgBrand(patch); }
   return (
     <div style={{ height: '100vh', overflow: 'hidden', background: '#F5F7FA', fontFamily: "'Geist','Inter','Segoe UI',Arial,sans-serif", fontSize: 14, color: '#0D1117', display: 'flex', flexDirection: 'column' }}>
 
@@ -3216,6 +3919,18 @@ export default function HRCycleDashboard() {
           {org.name}
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, justifySelf: 'end' }}>
+          {(isCoAdmin || isScopedHR) && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '3px 10px', background: isCoAdmin ? '#EEF2FF' : '#FEF9C3', border: `1px solid ${isCoAdmin ? '#C7D2FE' : '#FDE68A'}`, borderRadius: 20 }}>
+              <span style={{ fontSize: 11, fontWeight: 700, color: isCoAdmin ? '#4338CA' : '#92400E' }}>{isCoAdmin ? '🛡 Co-Admin' : '🔒 Scoped HR'}</span>
+            </div>
+          )}
+          {canSwitchRoles && (
+            <button type="button" onClick={switchToEmployeeView}
+              style={{ padding: '6px 12px', background: '#fff', border: '1.5px solid #E2E8F0', borderRadius: 8, fontSize: 12, fontWeight: 600, color: '#4338CA', cursor: 'pointer', fontFamily: 'inherit', display: 'inline-flex', alignItems: 'center', gap: 6 }}
+              title="Switch to your employee view">
+              <span>👤</span> My Employee View
+            </button>
+          )}
           <div style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '3px 10px', background: '#F0FDF4', border: '1px solid #BBF7D0', borderRadius: 20 }}>
             <span style={{ width: 6, height: 6, borderRadius: '50%', background: '#22C55E', display: 'inline-block' }} />
             <span style={{ fontSize: 11.5, fontWeight: 600, color: '#16A34A' }}>Live</span>
@@ -3266,10 +3981,12 @@ export default function HRCycleDashboard() {
             >
               ↩ Sign out
             </button>
-            <button type="button" onClick={goBackToSetup}
-              style={{ width: '100%', padding: '7px 10px', background: 'none', border: '1px solid #E2E8F0', borderRadius: 8, fontSize: 12, color: '#64748B', cursor: 'pointer', fontFamily: 'inherit', textAlign: 'left' }}>
-              ← Edit Setup
-            </button>
+            {!isCoAdmin && !isScopedHR && (
+              <button type="button" onClick={goBackToSetup}
+                style={{ width: '100%', padding: '7px 10px', background: 'none', border: '1px solid #E2E8F0', borderRadius: 8, fontSize: 12, color: '#64748B', cursor: 'pointer', fontFamily: 'inherit', textAlign: 'left' }}>
+                ← Edit Setup
+              </button>
+            )}
           </div>
         </div>
 
@@ -3278,22 +3995,25 @@ export default function HRCycleDashboard() {
 
           {/* module content */}
           {activeModule === 'overview' && (
-            <ModuleOverview employees={liveEmployeesWithStage} groups={groups} orgName={org.name} congratsDismissed={congratsDismissed} onDismiss={() => setCongratsDismissed(true)} showConfetti={showConfetti} />
+            <ModuleOverview employees={empsForModules} groups={groups} orgName={org.name} congratsDismissed={congratsDismissed} onDismiss={() => setCongratsDismissed(true)} showConfetti={showConfetti} />
           )}
-          {activeModule === 'emp-status' && <ModuleEmpStatus employees={liveEmployeesWithStage} groups={groups} />}
-          {activeModule === 'comms'      && <ModuleComms     employees={liveEmployeesWithStage} groups={groups} org={org} />}
-          {activeModule === 'stage'      && <ModuleStageControl  employees={liveEmployeesWithStage} onUpdate={handleEmpUpdate} orgKey={orgKey} />}
-          {activeModule === 'mgr-change' && <ModuleMgrChange     employees={liveEmployeesWithStage} onUpdate={handleEmpUpdate} />}
-          {activeModule === 'grp-transfer' && <ModuleGrpTransfer employees={liveEmployeesWithStage} groups={groups} onUpdate={handleEmpUpdate} />}
-          {activeModule === 'roster'     && <ModuleRoster employees={liveEmployeesWithStage} config={config} onUpdate={handleEmpUpdate} />}
-          {activeModule === 'test-creds' && <ModuleTestCreds employees={liveEmployeesWithStage} org={org} orgKey={orgKey} />}
-          {activeModule === 'config'     && (
+          {activeModule === 'emp-status' && <ModuleEmpStatus employees={empsForModules} groups={groups} orgKey={orgKey} org={org} />}
+          {activeModule === 'comms'      && <ModuleComms     employees={empsForModules} groups={groups} org={org} />}
+          {activeModule === 'stage'      && <ModuleStageControl  employees={empsForModules} onUpdate={handleEmpUpdate} orgKey={orgKey} />}
+          {activeModule === 'mgr-change' && <ModuleMgrChange     employees={empsForModules} onUpdate={handleEmpUpdate} />}
+          {activeModule === 'grp-transfer' && <ModuleGrpTransfer employees={empsForModules} groups={groups} onUpdate={handleEmpUpdate} />}
+          {activeModule === 'roster'     && <ModuleRoster employees={empsForModules} config={config} onUpdate={handleEmpUpdate} />}
+          {activeModule === 'test-creds' && <ModuleTestCreds employees={empsForModules} org={org} orgKey={orgKey} />}
+          {activeModule === 'hr-team' && !isScopedHR && (
+            <ModuleHRTeam org={org} orgKey={orgKey} employees={liveEmployeesWithStage} groups={groups} onOrgChange={onHRTeamChange} />
+          )}
+          {activeModule === 'config' && !isScopedHR && (
             <ModuleConfig
-	              config={config}
-	              org={org}
-	              onEditSetup={goBackToSetup}
-	              onBrandChange={updateOrgBrand}
-	            />
+              config={config}
+              org={org}
+              onEditSetup={goBackToSetup}
+              onBrandChange={updateOrgBrand}
+            />
           )}
 
         </div>

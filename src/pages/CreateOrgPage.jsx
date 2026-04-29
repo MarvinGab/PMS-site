@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import AdminShell from '../components/AdminShell';
 import { useApp } from '../AppContext';
+import { saveOrganizationRecord } from '../backend/stateStore';
 import '../admin.css';
 
 const COUNTRY_OPTIONS = [
@@ -119,7 +120,7 @@ function clearDraft() {
 }
 
 export default function CreateOrgPage() {
-  const { orgs, setOrgs } = useApp();
+  const { orgs, applyAppData } = useApp();
 
   const editKey = getHashParam('key');
   const isEdit  = Boolean(editKey);
@@ -183,7 +184,13 @@ export default function CreateOrgPage() {
   // Code helpers
   function getExistingCodes() {
     const set = new Set();
-    orgs.forEach(o => { if (isEdit && o.key === editKey) return; set.add(normalizeCode(o.orgCode || o.key || '')); });
+    orgs.forEach((o) => {
+      if (isEdit && o.key === editKey) return;
+      const tenantKey = normalizeCode(o.key || '');
+      const orgCode = normalizeCode(o.orgCode || '');
+      if (tenantKey) set.add(tenantKey);
+      if (orgCode) set.add(orgCode);
+    });
     return set;
   }
 
@@ -275,8 +282,10 @@ export default function CreateOrgPage() {
 
   function buildOrg() {
     const orgName = (form.organization_name || '').trim() || 'New Organization';
-    const orgCode = normalizeCode(form.organization_code || genCodeFromName(orgName) || 'ORG');
-    const slugRaw = (form.workspace_slug || orgCode).toLowerCase().replace(/[^a-z0-9-]/g,'').replace(/-+/g,'-').replace(/^-|-$/g,'') || `org-${Date.now().toString().slice(-4)}`;
+    const requestedOrgCode = normalizeCode(form.organization_code || genCodeFromName(orgName) || 'org');
+    const tenantKey = existingOrg ? normalizeCode(existingOrg.key || existingOrg.orgCode || '') : requestedOrgCode;
+    const orgCode = existingOrg ? normalizeCode(existingOrg.orgCode || existingOrg.key || '') : requestedOrgCode;
+    const slugRaw = (form.workspace_slug || tenantKey).toLowerCase().replace(/[^a-z0-9-]/g,'').replace(/-+/g,'-').replace(/^-|-$/g,'') || `org-${Date.now().toString().slice(-4)}`;
     const industry = form.industry || 'Other';
     const logoText = (orgName[0] || 'N').toUpperCase();
     const hrAdminName  = (form.hr_admin_name || '').trim();
@@ -286,7 +295,7 @@ export default function CreateOrgPage() {
 
     return {
       ...(existingOrg || {}),
-      key: existingOrg ? existingOrg.key : `org-${Date.now()}`,
+      key: tenantKey,
       orgCode,
       name: orgName,
       domain: `${slugRaw}.zarohr.com`,
@@ -340,12 +349,24 @@ export default function CreateOrgPage() {
     }
 
     setSaving(true);
-    setTimeout(() => {
+    setTimeout(async () => {
       const nextOrg = buildOrg();
+      const persisted = await saveOrganizationRecord(nextOrg);
+      if (!persisted.ok) {
+        setSaving(false);
+        setFeedback(persisted.error || 'Failed to save organization in backend.');
+        return;
+      }
+
       if (existingOrg) {
-        setOrgs(orgs.map(o => o.key === editKey ? nextOrg : o));
+        applyAppData((current) => ({
+          orgs: current.orgs.map((o) => (o.key === editKey ? nextOrg : o)),
+          feedData: current.feedData,
+          pendingActions: current.pendingActions,
+          dashboardFlags: current.dashboardFlags,
+        }));
       } else {
-        setOrgs([nextOrg, ...orgs]);
+        applyAppData((current) => ({ orgs: [nextOrg, ...current.orgs] }));
       }
       clearDraft();
       setSaving(false);
@@ -400,6 +421,7 @@ export default function CreateOrgPage() {
           <div className="create-org-body">
             {step === 0 && (
               <Step0
+                isEdit={isEdit}
                 form={form}
                 onNameInput={handleNameInput}
                 onCodeInput={handleCodeInput}
@@ -444,7 +466,7 @@ export default function CreateOrgPage() {
   );
 }
 
-function Step0({ form, onNameInput, onCodeInput, setField, codeCheck, addCountry, removeCountry }) {
+function Step0({ isEdit, form, onNameInput, onCodeInput, setField, codeCheck, addCountry, removeCountry }) {
   return (
     <div>
       <div className="wiz-grid">
@@ -456,10 +478,16 @@ function Step0({ form, onNameInput, onCodeInput, setField, codeCheck, addCountry
         <div className="form-group">
           <label className="lbl">Org Code (Tenant Identifier) <span className="req">*</span></label>
           <input type="text" value={form.organization_code || ''} placeholder="Auto from name"
+            disabled={isEdit}
             onChange={e => onCodeInput(e.target.value)} />
           {form.organization_code && (
             <div className={`f-hint ${codeCheck.ok ? 'hint-ok' : 'hint-err'}`}>{codeCheck.msg}</div>
           )}
+          <div className="f-hint" style={{ marginTop: 4, color: 'var(--ink-4)' }}>
+            {isEdit
+              ? 'Locked after creation because this value is the backend tenant key.'
+              : 'This value is used as the tenant key for backend-scoped org data.'}
+          </div>
         </div>
       </div>
 

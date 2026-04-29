@@ -327,18 +327,27 @@ export async function downloadGoalLibraryBulkTemplate(configOrPerspectives = [])
 
   const perspectives = config.perspectives || [];
   const goalGroups   = config.goalGroups  || [];
-  const perspNames   = perspectives.filter(p => p.name).map(p => p.name);
+  const isFlat       = config.frameworkId === 'kra-kpi' || config.frameworkId === 'kra';
+  const perspNames   = isFlat ? [] : perspectives.filter(p => p.name).map(p => p.name);
   const p1 = perspNames[0] || 'Financial';
   const p2 = perspNames[1] || 'Customer';
   const p3 = perspNames[2] || 'Internal Process';
 
   // Only groups that have a goal library configured
   const activeGroups = goalGroups.filter(g => g.hasLibrary);
+  const hideKpiWeight = activeGroups.length > 0
+    && activeGroups.every(g => g.kpiRatingMode === 'free-text');
 
-  const headers    = ['Group Name', 'Library Name', 'Perspective', 'KRA Name', 'KRA Description', 'KRA Weight %', 'KPI Name', 'KPI Weight %'];
-  const colWidths  = [24, 28, 22, 30, 36, 14, 30, 14];
+  const baseHeaders = isFlat
+    ? ['Group Name', 'Library Name', 'KRA Name', 'KRA Description', 'KRA Weight %', 'KPI Name', 'KPI Weight %']
+    : ['Group Name', 'Library Name', 'Perspective', 'KRA Name', 'KRA Description', 'KRA Weight %', 'KPI Name', 'KPI Weight %'];
+  const baseColWidths = isFlat ? [24, 28, 30, 36, 14, 30, 14] : [24, 28, 22, 30, 36, 14, 30, 14];
+  const headers   = hideKpiWeight ? baseHeaders.slice(0, -1) : baseHeaders;
+  const colWidths = hideKpiWeight ? baseColWidths.slice(0, -1) : baseColWidths;
   const n          = headers.length;
-  const KPI_COLS   = [7, 8]; // 1-based column indices for KPI Name and KPI Weight %
+  const KPI_COLS   = hideKpiWeight
+    ? (isFlat ? [6] : [7])
+    : (isFlat ? [6, 7] : [7, 8]);
   const GREY_FILL  = 'FFE5E7EB';
   const GREY_TEXT  = 'FF9CA3AF';
 
@@ -398,13 +407,23 @@ export async function downloadGoalLibraryBulkTemplate(configOrPerspectives = [])
     cell.alignment = { vertical: 'middle', horizontal: 'left', indent: 1 };
   }
 
+  const trimRow = (row) => hideKpiWeight ? row.slice(0, -1) : row;
+  const kraOnlyLibRow = (group, lib, persp, kraName, kraDesc, weight) =>
+    trimRow(isFlat
+      ? [group, lib, kraName, kraDesc, weight, '', '']
+      : [group, lib, persp, kraName, kraDesc, weight, '', '']);
+  const kraKpiLibRow = (group, lib, persp, kraName, kraDesc, kraWeight, kpiName, kpiWeight) =>
+    trimRow(isFlat
+      ? [group, lib, kraName, kraDesc, kraWeight, kpiName, kpiWeight]
+      : [group, lib, persp, kraName, kraDesc, kraWeight, kpiName, kpiWeight]);
+
   if (activeGroups.length === 0) {
     // Fallback: no groups configured with libraries — generic template
     bannerRow(ws, n, '  ↓  Example rows — delete before uploading your data', C.RED_BANNER, C.RED_TEXT);
     const exRows = [
-      ['', 'Library A', p1, 'Revenue Growth',   'Grow quarterly revenue',        '40', 'Monthly ARR',    '60'],
-      ['', 'Library A', p1, 'Revenue Growth',   'Grow quarterly revenue',        '40', 'New Client Wins', '40'],
-      ['', 'Library A', p2, 'Customer NPS',     'Net promoter score improvement','60', 'Survey Rate',    '100'],
+      kraKpiLibRow('', 'Library A', p1, 'Revenue Growth',   'Grow quarterly revenue',        '40', 'Monthly ARR',    '60'),
+      kraKpiLibRow('', 'Library A', p1, 'Revenue Growth',   'Grow quarterly revenue',        '40', 'New Client Wins', '40'),
+      kraKpiLibRow('', 'Library A', p2, 'Customer NPS',     'Net promoter score improvement','60', 'Survey Rate',    '100'),
     ];
     for (const row of exRows) { styleExampleRow(ws.addRow(row), n); }
     bannerRow(ws, n, '  ↑  Delete examples above  ·  Your libraries start here  ↓', C.BLUE_FILL, C.BLUE_DARK);
@@ -429,15 +448,15 @@ export async function downloadGoalLibraryBulkTemplate(configOrPerspectives = [])
 
       const exRows = isKraOnly
         ? [
-            [group.name, exName, p1, 'Revenue Growth',    'Grow quarterly revenue',        '40', '', ''],
-            [group.name, exName, p2, 'Customer Retention','Retain existing client base',   '35', '', ''],
-            [group.name, exName, p3, 'Process Quality',   'Improve delivery standards',    '25', '', ''],
+            kraOnlyLibRow(group.name, exName, p1, 'Revenue Growth',    'Grow quarterly revenue',        '40'),
+            kraOnlyLibRow(group.name, exName, p2, 'Customer Retention','Retain existing client base',   '35'),
+            kraOnlyLibRow(group.name, exName, p3, 'Process Quality',   'Improve delivery standards',    '25'),
           ]
         : [
-            [group.name, exName, p1, 'Revenue Growth',    'Grow quarterly revenue',        '40', 'Monthly ARR',    '60'],
-            [group.name, exName, p1, 'Revenue Growth',    'Grow quarterly revenue',        '40', 'New Client Wins', '40'],
-            [group.name, exName, p2, 'Customer NPS',      'Net promoter score improvement','35', 'Survey Rate',    '100'],
-            [group.name, exName, p3, 'Process Quality',   'Improve delivery standards',    '25', 'On-time Rate',   '100'],
+            kraKpiLibRow(group.name, exName, p1, 'Revenue Growth',    'Grow quarterly revenue',        '40', 'Monthly ARR',    '60'),
+            kraKpiLibRow(group.name, exName, p1, 'Revenue Growth',    'Grow quarterly revenue',        '40', 'New Client Wins', '40'),
+            kraKpiLibRow(group.name, exName, p2, 'Customer NPS',      'Net promoter score improvement','35', 'Survey Rate',    '100'),
+            kraKpiLibRow(group.name, exName, p3, 'Process Quality',   'Improve delivery standards',    '25', 'On-time Rate',   '100'),
           ];
 
       for (const row of exRows) {
@@ -473,15 +492,17 @@ export async function downloadGoalLibraryBulkTemplate(configOrPerspectives = [])
     ['• Each section above corresponds to one employee group from your Step 3 configuration.'],
     ['• Group Name: pre-filled automatically — do not edit. It tells the system which group each library belongs to, so two groups can share the same designation name without collision.'],
     ['• Library Name: use the exact segment value (e.g. designation name) as the Library Name. Each unique Group Name + Library Name pair becomes one library card.'],
-    ['• Perspective: grouping and display only — not scored separately. Must match your BSC perspective names.'],
+    ...(isFlat ? [] : [['• Perspective: grouping and display only — not scored separately. Must match your BSC perspective names.']]),
     ['• KRA Weight %: optional. If provided, the value is pre-filled as a suggestion in the employee\'s goal plan. The library is a reference catalog — employees may pick any subset of KRAs, so weights here do not need to sum to 100.'],
     ['• KPI columns (greyed): only applicable for KRA+KPI groups. Leave blank or do not fill greyed cells.'],
-    ['• KPI Weight %: optional. If provided, pre-filled as a suggested starting weight in the employee\'s plan.'],
+    ...(hideKpiWeight ? [] : [['• KPI Weight %: optional. If provided, pre-filled as a suggested starting weight in the employee\'s plan.']]),
     ['• Delete all red example rows before uploading.'],
     ['• Do not rename, reorder, or delete column headers.'],
-    perspNames.length > 0
-      ? [`• Valid Perspectives: ${perspNames.join('  |  ')}`]
-      : ['• Perspective names must match what you set in Step 2.'],
+    ...(isFlat
+      ? []
+      : [perspNames.length > 0
+          ? [`• Valid Perspectives: ${perspNames.join('  |  ')}`]
+          : ['• Perspective names must match what you set in Step 2.']]),
   ]);
 
   // ── Sheet 2: Reference ──────────────────────────────────────────────────
@@ -507,12 +528,12 @@ export async function downloadGoalLibraryBulkTemplate(configOrPerspectives = [])
   addRefSection('Column Guide', [
     ['Group Name',      'Pre-filled automatically — identifies which employee group this library belongs to. Do not edit. Two groups can use the same Library Name; Group Name keeps them separate.'],
     ['Library Name',    'Unique name per library within a group — usually the designation/segment value. All rows for one library share this name.'],
-    ['Perspective',     'BSC perspective this KRA belongs to. Display/grouping only — not scored separately.'],
+    ...(isFlat ? [] : [['Perspective', 'BSC perspective this KRA belongs to. Display/grouping only — not scored separately.']]),
     ['KRA Name',        'Key Result Area — the goal topic or theme.'],
     ['KRA Description', 'Optional brief description of the KRA.'],
     ['KRA Weight %',    'Optional suggested weight. Pre-filled in the employee\'s plan when they add this KRA. The library is a reference catalog — employees pick a subset, so weights here do not need to sum to 100.'],
     ['KPI Name',        'Key Performance Indicator under this KRA. Only for KRA+KPI groups — leave blank otherwise.'],
-    ['KPI Weight %',    'Optional suggested weight for this KPI. Pre-filled in the employee\'s plan as a starting value.'],
+    ...(hideKpiWeight ? [] : [['KPI Weight %', 'Optional suggested weight for this KPI. Pre-filled in the employee\'s plan as a starting value.']]),
   ]);
 
   if (activeGroups.length > 0) {
@@ -524,14 +545,14 @@ export async function downloadGoalLibraryBulkTemplate(configOrPerspectives = [])
     }));
   }
 
-  if (perspNames.length > 0) {
+  if (!isFlat && perspNames.length > 0) {
     addRefSection('Configured Perspectives', perspNames.map(name => [name, 'Use this exact name in the Perspective column.']));
   }
 
   addRefSection('Common Mistakes', [
     ['Non-numeric weight',    'If you fill in a weight, it must be a plain number (e.g. 40, not "40%"). Blank is fine — weights are optional.'],
     ['Filling greyed cells',  'Grey KPI cells belong to KRA-only groups — any values there will be ignored on upload.'],
-    ['Perspective mismatch',  'Perspective names must match your BSC configuration exactly (case-sensitive).'],
+    ...(isFlat ? [] : [['Perspective mismatch',  'Perspective names must match your BSC configuration exactly (case-sensitive).']]),
     ['Library name mismatch', 'All rows for a library must use the exact same Library Name.'],
     ['Editing Group Name',    'The Group Name column is pre-filled — changing it will break the group-to-library mapping on upload.'],
   ]);
@@ -549,17 +570,26 @@ export async function downloadPrefillBulkTemplate(configOrPerspectives = []) {
 
   const perspectives = config.perspectives || [];
   const goalGroups = config.goalGroups || [];
-  const perspNames = perspectives.filter(p => p.name).map(p => p.name);
+  const isFlat = config.frameworkId === 'kra-kpi' || config.frameworkId === 'kra';
+  const perspNames = isFlat ? [] : perspectives.filter(p => p.name).map(p => p.name);
   const p1 = perspNames[0] || 'Financial';
   const p2 = perspNames[1] || 'Customer';
   const p3 = perspNames[2] || 'Internal Process';
 
   const activeGroups = goalGroups.filter(g => g.prefillType);
+  const hideKpiWeight = activeGroups.length > 0
+    && activeGroups.every(g => g.kpiRatingMode === 'free-text');
 
-  const headers = ['Group Name', 'Card Name', 'Perspective', 'KRA Name', 'KRA Description', 'KRA Weight %', 'KPI Name', 'KPI Weight %'];
-  const colWidths = [24, 28, 22, 30, 36, 14, 30, 14];
+  const baseHeaders = isFlat
+    ? ['Group Name', 'Card Name', 'KRA Name', 'KRA Description', 'KRA Weight %', 'KPI Name', 'KPI Weight %']
+    : ['Group Name', 'Card Name', 'Perspective', 'KRA Name', 'KRA Description', 'KRA Weight %', 'KPI Name', 'KPI Weight %'];
+  const baseColWidths = isFlat ? [24, 28, 30, 36, 14, 30, 14] : [24, 28, 22, 30, 36, 14, 30, 14];
+  const headers = hideKpiWeight ? baseHeaders.slice(0, -1) : baseHeaders;
+  const colWidths = hideKpiWeight ? baseColWidths.slice(0, -1) : baseColWidths;
   const n = headers.length;
-  const KPI_COLS = [7, 8];
+  const KPI_COLS = hideKpiWeight
+    ? (isFlat ? [6] : [7])
+    : (isFlat ? [6, 7] : [7, 8]);
   const GREY_FILL = 'FFE5E7EB';
   const GREY_TEXT = 'FF9CA3AF';
 
@@ -615,12 +645,22 @@ export async function downloadPrefillBulkTemplate(configOrPerspectives = []) {
     cell.alignment = { vertical: 'middle', horizontal: 'left', indent: 1 };
   }
 
+  const trimRow = (row) => hideKpiWeight ? row.slice(0, -1) : row;
+  const kraOnlyRowWithPersp = (group, card, persp, kraName, kraDesc, weight) =>
+    trimRow(isFlat
+      ? [group, card, kraName, kraDesc, weight, '', '']
+      : [group, card, persp, kraName, kraDesc, weight, '', '']);
+  const kraKpiRow = (group, card, persp, kraName, kraDesc, kraWeight, kpiName, kpiWeight) =>
+    trimRow(isFlat
+      ? [group, card, kraName, kraDesc, kraWeight, kpiName, kpiWeight]
+      : [group, card, persp, kraName, kraDesc, kraWeight, kpiName, kpiWeight]);
+
   if (activeGroups.length === 0) {
     bannerRow(ws, n, '  ↓  Example rows — delete before uploading your data', C.RED_BANNER, C.RED_TEXT);
     const exRows = [
-      ['', 'Managing Partner to Client Director', p1, 'Revenue Growth', 'Grow quarterly revenue', '40', '', ''],
-      ['', 'Managing Partner to Client Director', p2, 'Client Satisfaction', 'Improve client relationship quality', '35', '', ''],
-      ['', 'Managing Partner to Client Director', p3, 'Delivery Excellence', 'Raise delivery standards', '25', '', ''],
+      kraOnlyRowWithPersp('', 'Managing Partner to Client Director', p1, 'Revenue Growth', 'Grow quarterly revenue', '40'),
+      kraOnlyRowWithPersp('', 'Managing Partner to Client Director', p2, 'Client Satisfaction', 'Improve client relationship quality', '35'),
+      kraOnlyRowWithPersp('', 'Managing Partner to Client Director', p3, 'Delivery Excellence', 'Raise delivery standards', '25'),
     ];
     for (const row of exRows) {
       const r = ws.addRow(row);
@@ -644,15 +684,15 @@ export async function downloadPrefillBulkTemplate(configOrPerspectives = []) {
 
       const exRows = isKraOnly
         ? [
-            [group.name, exName, p1, 'Revenue Growth', 'Grow quarterly revenue', '40', '', ''],
-            [group.name, exName, p2, 'Customer Retention', 'Retain existing client base', '35', '', ''],
-            [group.name, exName, p3, 'Process Quality', 'Improve delivery standards', '25', '', ''],
+            kraOnlyRowWithPersp(group.name, exName, p1, 'Revenue Growth', 'Grow quarterly revenue', '40'),
+            kraOnlyRowWithPersp(group.name, exName, p2, 'Customer Retention', 'Retain existing client base', '35'),
+            kraOnlyRowWithPersp(group.name, exName, p3, 'Process Quality', 'Improve delivery standards', '25'),
           ]
         : [
-            [group.name, exName, p1, 'Revenue Growth', 'Grow quarterly revenue', '40', 'Monthly ARR', '60'],
-            [group.name, exName, p1, 'Revenue Growth', 'Grow quarterly revenue', '40', 'New Client Wins', '40'],
-            [group.name, exName, p2, 'Customer NPS', 'Net promoter score improvement', '35', 'Survey Rate', '100'],
-            [group.name, exName, p3, 'Process Quality', 'Improve delivery standards', '25', 'On-time Rate', '100'],
+            kraKpiRow(group.name, exName, p1, 'Revenue Growth', 'Grow quarterly revenue', '40', 'Monthly ARR', '60'),
+            kraKpiRow(group.name, exName, p1, 'Revenue Growth', 'Grow quarterly revenue', '40', 'New Client Wins', '40'),
+            kraKpiRow(group.name, exName, p2, 'Customer NPS', 'Net promoter score improvement', '35', 'Survey Rate', '100'),
+            kraKpiRow(group.name, exName, p3, 'Process Quality', 'Improve delivery standards', '25', 'On-time Rate', '100'),
           ];
 
       for (const row of exRows) {
@@ -685,14 +725,16 @@ export async function downloadPrefillBulkTemplate(configOrPerspectives = []) {
     ['• Each employee value you configured in Groups & Strategy becomes one pre-fill card here.'],
     ['• Group Name: pre-filled automatically — do not edit. It identifies the employee group for every card.'],
     ['• Card Name: use the exact configured value such as the designation, band, or department name. Each unique Group Name + Card Name pair becomes one pre-fill card in the UI.'],
-    ['• Perspective: must match your configured BSC perspective names exactly.'],
+    ...(isFlat ? [] : [['• Perspective: must match your configured BSC perspective names exactly.']]),
     ['• KRA Weight % and KPI Weight % can be left blank, but if filled they must be numeric.'],
     ['• KPI columns are only for groups configured as KRAs + KPIs. Grey KPI cells should be left blank.'],
     ['• Delete all red example rows before uploading.'],
     ['• Do not rename, reorder, or delete column headers.'],
-    perspNames.length > 0
-      ? [`• Valid Perspectives: ${perspNames.join('  |  ')}`]
-      : ['• Perspective names must match what you set in the BSC Perspectives step.'],
+    ...(isFlat
+      ? []
+      : [perspNames.length > 0
+          ? [`• Valid Perspectives: ${perspNames.join('  |  ')}`]
+          : ['• Perspective names must match what you set in the BSC Perspectives step.']]),
   ]);
 
   const ref = wb.addWorksheet('Reference', {
@@ -717,12 +759,12 @@ export async function downloadPrefillBulkTemplate(configOrPerspectives = []) {
   addRefSection('Column Guide', [
     ['Group Name', 'Pre-filled automatically — identifies the employee group this pre-fill card belongs to. Do not edit.'],
     ['Card Name', 'The exact designation / segment value that should receive this pre-fill setup. All rows for one card use the same Card Name.'],
-    ['Perspective', 'BSC perspective this KRA belongs to. Must match your configured perspective names.'],
+    ...(isFlat ? [] : [['Perspective', 'BSC perspective this KRA belongs to. Must match your configured perspective names.']]),
     ['KRA Name', 'Key Result Area that should appear ready-made for employees in this card.'],
     ['KRA Description', 'Optional brief description of the KRA.'],
     ['KRA Weight %', 'Optional suggested KRA weight.'],
     ['KPI Name', 'Only for KRAs + KPIs pre-fill groups. Leave blank for KRA-only groups.'],
-    ['KPI Weight %', 'Optional suggested KPI weight.'],
+    ...(hideKpiWeight ? [] : [['KPI Weight %', 'Optional suggested KPI weight.']]),
   ]);
 
   if (activeGroups.length > 0) {
@@ -742,7 +784,7 @@ export async function downloadPrefillBulkTemplate(configOrPerspectives = []) {
   addRefSection('Common Mistakes', [
     ['Wrong Card Name', 'Card Name must match the configured segment value exactly, otherwise the site cannot map it to the right card.'],
     ['Edited Group Name', 'Changing Group Name breaks the mapping between the uploaded rows and the configured employee group.'],
-    ['Perspective mismatch', 'Perspective names must match your BSC configuration exactly.'],
+    ...(isFlat ? [] : [['Perspective mismatch', 'Perspective names must match your BSC configuration exactly.']]),
     ['Non-numeric weight', 'If you enter weights, use numbers only such as 40 or 12.5.'],
     ['Filling grey KPI cells', 'Grey KPI cells belong to KRA-only groups and should be left blank.'],
   ]);
@@ -751,7 +793,8 @@ export async function downloadPrefillBulkTemplate(configOrPerspectives = []) {
 }
 
 /* ── PARSE BULK GOAL LIBRARY UPLOAD ─────────────────────────────────────── */
-export function parseGoalLibraryBulkXlsx(file, goalGroups = []) {
+export function parseGoalLibraryBulkXlsx(file, goalGroups = [], options = {}) {
+  const { requireGroupName = false } = options;
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onerror = () => reject(new Error('Could not read file'));
@@ -765,6 +808,8 @@ export function parseGoalLibraryBulkXlsx(file, goalGroups = []) {
           reject(new Error('File is empty'));
           return;
         }
+        const validGroupNames = (goalGroups || []).map(g => String(g?.name || '').trim()).filter(Boolean);
+        const validGroupNamesLower = validGroupNames.map(n => n.toLowerCase());
 
         const headers = (allRows[0] || []).map(h => String(h || '').trim().toLowerCase());
         const idxGroupName = headers.indexOf('group name');
@@ -777,10 +822,11 @@ export function parseGoalLibraryBulkXlsx(file, goalGroups = []) {
         const idxKpiName = headers.indexOf('kpi name');
         const idxKpiWeight = headers.indexOf('kpi weight %');
 
-        if (idxLibrary === -1 || idxPersp === -1 || idxKraName === -1) {
+        if (idxLibrary === -1 || idxKraName === -1) {
           reject(new Error('Missing required columns in the uploaded template'));
           return;
         }
+        const isFlatTemplate = idxPersp === -1;
 
         const librariesByKey = new Map(); // key: "groupName::libraryName" or "libraryName" for old templates
         let validRowCount = 0;
@@ -793,7 +839,8 @@ export function parseGoalLibraryBulkXlsx(file, goalGroups = []) {
           return Number.isFinite(numeric) && numeric >= 0 ? numeric : null;
         };
 
-        for (const row of allRows.slice(1)) {
+        const groupNameErrors = [];
+        for (const [rowIdx, row] of allRows.slice(1).entries()) {
           const firstCell = readCell(row, 0);
           if (!row.some(cell => String(cell || '').trim())) continue;
           if (
@@ -807,11 +854,23 @@ export function parseGoalLibraryBulkXlsx(file, goalGroups = []) {
 
           const groupName = readCell(row, idxGroupName);
           const libraryName = readCell(row, idxLibrary);
-          const perspectiveName = readCell(row, idxPersp);
+          const perspectiveName = isFlatTemplate ? 'All KRAs' : readCell(row, idxPersp);
           const kraName = readCell(row, idxKraName);
           const kpiName = readCell(row, idxKpiName);
 
           if (!libraryName || !perspectiveName || !kraName) continue;
+
+          if (requireGroupName) {
+            if (!groupName) {
+              groupNameErrors.push(`Row ${rowIdx + 2}: Group Name is required (valid: ${validGroupNames.join(', ') || 'none configured'})`);
+              continue;
+            }
+            if (validGroupNamesLower.length > 0 && !validGroupNamesLower.includes(groupName.toLowerCase())) {
+              groupNameErrors.push(`Row ${rowIdx + 2}: Group Name "${groupName}" is not one of: ${validGroupNames.join(', ')}`);
+              continue;
+            }
+          }
+
           validRowCount += 1;
 
           const kraWeight = parseWeight(readCell(row, idxKraWeight));
@@ -925,6 +984,11 @@ export function parseGoalLibraryBulkXlsx(file, goalGroups = []) {
             })),
           };
         });
+
+        if (groupNameErrors.length > 0) {
+          reject(new Error(groupNameErrors.join('\n')));
+          return;
+        }
 
         if (!validRowCount || libraries.length === 0) {
           reject(new Error('No valid library rows found in the uploaded sheet'));
@@ -1447,7 +1511,7 @@ export function employeeTemplateMeta(config) {
     [codeNote],
     ['• Employee Name must be a real person name. Use letters, spaces, dots, apostrophes, or hyphens only.'],
     ...(hasGoalGroups ? [['• Group Name is required on every row and must match the configured group names in the Reference sheet exactly.']] : []),
-    ['• Reporting Manager Code can point to an employee in this file or to a manager outside this PMS rollout. If outside PMS, keep Reporting Manager Name/Email filled so it is treated as an intentional external manager reference.'],
+    ['• Reporting Manager Code can point to any employee — in this file or elsewhere in the org. Leave it blank for top-of-hierarchy roles.'],
     ...(hasL2 ? [['• L2 Manager Code is the skip-level manager (manager of the direct manager).']] : []),
     ...(routingNote ? [[routingNote]] : []),
     ...(requireEmail === false ? [['• Email ID is optional for this configuration.']] : []),
@@ -1592,18 +1656,24 @@ export function validateEmployeeData(employees, config) {
   const allCodes = new Set(
     employees.map(e => (e['Employee Code'] || '').trim().toLowerCase()).filter(Boolean)
   );
-  const missingL1Managers = new Map();
-  const missingL2Managers = new Map();
-  const outsideL1Managers = new Map();
-  const outsideL2Managers = new Map();
 
-  const addMissingManagerRef = (bucket, key, managerCode, row, employeeCode) => {
-    const entry = bucket.get(key) || { managerCode, rows: [], employeeCodes: [] };
-    entry.rows.push(row);
-    if (employeeCode) entry.employeeCodes.push(employeeCode);
-    bucket.set(key, entry);
-  };
-
+  // Pre-pass: build a full code → employee record map so manager-name mismatch
+  // checks work regardless of row order (e.g. manager listed after subordinate).
+  const codeToEmployee = new Map();
+  employees.forEach((emp, idx) => {
+    const rowNum = idx + 2;
+    const empCode = (emp['Employee Code'] || '').trim();
+    if (!empCode) return;
+    const empName = (emp['Employee Name'] || '').trim();
+    const nv = validateEmployeeName(empName);
+    const key = empCode.toLowerCase();
+    if (codeToEmployee.has(key)) return; // keep the first occurrence
+    codeToEmployee.set(key, {
+      row: rowNum,
+      name: empName,
+      normalizedName: nv.valid ? nv.normalized : normalizeEmployeeNameForCompare(empName),
+    });
+  });
   employees.forEach((emp, idx) => {
     const row = idx + 2; // 1-based, +1 for header row
     const code = (emp['Employee Code'] || '').trim();
@@ -1721,109 +1791,44 @@ export function validateEmployeeData(employees, config) {
       });
     }
 
-    // Reporting Manager (blank = top of hierarchy, allowed)
+    // Reporting Manager: blank = top of hierarchy. Non-blank codes that
+    // aren't in the file are treated as ordinary external references (no
+    // warning). Only flag name inconsistency when the manager IS in the file.
     const l1Code = getEmployeeRowValue(emp, 'Reporting Manager Code');
-    if (l1Code) {
+    if (l1Code && allCodes.has(l1Code.toLowerCase())) {
       const l1Key = l1Code.toLowerCase();
-      if (!allCodes.has(l1Key)) {
-        const l1Name = getEmployeeRowValue(emp, 'Reporting Manager Name');
-        const l1Email = getEmployeeRowValue(emp, 'Reporting Manager Email');
-        const hasExternalManagerContext = !!(l1Name || l1Email);
-        addMissingManagerRef(
-          hasExternalManagerContext ? outsideL1Managers : missingL1Managers,
-          l1Key,
-          l1Code,
-          row,
-          code
-        );
-      } else {
-        // Manager code exists in file — check name consistency
-        const l1Name = getEmployeeRowValue(emp, 'Reporting Manager Name');
-        if (l1Name) {
-          const empRecord = seenCodes.get(l1Key);
-          if (empRecord && empRecord.normalizedName && normalizeEmployeeNameForCompare(l1Name) !== empRecord.normalizedName) {
-            warnings.push({
-              row, code: code || '—', field: 'l1_manager',
+      const l1Name = getEmployeeRowValue(emp, 'Reporting Manager Name');
+      if (l1Name) {
+        const empRecord = codeToEmployee.get(l1Key);
+        if (empRecord && empRecord.normalizedName && normalizeEmployeeNameForCompare(l1Name) !== empRecord.normalizedName) {
+          errors.push({
+            row, code: code || '—', field: 'l1_manager',
+            category: 'manager_name_mismatch',
+            message: `Reporting Manager Name "${l1Name}" doesn't match Employee Name "${empRecord.name}" for code "${l1Code}" (row ${empRecord.row}).`,
+          });
+        }
+      }
+    }
+
+    // L2 Manager (optional per employee) — same treatment as L1.
+    if (hasL2) {
+      const l2Code = getEmployeeRowValue(emp, 'L2 Manager Code');
+      if (l2Code && allCodes.has(l2Code.toLowerCase())) {
+        const l2Key = l2Code.toLowerCase();
+        const l2Name = getEmployeeRowValue(emp, 'L2 Manager Name');
+        if (l2Name) {
+          const empRecord = codeToEmployee.get(l2Key);
+          if (empRecord && empRecord.normalizedName && normalizeEmployeeNameForCompare(l2Name) !== empRecord.normalizedName) {
+            errors.push({
+              row, code: code || '—', field: 'l2_manager',
               category: 'manager_name_mismatch',
-              message: `Reporting Manager Name "${l1Name}" doesn't match Employee Name "${empRecord.name}" for code "${l1Code}" (row ${empRecord.row}). Verify the correct name.`,
+              message: `L2 Manager Name "${l2Name}" doesn't match Employee Name "${empRecord.name}" for code "${l2Code}" (row ${empRecord.row}).`,
             });
           }
         }
       }
     }
-
-    // L2 Manager (optional per employee)
-    if (hasL2) {
-      const l2Code = getEmployeeRowValue(emp, 'L2 Manager Code');
-      if (l2Code) {
-        const l2Key = l2Code.toLowerCase();
-        if (!allCodes.has(l2Key)) {
-          const l2Name = getEmployeeRowValue(emp, 'L2 Manager Name');
-          const hasExternalL2Context = !!l2Name;
-          addMissingManagerRef(
-            hasExternalL2Context ? outsideL2Managers : missingL2Managers,
-            l2Key,
-            l2Code,
-            row,
-            code
-          );
-        } else {
-          // L2 Manager code exists in file — check name consistency
-          const l2Name = getEmployeeRowValue(emp, 'L2 Manager Name');
-          if (l2Name) {
-            const empRecord = seenCodes.get(l2Key);
-            if (empRecord && empRecord.normalizedName && normalizeEmployeeNameForCompare(l2Name) !== empRecord.normalizedName) {
-              warnings.push({
-                row, code: code || '—', field: 'l2_manager',
-                category: 'manager_name_mismatch',
-                message: `L2 Manager Name "${l2Name}" doesn't match Employee Name "${empRecord.name}" for code "${l2Code}" (row ${empRecord.row}). Verify the correct name.`,
-              });
-            }
-          }
-        }
-      }
-    }
   });
-
-  for (const entry of missingL1Managers.values()) {
-    warnings.push({
-      row: entry.rows[0],
-      code: entry.employeeCodes[0] || '—',
-      field: 'l1_manager',
-      category: 'manager_not_in_file',
-      message: `Manager "${entry.managerCode}" is referenced in ${formatIssueRowList(entry.rows)} but is not in this upload. If this is intentional (outside current PMS rollout), fill Reporting Manager Name (and email when used) on those rows; otherwise fix the manager code.`,
-    });
-  }
-
-  for (const entry of missingL2Managers.values()) {
-    warnings.push({
-      row: entry.rows[0],
-      code: entry.employeeCodes[0] || '—',
-      field: 'l2_manager',
-      category: 'l2_manager_not_in_file',
-      message: `L2 Manager "${entry.managerCode}" is referenced in ${formatIssueRowList(entry.rows)} but is not in this upload. If this is intentional (outside current PMS rollout), fill L2 Manager Name on those rows; otherwise fix the L2 manager code.`,
-    });
-  }
-
-  for (const entry of outsideL1Managers.values()) {
-    warnings.push({
-      row: entry.rows[0],
-      code: entry.employeeCodes[0] || '—',
-      field: 'l1_manager',
-      category: 'manager_outside_pms',
-      message: `Manager "${entry.managerCode}" is referenced in ${formatIssueRowList(entry.rows)} and is outside the current PMS upload. This is allowed and those employees will remain top-level within this rollout.`,
-    });
-  }
-
-  for (const entry of outsideL2Managers.values()) {
-    warnings.push({
-      row: entry.rows[0],
-      code: entry.employeeCodes[0] || '—',
-      field: 'l2_manager',
-      category: 'l2_manager_outside_pms',
-      message: `L2 Manager "${entry.managerCode}" is referenced in ${formatIssueRowList(entry.rows)} and is outside the current PMS upload. This is allowed.`,
-    });
-  }
 
   // Code anomaly and similar-name checks
   for (const w of detectCodeAnomalies(employees)) warnings.push(w);
@@ -2011,7 +2016,8 @@ export async function downloadEmployeeErrorReport(employees, errors, warnings, c
 /* ── VALIDATE GOAL LIBRARY DATA ──────────────────────────────────────────── */
 export function validateGoalLibraryData(parsedData, config) {
   const errors = [];
-  const perspectives = (config.perspectives || []).map(p => p.name).filter(Boolean);
+  const isFlatFramework = config.frameworkId === 'kra-kpi' || config.frameworkId === 'kra';
+  const perspectives = isFlatFramework ? [] : (config.perspectives || []).map(p => p.name).filter(Boolean);
   const hasKpis = config.goalKpiMode === 'kra-kpi';
   const numericPattern = /^\d+(\.\d+)?$/;
   const normalizeName = (value) => String(value || '').trim().replace(/\s+/g, ' ');
@@ -2041,14 +2047,16 @@ export function validateGoalLibraryData(parsedData, config) {
         seenNames[nameKey] = true;
       }
 
-      // KRA perspective — required and must match a configured perspective
-      if (!kra.perspName || !String(kra.perspName).trim()) {
-        errors.push({ group: groupLabel, kraName: kra.name, kpiName: null, field: 'perspective', message: `KRA "${kra.name}" has no perspective` });
-      } else if (perspectives.length > 0) {
-        const perspLower = String(kra.perspName).trim().toLowerCase();
-        const matched = perspectives.some(p => p.toLowerCase() === perspLower);
-        if (!matched) {
-          errors.push({ group: groupLabel, kraName: kra.name, kpiName: null, field: 'perspective', message: `"${kra.perspName}" does not match any configured perspective` });
+      // KRA perspective — required and must match a configured perspective (BSC only)
+      if (!isFlatFramework) {
+        if (!kra.perspName || !String(kra.perspName).trim()) {
+          errors.push({ group: groupLabel, kraName: kra.name, kpiName: null, field: 'perspective', message: `KRA "${kra.name}" has no perspective` });
+        } else if (perspectives.length > 0) {
+          const perspLower = String(kra.perspName).trim().toLowerCase();
+          const matched = perspectives.some(p => p.toLowerCase() === perspLower);
+          if (!matched) {
+            errors.push({ group: groupLabel, kraName: kra.name, kpiName: null, field: 'perspective', message: `"${kra.perspName}" does not match any configured perspective` });
+          }
         }
       }
 

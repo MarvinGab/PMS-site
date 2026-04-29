@@ -4,12 +4,12 @@ import { createContext, useContext, useState } from 'react';
 // everywhere else in the app (rejected / pending / approved) and were causing goals to "look"
 // approved or pending at a glance.
 export const PRESET_PERSPECTIVE_COLORS = [
-  '#2563EB', // blue
-  '#0891B2', // cyan
-  '#4F46E5', // indigo
-  '#7C3AED', // violet
-  '#DB2777', // pink
-  '#0EA5E9', // sky
+  '#3B82F6', // bright blue
+  '#38BDF8', // sky
+  '#6366F1', // indigo
+  '#818CF8', // periwinkle
+  '#A78BFA', // lavender
+  '#22D3EE', // cyan
 ];
 
 export const GRADE_VISIBILITY_OPTIONS = [

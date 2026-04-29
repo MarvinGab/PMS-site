@@ -4,44 +4,148 @@ import '../admin.css';
 import { useApp } from '../AppContext';
 import {
   SUPER_ADMIN_EMAIL, SUPER_ADMIN_PASS,
-  EMP_SESSION_KEY,
 } from '../AppContext';
+import { resolveLoginUser, changeEmployeePassword } from '../backend/authService';
+import { persistEmployeeSession } from '../backend/stateStore';
 
-const APP_DATA_KEY = 'zarohr_app_data_v1';
-const EMP_CREDENTIALS_KEY = 'zarohr_emp_credentials';
+function RightPanel() {
+  return (
+    <div className="login-right">
+      <div className="login-right-grid"></div>
+      <div className="login-right-glow"></div>
+      <div className="login-right-content anim-fadein">
+        <h2 className="login-right-title">
+          Performance<br />management, <em>finally clear.</em>
+        </h2>
+        <p className="login-right-sub">
+          Run performance cycles with clarity, structure, and confidence.
+        </p>
+      </div>
+    </div>
+  );
+}
 
-function resolveUser(email, password) {
-  const e = email.trim().toLowerCase();
+function ChangePasswordScreen({ pendingEmp, onComplete }) {
+  const [currentPwd, setCurrentPwd]   = useState('');
+  const [newPwd, setNewPwd]           = useState('');
+  const [confirmPwd, setConfirmPwd]   = useState('');
+  const [showNew, setShowNew]         = useState(false);
+  const [showConf, setShowConf]       = useState(false);
+  const [showCurr, setShowCurr]       = useState(false);
+  const [error, setError]             = useState('');
+  const [loading, setLoading]         = useState(false);
 
-  // 1. Super admin
-  if (e === SUPER_ADMIN_EMAIL && password === SUPER_ADMIN_PASS) {
-    return { role: 'super-admin', userName: 'Super Admin' };
+  async function handleSubmit(e) {
+    e.preventDefault();
+    setError('');
+    setLoading(true);
+
+    if (newPwd !== confirmPwd) {
+      setError('Passwords do not match.');
+      setLoading(false);
+      return;
+    }
+
+    const result = await changeEmployeePassword(pendingEmp.empCode, currentPwd, newPwd);
+    if (!result.ok) {
+      setError(result.error || 'Something went wrong. Please try again.');
+      setLoading(false);
+      return;
+    }
+    onComplete();
   }
 
-  // 2. HR Admin — check org data
-  try {
-    const raw  = localStorage.getItem(APP_DATA_KEY);
-    const data = raw ? JSON.parse(raw) : null;
-    const orgs = data?.organizationsData || [];
-    const org  = orgs.find(
-      o => String(o.hrAdminEmail || '').trim().toLowerCase() === e &&
-           String(o.temporaryPassword || '') === password
-    );
-    if (org) return { role: 'hr-admin', userName: org.hrAdminName || 'HR Admin', orgKey: org.key };
-  } catch (_) {}
+  const pwdWrap = { position: 'relative' };
+  const toggleBtn = { position: 'absolute', right: 10, top: '50%', transform: 'translateY(-50%)', background: 'none', border: 'none', cursor: 'pointer', fontSize: 16, color: 'var(--ink-3)', padding: 0 };
 
-  // 3. Employee credentials
-  try {
-    const raw   = localStorage.getItem(EMP_CREDENTIALS_KEY);
-    const creds = raw ? JSON.parse(raw) : null;
-    const code  = email.trim();
-    const match = creds?.[code];
-    if (match && match.password === password) {
-      return { role: 'employee', empCode: code, userName: match.name, designation: match.designation, managerCode: match.managerCode, orgKey: match.orgKey || '' };
-    }
-  } catch (_) {}
+  return (
+    <div id="page-login">
+      <div className="login-left">
+        <div className="login-brand anim-fadeup">
+          <div className="logo-wrap">
+            <img src={zaroLogo} alt="Zaro HR logo" className="login-logo-icon" />
+          </div>
+        </div>
 
-  return null;
+        <div className="anim-fadeup delay-1">
+          <h1 className="login-heading">Set your password</h1>
+          <p className="login-sub">
+            You're logged in with a temporary password. Create a permanent one to continue.
+          </p>
+        </div>
+
+        <form className="login-form anim-fadeup delay-3" onSubmit={handleSubmit}>
+          <div className="form-group">
+            <label className="lbl">Current (Temporary) Password</label>
+            <div className="pwd-wrap" style={pwdWrap}>
+              <input
+                type={showCurr ? 'text' : 'password'}
+                placeholder="Enter temporary password"
+                value={currentPwd}
+                onChange={e => setCurrentPwd(e.target.value)}
+                autoComplete="current-password"
+                required
+                autoFocus
+              />
+              <button type="button" className="pwd-toggle" style={toggleBtn} onClick={() => setShowCurr(p => !p)} tabIndex={-1}>
+                {showCurr ? '🙈' : '👁'}
+              </button>
+            </div>
+          </div>
+
+          <div className="form-group">
+            <label className="lbl">New Password</label>
+            <div className="pwd-wrap" style={pwdWrap}>
+              <input
+                type={showNew ? 'text' : 'password'}
+                placeholder="Min. 6 characters"
+                value={newPwd}
+                onChange={e => setNewPwd(e.target.value)}
+                autoComplete="new-password"
+                required
+              />
+              <button type="button" className="pwd-toggle" style={toggleBtn} onClick={() => setShowNew(p => !p)} tabIndex={-1}>
+                {showNew ? '🙈' : '👁'}
+              </button>
+            </div>
+          </div>
+
+          <div className="form-group">
+            <label className="lbl">Confirm New Password</label>
+            <div className="pwd-wrap" style={pwdWrap}>
+              <input
+                type={showConf ? 'text' : 'password'}
+                placeholder="Repeat new password"
+                value={confirmPwd}
+                onChange={e => setConfirmPwd(e.target.value)}
+                autoComplete="new-password"
+                required
+              />
+              <button type="button" className="pwd-toggle" style={toggleBtn} onClick={() => setShowConf(p => !p)} tabIndex={-1}>
+                {showConf ? '🙈' : '👁'}
+              </button>
+            </div>
+          </div>
+
+          {error && <div className="login-error">{error}</div>}
+
+          <button
+            type="submit"
+            className="btn btn-primary btn-xl w-full mt-8"
+            disabled={loading}
+          >
+            {loading ? 'Saving…' : 'Set Password & Continue →'}
+          </button>
+        </form>
+
+        <p className="login-help anim-fadeup delay-4">
+          Need help? Contact your HR Admin.
+        </p>
+      </div>
+
+      <RightPanel />
+    </div>
+  );
 }
 
 export default function LoginPage() {
@@ -51,38 +155,74 @@ export default function LoginPage() {
   const [showPwd, setShowPwd]       = useState(false);
   const [error, setError]           = useState('');
   const [loading, setLoading]       = useState(false);
+  const [forcePwChange, setForcePwChange] = useState(false);
+  const [pendingEmp, setPendingEmp]       = useState(null);
 
-  function handleSubmit(e) {
+  async function handleSubmit(e) {
     e.preventDefault();
     setError('');
     setLoading(true);
 
-    setTimeout(() => {
-      const user = resolveUser(identifier, password);
-      if (!user) {
-        setError('Invalid credentials. Check your email / employee code and password.');
+    const user = await resolveLoginUser(identifier, password, {
+      email: SUPER_ADMIN_EMAIL,
+      password: SUPER_ADMIN_PASS,
+    });
+    if (!user) {
+      setError('Invalid credentials. Check your email / employee code and password.');
+      setLoading(false);
+      return;
+    }
+
+    if (user.role === 'employee') {
+      if (user.isTemp) {
+        setPendingEmp(user);
+        setForcePwChange(true);
         setLoading(false);
         return;
       }
+      persistEmployeeSession({
+        empCode: user.empCode,
+        name: user.userName,
+        designation: user.designation,
+        managerCode: user.managerCode,
+        orgKey: user.orgKey || '',
+      });
+      login('employee', { userName: user.userName });
+      window.location.hash = '#employee';
+    } else if (user.role === 'hr-admin') {
+      login('hr-admin', {
+        orgKey: user.orgKey,
+        userName: user.userName,
+        isCoAdmin: !!user.isCoAdmin,
+        isScopedHR: !!user.isScopedHR,
+        hrTeamId: user.hrTeamId || null,
+        empCode: user.empCode || null,
+        allowedModules: user.allowedModules || null,
+      });
+      window.location.hash = '#hr-home';
+    } else {
+      login('super-admin', { userName: user.userName });
+      window.location.hash = '#organizations';
+    }
+  }
 
-      if (user.role === 'employee') {
-        try {
-          localStorage.setItem(EMP_SESSION_KEY, JSON.stringify({
-            empCode: user.empCode, name: user.userName,
-            designation: user.designation, managerCode: user.managerCode,
-            orgKey: user.orgKey || '',
-          }));
-        } catch (_) {}
-        login('employee', { userName: user.userName });
-        window.location.hash = '#employee';
-      } else if (user.role === 'hr-admin') {
-        login('hr-admin', { orgKey: user.orgKey, userName: user.userName });
-        window.location.hash = '#hr-home';
-      } else {
-        login('super-admin', { userName: user.userName });
-        window.location.hash = '#organizations';
-      }
-    }, 350);
+  if (forcePwChange && pendingEmp) {
+    return (
+      <ChangePasswordScreen
+        pendingEmp={pendingEmp}
+        onComplete={() => {
+          persistEmployeeSession({
+            empCode: pendingEmp.empCode,
+            name: pendingEmp.userName,
+            designation: pendingEmp.designation,
+            managerCode: pendingEmp.managerCode,
+            orgKey: pendingEmp.orgKey || '',
+          });
+          login('employee', { userName: pendingEmp.userName });
+          window.location.hash = '#employee';
+        }}
+      />
+    );
   }
 
   return (
@@ -102,7 +242,7 @@ export default function LoginPage() {
 
         <form className="login-form anim-fadeup delay-3" onSubmit={handleSubmit}>
           <div className="form-group">
-            <label className="lbl">Email Address</label>
+            <label className="lbl">Email or Employee Code</label>
             <input
               type="text"
               placeholder="you@company.com or employee code"
@@ -166,19 +306,7 @@ export default function LoginPage() {
         </p>
       </div>
 
-      {/* RIGHT PANEL */}
-      <div className="login-right">
-        <div className="login-right-grid"></div>
-        <div className="login-right-glow"></div>
-        <div className="login-right-content anim-fadein">
-          <h2 className="login-right-title">
-            Performance<br />management, <em>finally clear.</em>
-          </h2>
-          <p className="login-right-sub">
-            Run performance cycles with clarity, structure, and confidence.
-          </p>
-        </div>
-      </div>
+      <RightPanel />
     </div>
   );
 }

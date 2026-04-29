@@ -2,6 +2,19 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import zaroLogo from '../../images/final zaro logo.png';
 import { resolveBrandPalette, buildHeroGradient, resolveHero, buildHeroBackground, fillAccent, cardAccentStyle, cardStripeWidth, normalizeCardsMode } from '../brandPalettes';
+import {
+  readEmployeeSessionSync,
+  readAppDataSync,
+  readWizardStateSync,
+  readWorkflowSync,
+  hydrateWorkflow,
+  persistWorkflow,
+  readMessagesSync,
+  hydrateMessages,
+  persistMessages,
+  hydrateWizardState,
+  hydrateAppData,
+} from '../backend/stateStore';
 
 const EMP_SESSION_KEY = 'zarohr_emp_session';
 const WIZARD_STATE_KEY = 'zarohr_pms_wizard_state_v1';
@@ -38,7 +51,7 @@ const SCALE_COLORS = ['#DC2626', '#F97316', '#FBBF24', '#84CC16', '#22C55E', '#1
 // reserved for status semantics (rejected / pending / approved) elsewhere in the app, so
 // using them for decorative perspective stripes makes a blue-coded goal look "approved" or
 // an amber-coded goal look "pending review" at a glance.
-const PERSPECTIVE_COLORS = ['#2563EB', '#0891B2', '#4F46E5', '#7C3AED', '#DB2777', '#0EA5E9'];
+const PERSPECTIVE_COLORS = ['#3B82F6', '#38BDF8', '#6366F1', '#818CF8', '#A78BFA', '#22D3EE'];
 // Any perspective record that has one of these hexes stored was set from the old defaults;
 // we swap it at read-time for a safe colour so existing orgs get cleaned up automatically.
 const SEMANTIC_RESERVED_HEXES = new Set([
@@ -78,8 +91,7 @@ function getWorkflowStorageKey(orgKey = '') {
 
 function loadSession() {
   try {
-    const raw = localStorage.getItem(EMP_SESSION_KEY);
-    return raw ? JSON.parse(raw) : null;
+    return readEmployeeSessionSync();
   } catch {
     return null;
   }
@@ -87,9 +99,8 @@ function loadSession() {
 
 function loadCurrentPhase(orgKey) {
   try {
-    const raw = localStorage.getItem(APP_DATA_KEY);
-    if (!raw) return 'goal-setting';
-    const data = JSON.parse(raw);
+    const data = readAppDataSync();
+    if (!data) return 'goal-setting';
     const org = (data.organizationsData || []).find((item) => item.key === orgKey);
     const stored = org?.currentPhase || 'goal-setting';
     // With rating disabled, rating-only phases collapse back to goal-setting so the employee
@@ -103,9 +114,8 @@ function loadCurrentPhase(orgKey) {
 
 function loadOrgBrand(orgKey) {
   try {
-    const raw = localStorage.getItem(APP_DATA_KEY);
-    if (!raw) return {};
-    const data = JSON.parse(raw);
+    const data = readAppDataSync();
+    if (!data) return {};
     const org = (data.organizationsData || []).find((item) => item.key === orgKey);
     return {
       brandLogo: org?.brandLogo || null,
@@ -122,22 +132,10 @@ function loadOrgBrand(orgKey) {
 
 function loadConfig() {
   try {
-    const sessionRaw = localStorage.getItem(EMP_SESSION_KEY);
-    const session = sessionRaw ? JSON.parse(sessionRaw) : null;
+    const session = readEmployeeSessionSync();
     const preferredOrgKey = session?.orgKey || '';
     if (preferredOrgKey) {
-      const raw = localStorage.getItem(`${WIZARD_STATE_KEY}:${preferredOrgKey}`) || sessionStorage.getItem(`${WIZARD_STATE_KEY}:${preferredOrgKey}`);
-      if (raw) {
-        const parsed = JSON.parse(raw);
-        if (parsed?.config) return parsed.config;
-      }
-    }
-    for (let i = 0; i < localStorage.length; i += 1) {
-      const key = localStorage.key(i);
-      if (!key || !key.startsWith(WIZARD_STATE_KEY)) continue;
-      const raw = localStorage.getItem(key);
-      if (!raw) continue;
-      const parsed = JSON.parse(raw);
+      const parsed = readWizardStateSync(preferredOrgKey);
       if (parsed?.config) return parsed.config;
     }
   } catch {
@@ -148,24 +146,12 @@ function loadConfig() {
 
 function loadWorkflow(orgKey) {
   if (!orgKey) return { submissions: {}, notifications: [] };
-  try {
-    const raw = localStorage.getItem(getWorkflowStorageKey(orgKey));
-    const parsed = raw ? JSON.parse(raw) : null;
-    if (!parsed?.submissions) return { submissions: {}, notifications: [] };
-    return {
-      submissions: parsed.submissions || {},
-      notifications: Array.isArray(parsed.notifications) ? parsed.notifications : [],
-    };
-  } catch {
-    return { submissions: {}, notifications: [] };
-  }
+  return readWorkflowSync(orgKey);
 }
 
 function saveWorkflow(orgKey, workflow) {
   if (!orgKey) return;
-  try {
-    localStorage.setItem(getWorkflowStorageKey(orgKey), JSON.stringify(workflow));
-  } catch (_) {}
+  persistWorkflow(orgKey, workflow);
 }
 
 function getMessagesStorageKey(orgKey = '') {
@@ -178,25 +164,12 @@ function convKey(codeA, codeB) {
 
 function loadMessages(orgKey) {
   if (!orgKey) return { conversations: {} };
-  try {
-    const raw = localStorage.getItem(getMessagesStorageKey(orgKey));
-    const parsed = raw ? JSON.parse(raw) : null;
-    return parsed?.conversations ? parsed : { conversations: {} };
-  } catch {
-    return { conversations: {} };
-  }
+  return readMessagesSync(orgKey);
 }
 
 function saveMessages(orgKey, data) {
   if (!orgKey) return;
-  try {
-    localStorage.setItem(getMessagesStorageKey(orgKey), JSON.stringify(data));
-    // Dispatch storage event for same-page live updates across tabs
-    window.dispatchEvent(new StorageEvent('storage', {
-      key: getMessagesStorageKey(orgKey),
-      newValue: JSON.stringify(data),
-    }));
-  } catch (_) {}
+  persistMessages(orgKey, data);
 }
 
 function createNotification({
@@ -270,10 +243,11 @@ function resolveGroupAccess(group) {
   if (!group) return null;
   const prefill = group.prefillType || null; // null | 'kras-only' | 'kra-kpi'
   const canEdit = group.canEditOwn !== false;
+  const kpiRatingMode = group.kpiRatingMode === 'free-text' ? 'free-text' : 'rated';
 
   if (!prefill) {
     // No pre-fill: employee creates from scratch (Open Canvas / Guided Scratch)
-    return { goalCreationMode: 'employee-self', goalEmployeeEdit: 'edit-freely', goalKpiMode: group.libraryType || 'kra-kpi' };
+    return { goalCreationMode: 'employee-self', goalEmployeeEdit: 'edit-freely', goalKpiMode: group.libraryType || 'kra-kpi', kpiRatingMode };
   }
   if (!canEdit) {
     // Pre-filled, no editing allowed
@@ -283,10 +257,11 @@ function resolveGroupAccess(group) {
       goalCreationMode: 'admin-library',
       goalEmployeeEdit: prefill === 'kra-kpi' ? 'locked' : 'add-kpis',
       goalKpiMode: prefill,
+      kpiRatingMode,
     };
   }
   // Pre-filled + can edit (Prefill+Customize / Prefill+Guided)
-  return { goalCreationMode: 'admin-library', goalEmployeeEdit: 'edit-freely', goalKpiMode: prefill };
+  return { goalCreationMode: 'admin-library', goalEmployeeEdit: 'edit-freely', goalKpiMode: prefill, kpiRatingMode };
 }
 
 function buildInitialGoals(config, employee, group, libraries) {
@@ -703,7 +678,8 @@ function getGoalPlanMetrics(goals, config, accessMode) {
     return Number.isFinite(weight) && weight > 0 ? sum + weight : sum;
   }, 0);
 
-  const shouldTrackKpis = config?.goalCreationMode === 'employee-self' || config?.goalKpiMode === 'kra-only' || config?.goalKpiMode === 'kra-kpi';
+  const freeTextKpis = config?.kpiRatingMode === 'free-text';
+  const shouldTrackKpis = !freeTextKpis && (config?.goalCreationMode === 'employee-self' || config?.goalKpiMode === 'kra-kpi');
 
   // KPI coverage shows the live KPI weight total so the header responds while editing.
   // Mismatches are still tracked separately so validation can flag goals whose KPI
@@ -718,6 +694,7 @@ function getGoalPlanMetrics(goals, config, accessMode) {
       return Number.isFinite(w) && w > 0 ? inner + w : inner;
     }, 0);
     validKpiWeight += kpiSum;
+    if (!shouldTrackKpis) return;
     if (!Number.isFinite(goalWeight) || goalWeight <= 0) return;
     if (kpis.length === 0) return; // already counted as missing in validation
     if (Math.abs(kpiSum - goalWeight) > 0.01) {
@@ -766,7 +743,25 @@ function groupGoalsByPerspective(goals, perspectives) {
   return Array.from(groups.values()).sort((left, right) => left.order - right.order || left.perspective.localeCompare(right.perspective));
 }
 
-function getKpiRowIssues(goal) {
+function getEmployeeGoalGroup(config, employee) {
+  const groups = config?.goalGroups;
+  if (!groups || !employee) return null;
+  const explicitGroupName = String(employee?.assignedGoalGroupName || employee?.['Group Name'] || '').trim();
+  if (explicitGroupName) {
+    const namedGroup = groups.find((group) => String(group?.name || '').trim().toLowerCase() === explicitGroupName.toLowerCase());
+    if (namedGroup) return namedGroup;
+  }
+  for (const group of groups) {
+    const attrVal = String(employee[group.segmentAttr] || '').trim();
+    if (!attrVal) continue;
+    if ((group.segmentValues || []).some((value) => String(value?.name || value || '').trim().toLowerCase() === attrVal.toLowerCase())) {
+      return group;
+    }
+  }
+  return null;
+}
+
+function getKpiRowIssues(goal, { requireWeights = true } = {}) {
   const issues = [];
   (goal?.kpis || []).forEach((kpi, index) => {
     const fallbackLabel = `KPI ${index + 1}`;
@@ -775,7 +770,7 @@ function getKpiRowIssues(goal) {
     if (!kpiName) {
       issues.push({ kind: 'error', text: `${fallbackLabel} is missing a name` });
     }
-    if (!Number.isFinite(kpiWeight) || kpiWeight <= 0) {
+    if (requireWeights && (!Number.isFinite(kpiWeight) || kpiWeight <= 0)) {
       issues.push({ kind: 'error', text: `${kpiName || fallbackLabel} needs a weight greater than 0` });
     }
   });
@@ -792,7 +787,8 @@ function getGoalIssues(goal, { config, accessMode, perspectives, isEditableStruc
   const goalName = sanitizeText(goal.name);
   const goalWeight = Number(goal.weight);
   const kpis = goal.kpis || [];
-  const kpiRowIssues = getKpiRowIssues(goal);
+  const shouldValidateKpiWeights = config?.kpiRatingMode !== 'free-text';
+  const kpiRowIssues = getKpiRowIssues(goal, { requireWeights: shouldValidateKpiWeights });
 
   // Structural checks on a locked (already-approved) goal still surface as a card-level
   // error so a broken prior-round approval shows up on its own card instead of only as a
@@ -800,7 +796,7 @@ function getGoalIssues(goal, { config, accessMode, perspectives, isEditableStruc
   // can't edit the goal.
   if (isLocked) {
     issues.push(...kpiRowIssues);
-    if (kpis.length > 0 && Number.isFinite(goalWeight) && goalWeight > 0) {
+    if (shouldValidateKpiWeights && kpis.length > 0 && Number.isFinite(goalWeight) && goalWeight > 0) {
       const kpiWeightTotal = kpis.reduce((sum, kpi) => {
         const w = Number(kpi.weight);
         return Number.isFinite(w) && w > 0 ? sum + w : sum;
@@ -834,11 +830,13 @@ function getGoalIssues(goal, { config, accessMode, perspectives, isEditableStruc
   // KPI weights. It now runs universally.
   issues.push(...kpiRowIssues);
   let kpiWeightTotal = 0;
-  kpis.forEach((kpi) => {
-    const kpiWeight = Number(kpi.weight);
-    if (Number.isFinite(kpiWeight) && kpiWeight > 0) kpiWeightTotal += kpiWeight;
-  });
-  if (kpis.length > 0 && Number.isFinite(goalWeight) && goalWeight > 0 &&
+  if (shouldValidateKpiWeights) {
+    kpis.forEach((kpi) => {
+      const kpiWeight = Number(kpi.weight);
+      if (Number.isFinite(kpiWeight) && kpiWeight > 0) kpiWeightTotal += kpiWeight;
+    });
+  }
+  if (shouldValidateKpiWeights && kpis.length > 0 && Number.isFinite(goalWeight) && goalWeight > 0 &&
       Math.abs(kpiWeightTotal - goalWeight) > 0.01) {
     issues.push({ kind: 'error', text: `KPI weights ${kpiWeightTotal}% ≠ goal weight ${goalWeight}%` });
   }
@@ -849,22 +847,26 @@ function getGoalIssues(goal, { config, accessMode, perspectives, isEditableStruc
 // Universal structural-integrity check — no config dependency. Used by manager-side guards
 // (per-goal Approve button + reviewSubmission auto-reject) so a broken goal can never be
 // approved regardless of which user's config is loaded at the time.
-function isGoalStructurallyValid(goal) {
+function isGoalStructurallyValid(goal, config = null) {
   if (!goal) return false;
   if (!sanitizeText(goal.name)) return false;
   const w = Number(goal.weight);
   if (!Number.isFinite(w) || w <= 0) return false;
   const kpis = goal.kpis || [];
-  if (kpis.length === 0) return false;
+  const requiresKpis = config?.goalKpiMode === 'kra-kpi' || (!config?.goalKpiMode && config?.goalCreationMode === 'employee-self');
+  if (requiresKpis && kpis.length === 0) return false;
+  const shouldValidateKpiWeights = requiresKpis && config?.kpiRatingMode !== 'free-text';
   let kpiSum = 0;
   for (const kpi of kpis) {
     if (!sanitizeText(kpi.name)) return false;
-    const kw = Number(kpi.weight);
-    if (!Number.isFinite(kw) || kw <= 0) return false;
-    kpiSum += kw;
+    if (shouldValidateKpiWeights) {
+      const kw = Number(kpi.weight);
+      if (!Number.isFinite(kw) || kw <= 0) return false;
+      kpiSum += kw;
+    }
   }
   // KPI weights must sum to the goal weight — otherwise the evaluation math is miscalibrated.
-  if (Math.abs(kpiSum - w) > 0.01) return false;
+  if (shouldValidateKpiWeights && Math.abs(kpiSum - w) > 0.01) return false;
   return true;
 }
 
@@ -872,7 +874,7 @@ function getGoalPlanValidation(goals, config, accessMode, limits, perspectives) 
   const errors = [];
   const allGoals = goals || [];
   const isEditableStructure = config?.goalCreationMode === 'employee-self' || accessMode === 'edit-freely';
-  const mustCreateKpis = config?.goalCreationMode === 'employee-self' || config?.goalKpiMode === 'kra-only' || accessMode === 'edit-freely';
+  const mustCreateKpis = (config?.goalCreationMode === 'employee-self' || accessMode === 'edit-freely') && config?.goalKpiMode !== 'kra-only';
 
   if (allGoals.length === 0) {
     errors.push('Add at least one goal before submitting.');
@@ -1187,7 +1189,7 @@ function GoalLibraryPanel({ kras, libraryType, libraryName, canAdd, onAdd, added
                 {kpiList.length > 0 && !isSelected && (
                   <span style={{ fontSize: 10.5, color: '#64748B' }}>{kpiList.length} KPI{kpiList.length !== 1 ? 's' : ''}</span>
                 )}
-                {kra.perspName && (
+                {kra.perspName && kra.perspName !== 'All KRAs' && (
                   <span style={{ fontSize: 10.5, fontWeight: 700, color, background: `${color}14`, padding: '2px 8px', borderRadius: 999, border: `1px solid ${color}22` }}>
                     {kra.perspName}
                   </span>
@@ -1436,9 +1438,25 @@ function BackToAdminButton({ onClick }) {
 
 export default function EmployeePage() {
   const session = useMemo(loadSession, []);
-  const config = useMemo(loadConfig, []);
-  const currentPhase = useMemo(() => loadCurrentPhase(session?.orgKey || ''), [session]);
-  const orgBrand = useMemo(() => loadOrgBrand(session?.orgKey || ''), [session]);
+  const [config, setConfig] = useState(() => loadConfig());
+  const [appData, setAppData] = useState(() => readAppDataSync());
+  const currentPhase = useMemo(() => {
+    const org = (appData?.organizationsData || []).find((item) => item.key === (session?.orgKey || ''));
+    const stored = org?.currentPhase || 'goal-setting';
+    if (!RATING_ENABLED && stored !== 'goal-setting' && stored !== 'mid-year-review') return 'goal-setting';
+    return stored;
+  }, [appData, session]);
+  const orgBrand = useMemo(() => {
+    const org = (appData?.organizationsData || []).find((item) => item.key === (session?.orgKey || ''));
+    return {
+      brandLogo: org?.brandLogo || null,
+      brandName: org?.brandName || org?.name || '',
+      brandPalette: org?.brandPalette || null,
+      brandHero: org?.brandHero || null,
+      brandCards: org?.brandCards || 'default',
+      brandFill: org?.brandFill || 'gradient',
+    };
+  }, [appData, session]);
   const brandPalette = useMemo(() => resolveBrandPalette(orgBrand.brandPalette), [orgBrand.brandPalette]);
   const heroResolved = useMemo(() => resolveHero(orgBrand.brandHero, brandPalette), [orgBrand.brandHero, brandPalette]);
   const heroBackgroundStyle = useMemo(() => buildHeroBackground(heroResolved), [heroResolved]);
@@ -1517,6 +1535,26 @@ export default function EmployeePage() {
       return next;
     });
   };
+
+  useEffect(() => {
+    if (!session?.orgKey) return;
+    let cancelled = false;
+    hydrateAppData().then((data) => {
+      if (!cancelled && data) setAppData(data);
+    });
+    hydrateWizardState(session.orgKey).then((state) => {
+      if (!cancelled && state?.config) setConfig(state.config);
+    });
+    hydrateWorkflow(session.orgKey).then((wf) => {
+      if (!cancelled && wf) setWorkflow(wf);
+    });
+    hydrateMessages(session.orgKey).then((data) => {
+      if (!cancelled && data) setMessagesData(data);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [session?.orgKey]);
   const [notifDropdownOpen, setNotifDropdownOpen] = useState(false);
   const notifDropdownRef = useRef(null);
   useEffect(() => {
@@ -1533,23 +1571,7 @@ export default function EmployeePage() {
   const perspectives = useMemo(() => (config?.perspectives || []).filter((item) => item?.name && Number(item?.weight) > 0), [config]);
 
   // Find which configured group this employee belongs to (new multi-group model)
-  const employeeGroup = useMemo(() => {
-    const groups = config?.goalGroups;
-    if (!groups || !employee) return null;
-    const explicitGroupName = String(employee?.assignedGoalGroupName || employee?.['Group Name'] || '').trim();
-    if (explicitGroupName) {
-      const namedGroup = groups.find((group) => String(group?.name || '').trim().toLowerCase() === explicitGroupName.toLowerCase());
-      if (namedGroup) return namedGroup;
-    }
-    for (const group of groups) {
-      const attrVal = String(employee[group.segmentAttr] || '').trim();
-      if (!attrVal) continue;
-      if ((group.segmentValues || []).some((value) => String(value?.name || value || '').trim().toLowerCase() === attrVal.toLowerCase())) {
-        return group;
-      }
-    }
-    return null;
-  }, [config, employee]);
+  const employeeGroup = useMemo(() => getEmployeeGoalGroup(config, employee), [config, employee]);
 
   // Derive effective goalCreationMode / goalEmployeeEdit / goalKpiMode from the group model,
   // falling back to whatever the wizard stored directly in config.
@@ -1744,10 +1766,11 @@ export default function EmployeePage() {
   const canAddKpi = canEditGoalPlan && (effectiveConfig?.goalCreationMode === 'employee-self' || accessMode === 'edit-freely' || accessMode === 'add-kpis');
   const canEditExistingKpi = canEditGoalPlan && (effectiveConfig?.goalCreationMode === 'employee-self' || accessMode === 'edit-freely' || (accessMode === 'add-kpis' && effectiveConfig?.goalKpiMode === 'kra-only'));
   const hasKpis = myGoals.some((goal) => (goal.kpis || []).length > 0);
+  const rateAtGoalLevel = effectiveConfig?.kpiRatingMode === 'free-text' || !hasKpis;
 
-  const totalRatable = hasKpis
-    ? myGoals.reduce((sum, goal) => sum + (goal.kpis || []).length, 0)
-    : myGoals.length;
+  const totalRatable = rateAtGoalLevel
+    ? myGoals.length
+    : myGoals.reduce((sum, goal) => sum + (goal.kpis || []).length, 0);
   const totalRated = Object.keys(selfRatings).filter((key) => selfRatings[key] > 0).length;
   const selfEvalPct = totalRatable > 0 ? Math.round((totalRated / totalRatable) * 100) : 0;
 
@@ -1967,6 +1990,10 @@ export default function EmployeePage() {
     const targetKey = normalizeCode(employeeCode);
     const current = workflow?.submissions?.[targetKey];
     if (!current) return;
+    const targetEmployee = employees.find((row) => normalizeCode(row['Employee Code']) === targetKey);
+    const targetGroup = getEmployeeGoalGroup(config, targetEmployee);
+    const targetOverrides = resolveGroupAccess(targetGroup);
+    const targetEffectiveConfig = targetOverrides ? { ...config, ...targetOverrides } : config;
 
     const decidedAt = new Date().toISOString();
     const updatedGoals = (current.goals || []).map((goal) => {
@@ -1990,7 +2017,7 @@ export default function EmployeePage() {
       }
       // Defensive guard: a structurally broken goal can never be approved. Force send-back
       // with an explanatory note so the employee knows what to fix.
-      if (status === 'approved' && !isGoalStructurallyValid(goal)) {
+      if (status === 'approved' && !isGoalStructurallyValid(goal, targetEffectiveConfig)) {
         status = 'rejected';
         note = note || 'Missing required fields — please fix and resubmit.';
       }
@@ -2451,7 +2478,7 @@ export default function EmployeePage() {
                             {goal.name || <span style={{ color: '#94A3B8', fontStyle: 'italic' }}>Untitled goal</span>}
                           </div>
                           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 5, marginTop: 5 }}>
-                            {goal.perspName && (
+                            {goal.perspName && goal.perspName !== 'All KRAs' && (
                               <span style={{ maxWidth: '100%', fontSize: 11, fontWeight: 700, color, background: `${color}14`, padding: '2px 8px', borderRadius: 999, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{goal.perspName}</span>
                             )}
                             <span style={{ fontSize: 11.5, color: '#64748B' }}>{goalKpis.length} KPI{goalKpis.length !== 1 ? 's' : ''}</span>
@@ -2546,7 +2573,7 @@ export default function EmployeePage() {
               const canEditKraFieldsNow = canEditKraFields && !goalIsLocked;
               const canEditExistingKpiNow = canEditExistingKpi && !goalIsLocked;
               const canAddKpiNow = canAddKpi && !goalIsLocked;
-              const showPerspectiveField = perspectives.length > 0 && canEditKraFieldsNow;
+              const showPerspectiveField = perspectives.length > 0 && canEditKraFieldsNow && config?.frameworkId !== 'kra-kpi';
               const modalIssues = goalIssuesById[goal.id || `goal_${goalIndex}`] || [];
               const closeModal = () => { setEditingGoalId(null); setRewritingGoalId(null); };
               return (
@@ -2699,7 +2726,7 @@ export default function EmployeePage() {
                         </div>
                       ) : (
                         <div style={{ marginBottom: 14, padding: '12px 14px', borderRadius: 12, background: '#F8FAFC', border: '1px solid #E9EDF2' }}>
-                          <div style={{ fontSize: 10.5, fontWeight: 700, color, textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 4 }}>{goal.perspName || 'No perspective'}</div>
+                          {goal.perspName && goal.perspName !== 'All KRAs' && <div style={{ fontSize: 10.5, fontWeight: 700, color, textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 4 }}>{goal.perspName}</div>}
                           <div style={{ fontSize: 15, fontWeight: 800, color: '#0D1117' }}>{goal.name}</div>
                           <span style={{ fontSize: 12, fontWeight: 700, color, background: `${color}14`, padding: '4px 10px', borderRadius: 999, display: 'inline-block', marginTop: 6 }}>Weight: {goal.weight || 0}%</span>
                         </div>
@@ -2739,7 +2766,7 @@ export default function EmployeePage() {
                                           overflowY: 'auto',
                                         }}
                                       />
-                                      {!isSuggestionMode && (
+                                      {!isSuggestionMode && effectiveConfig?.kpiRatingMode !== 'free-text' && (
                                         <div style={{ display: 'flex', gap: 3, alignItems: 'flex-start' }}>
                                           <input value={kpi.weight} onChange={(e) => updateKpi(goal.id, kpi.id, 'weight', e.target.value)} placeholder="Wt %" type="number" min="0" step="1" style={{ width: 60, padding: '9px 6px', borderRadius: 9, border: '1.5px solid #D9E2EC', fontFamily: 'inherit', fontSize: 13 }} />
                                           <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
@@ -2765,7 +2792,7 @@ export default function EmployeePage() {
                                       {isEmployeeAdded ? <span style={{ marginLeft: 8, fontSize: 12, fontWeight: 700, color: '#2563EB', background: '#EFF6FF', padding: '2px 9px', borderRadius: 999 }}>Suggested</span> : null}
                                     </div>
                                     <div style={{ fontSize: 12.5, color: '#94A3B8', marginTop: 4 }}>
-                                      {kpi.weight ? `Weight: ${kpi.weight}%` : 'Additional KPI'}
+                                      {effectiveConfig?.kpiRatingMode !== 'free-text' && kpi.weight ? `Weight: ${kpi.weight}%` : 'Additional KPI'}
                                       {kpi.target ? ` · Target: ${kpi.target}` : ''}
                                     </div>
                                   </div>
@@ -3374,7 +3401,10 @@ export default function EmployeePage() {
 
         {visible.map(({ report, reportCode, submission, bucket }) => {
           const reportGoals = submission?.goals || [];
-          const metrics = getGoalPlanMetrics(reportGoals, config, getGoalAccessMode(config));
+          const reportGroup = getEmployeeGoalGroup(config, report);
+          const reportOverrides = resolveGroupAccess(reportGroup);
+          const reportEffectiveConfig = reportOverrides ? { ...config, ...reportOverrides } : config;
+          const metrics = getGoalPlanMetrics(reportGoals, reportEffectiveConfig, getGoalAccessMode(reportEffectiveConfig));
           const statusMeta = getSubmissionStatusMeta(submission);
           const normalizedCode = normalizeCode(reportCode);
           const reminderState = getReminderState(reportCode);
@@ -3442,7 +3472,9 @@ export default function EmployeePage() {
 	                </div>
 	                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
 	                  <div style={{ fontSize: 12, color: '#64748B' }}>Goals {metrics.goalPct}%</div>
-	                  <div style={{ fontSize: 12, color: '#64748B' }}>KPI {metrics.kpiPct}%</div>
+	                  {metrics.shouldTrackKpis && (
+	                    <div style={{ fontSize: 12, color: '#64748B' }}>KPI {metrics.kpiPct}%</div>
+	                  )}
 	                  <div style={{ fontSize: 12, color: '#64748B' }}>{reportGoals.length} goals</div>
 	                </div>
 	              </div>
@@ -3462,6 +3494,11 @@ export default function EmployeePage() {
   // Inline review panel — the approval surface that used to live in renderApprovals,
   // now embedded inside each team-member card.
   function renderReviewPanel(submission, bucket) {
+    const reviewEmployee = employees.find((row) => normalizeCode(row['Employee Code']) === normalizeCode(submission.employeeCode));
+    const reviewGroup = getEmployeeGoalGroup(config, reviewEmployee);
+    const reviewOverrides = resolveGroupAccess(reviewGroup);
+    const reviewEffectiveConfig = reviewOverrides ? { ...config, ...reviewOverrides } : config;
+    const reviewTracksKpiWeights = reviewEffectiveConfig?.kpiRatingMode !== 'free-text';
     const readOnly = bucket !== 'pending';
     const setPick = (empCode, goalId, status) => {
       setGoalReviewPicks((prev) => {
@@ -3489,7 +3526,7 @@ export default function EmployeePage() {
     const approvedPickCount = pendingGoals.filter((g) => picks[g.id]?.status === 'approve').length;
     // Pending goals that are structurally broken — they can never be approved. "Approve all"
     // hides when any exist; reviewSubmission() force-rejects them as a belt-and-braces guard.
-    const brokenPendingCount = pendingGoals.filter((g) => !isGoalStructurallyValid(g)).length;
+    const brokenPendingCount = pendingGoals.filter((g) => !isGoalStructurallyValid(g, reviewEffectiveConfig)).length;
 
     return (
       <div>
@@ -3519,7 +3556,7 @@ export default function EmployeePage() {
         {(submission.goals || []).map((goal) => {
           const color = getPerspectiveColor(goal, perspectives);
           const locked = goal.reviewStatus === 'approved';
-          const broken = !isGoalStructurallyValid(goal);
+          const broken = !isGoalStructurallyValid(goal, reviewEffectiveConfig);
           const pick = picks[goal.id];
           const markedApprove = !readOnly && !locked && pick?.status === 'approve';
           const markedReject = !readOnly && !locked && pick?.status === 'reject';
@@ -3534,7 +3571,7 @@ export default function EmployeePage() {
             }}>
               <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap', marginBottom: 10 }}>
                 <div style={{ minWidth: 0, flex: 1 }}>
-                  {goal.perspName && (
+                  {goal.perspName && goal.perspName !== 'All KRAs' && (
                     <div style={{ fontSize: 11, fontWeight: 700, color, textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 4 }}>{goal.perspName}</div>
                   )}
                   <div style={{ fontSize: 14.5, fontWeight: 700, color: '#0D1117' }}>{goal.name || <span style={{ color: '#94A3B8', fontStyle: 'italic' }}>Untitled goal</span>}</div>
@@ -3607,7 +3644,8 @@ export default function EmployeePage() {
                         )}
                       </div>
                       <div style={{ fontSize: 11.5, color: '#64748B', flexShrink: 0 }}>
-                        {kpi.weight ? `${kpi.weight}%` : '—'}{kpi.target ? ` · ${kpi.target}` : ''}
+                        {reviewTracksKpiWeights ? (kpi.weight ? `${kpi.weight}%` : '—') : 'Reference KPI'}
+                        {kpi.target ? ` · ${kpi.target}` : ''}
                       </div>
                     </div>
                   ))}
@@ -3908,15 +3946,16 @@ export default function EmployeePage() {
         {myGoals.map((goal) => {
           const color = getPerspectiveColor(goal, perspectives);
           const goalHasKpis = (goal.kpis || []).length > 0;
+          const goalRatedAtKraLevel = effectiveConfig?.kpiRatingMode === 'free-text' || !goalHasKpis;
           return (
             <div key={goal.id} style={{ background: '#fff', border: '1.5px solid #E9EDF2', borderRadius: 12, marginBottom: 14, overflow: 'hidden' }}>
               <div style={{ padding: '13px 18px', borderLeft: `4px solid ${color}`, display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
                 <div style={{ flex: 1, minWidth: 180 }}>
-                  {goal.perspName ? <div style={{ fontSize: 10.5, fontWeight: 700, color, textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 3 }}>{goal.perspName}</div> : null}
+                  {goal.perspName && goal.perspName !== 'All KRAs' ? <div style={{ fontSize: 10.5, fontWeight: 700, color, textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 3 }}>{goal.perspName}</div> : null}
                   <div style={{ fontSize: 14, fontWeight: 700, color: '#0D1117' }}>{goal.name}</div>
                 </div>
                 <span style={{ fontSize: 12, fontWeight: 700, color, background: `${color}14`, padding: '3px 10px', borderRadius: 6 }}>Weight: {goal.weight}%</span>
-                {!goalHasKpis ? (
+                {goalRatedAtKraLevel ? (
                   <div style={{ display: 'flex', gap: 5 }}>
                     {currentScale.map((step) => (
                       <button
@@ -3946,31 +3985,41 @@ export default function EmployeePage() {
                 <div key={kpi.id} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '11px 18px 11px 26px', borderTop: '1px solid #F1F5F9', flexWrap: 'wrap' }}>
                   <div style={{ flex: 1, minWidth: 180 }}>
                     <div style={{ fontSize: 13, color: '#1E293B' }}>{kpi.name}</div>
-                    <div style={{ fontSize: 11, color: '#9CA3AF', marginTop: 2 }}>Weight: {kpi.weight}%</div>
+                    <div style={{ fontSize: 11, color: '#9CA3AF', marginTop: 2 }}>
+                      {effectiveConfig?.kpiRatingMode === 'free-text'
+                        ? 'Reference KPI'
+                        : `Weight: ${kpi.weight}%`}
+                    </div>
                   </div>
-                  <div style={{ display: 'flex', gap: 5, alignItems: 'center' }}>
-                    {currentScale.map((step) => (
-                      <button
-                        key={step.n}
-                        onClick={() => setRating(goal.name, kpi.name, step.n)}
-                        title={`${step.n} — ${step.l}`}
-                        style={{
-                          width: 30,
-                          height: 30,
-                          borderRadius: '50%',
-                          border: `2px solid ${getRating(goal.name, kpi.name) === step.n ? SCALE_COLORS[step.n - 1] : '#E2E8F0'}`,
-                          background: getRating(goal.name, kpi.name) === step.n ? SCALE_COLORS[step.n - 1] : '#fff',
-                          color: getRating(goal.name, kpi.name) === step.n ? '#fff' : '#9CA3AF',
-                          fontSize: 11,
-                          fontWeight: 700,
-                          cursor: 'pointer',
-                          fontFamily: 'inherit',
-                        }}
-                      >
-                        {step.n}
-                      </button>
-                    ))}
-                  </div>
+                  {!goalRatedAtKraLevel ? (
+                    <div style={{ display: 'flex', gap: 5, alignItems: 'center' }}>
+                      {currentScale.map((step) => (
+                        <button
+                          key={step.n}
+                          onClick={() => setRating(goal.name, kpi.name, step.n)}
+                          title={`${step.n} — ${step.l}`}
+                          style={{
+                            width: 30,
+                            height: 30,
+                            borderRadius: '50%',
+                            border: `2px solid ${getRating(goal.name, kpi.name) === step.n ? SCALE_COLORS[step.n - 1] : '#E2E8F0'}`,
+                            background: getRating(goal.name, kpi.name) === step.n ? SCALE_COLORS[step.n - 1] : '#fff',
+                            color: getRating(goal.name, kpi.name) === step.n ? '#fff' : '#9CA3AF',
+                            fontSize: 11,
+                            fontWeight: 700,
+                            cursor: 'pointer',
+                            fontFamily: 'inherit',
+                          }}
+                        >
+                          {step.n}
+                        </button>
+                      ))}
+                    </div>
+                  ) : (
+                    <div style={{ fontSize: 11.5, color: '#94A3B8', fontWeight: 600 }}>
+                      Context only
+                    </div>
+                  )}
                 </div>
               ))}
             </div>
@@ -4031,7 +4080,8 @@ export default function EmployeePage() {
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 18 }}>
             {[
               { label: 'Designation / Role', value: employeeDesignation || '—' },
-              { label: 'Department', value: employee?.Department || employee?.[config?.goalSegmentAttr] || '—' },
+              { label: 'Department', value: employee?.Department || '—' },
+              { label: employeeGroup?.segmentAttr || 'Role', value: (employeeGroup?.segmentAttr ? (employee?.[employeeGroup.segmentAttr] || '—') : (employeeDesignation || '—')) },
               { label: 'Reporting Manager', value: managerName || '—' },
               { label: 'Framework', value: config?.frameworkId?.toUpperCase() || '—' },
             ].map(({ label, value }) => (
@@ -4294,6 +4344,7 @@ export default function EmployeePage() {
   })();
 
   const impersonatedFromAdmin = !!session?._impersonatedFromAdmin;
+  const dualRoleFromHR = !!session?._dualRoleFromHR;
   function backToAdmin() {
     try { localStorage.removeItem(EMP_SESSION_KEY); } catch (_) {}
     window.location.hash = '#hr-home';
@@ -4333,7 +4384,7 @@ export default function EmployeePage() {
   return (
     <div style={{ height: '100vh', overflow: 'hidden', display: 'flex', flexDirection: 'column', background: '#F0F4F8', fontFamily: "'Geist','Inter','Segoe UI',Arial,sans-serif", fontSize: 15, color: '#0D1117' }}>
 
-      {impersonatedFromAdmin && <BackToAdminButton onClick={backToAdmin} />}
+      {(impersonatedFromAdmin || dualRoleFromHR) && <BackToAdminButton onClick={backToAdmin} />}
 
       {reviewConfirm && createPortal(
         <ReviewConfirmModal

@@ -1,30 +1,48 @@
 import { useState } from 'react';
 import { useApp, SUPER_ADMIN_PASS } from '../AppContext';
+import { deleteOrganizationRecord } from '../backend/stateStore';
 import '../admin.css';
 
 export default function DeleteOrgModal({ orgKey, onClose, onDeleted }) {
-  const { orgs, setOrgs, feedData, setFeedData, pendingActions, setPendingActions, dashboardFlags, setDashboardFlags } = useApp();
+  const { orgs, feedData, pendingActions, dashboardFlags, applyAppData, clearOrganizationState } = useApp();
   const [pwd, setPwd]     = useState('');
   const [error, setError] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState('');
 
   const org = orgs.find(o => o.key === orgKey);
 
-  function handleDelete() {
+  async function handleDelete() {
     if (pwd !== SUPER_ADMIN_PASS) {
       setError(true);
       return;
     }
+    setSubmitting(true);
+    setSubmitError('');
+
+    const removed = await deleteOrganizationRecord(orgKey);
+    if (!removed.ok) {
+      setSubmitting(false);
+      setSubmitError(removed.error || 'Failed to delete organization from backend.');
+      return;
+    }
+
     // Clean up references
     const nextFeed    = feedData.filter(f => f.orgKey !== orgKey);
     const nextPending = pendingActions.filter(p => p.orgKey !== orgKey);
     const nextFlags   = { ...dashboardFlags };
     if (nextFlags.licenseOverageOrgKey === orgKey) nextFlags.licenseOverageOrgKey = null;
+    const nextOrgs = orgs.filter(o => o.key !== orgKey);
 
-    setFeedData(nextFeed);
-    setPendingActions(nextPending);
-    setDashboardFlags(nextFlags);
-    setOrgs(orgs.filter(o => o.key !== orgKey));
+    applyAppData({
+      feedData: nextFeed,
+      pendingActions: nextPending,
+      dashboardFlags: nextFlags,
+      orgs: nextOrgs,
+    });
+    clearOrganizationState(orgKey);
     onDeleted && onDeleted();
+    setSubmitting(false);
     onClose();
   }
 
@@ -41,17 +59,20 @@ export default function DeleteOrgModal({ orgKey, onClose, onDeleted }) {
             type="password"
             placeholder="Enter your password"
             value={pwd}
-            onChange={e => { setPwd(e.target.value); setError(false); }}
+            onChange={e => { setPwd(e.target.value); setError(false); setSubmitError(''); }}
             autoFocus
             autoComplete="off"
           />
           {error && (
             <div className="input-hint hint-err">Incorrect password.</div>
           )}
+          {submitError && (
+            <div className="input-hint hint-err">{submitError}</div>
+          )}
         </div>
         <div className="glass-actions">
-          <button className="btn btn-secondary" onClick={onClose}>Cancel</button>
-          <button className="btn btn-danger" onClick={handleDelete}>Delete</button>
+          <button className="btn btn-secondary" onClick={onClose} disabled={submitting}>Cancel</button>
+          <button className="btn btn-danger" onClick={handleDelete} disabled={submitting}>{submitting ? 'Deleting…' : 'Delete'}</button>
         </div>
       </div>
     </div>

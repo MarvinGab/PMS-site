@@ -1,10 +1,13 @@
 import { useState, useEffect, Component, lazy, Suspense } from 'react';
 import { AppProvider, useApp } from './AppContext';
+import { readWizardStateSync } from './backend/stateStore';
 import LoginPage from './pages/LoginPage';
 import DashboardPage from './pages/DashboardPage';
 import OrganizationsPage from './pages/OrganizationsPage';
 import CreateOrgPage from './pages/CreateOrgPage';
 import EmployeePage from './pages/EmployeePage';
+
+const EMP_CREDENTIALS_KEY = 'zarohr_emp_credentials';
 
 const PMSWizard = lazy(() => import('./PMSWizard'));
 const HRCycleDashboard = lazy(() => import('./pages/HRCycleDashboard'));
@@ -176,6 +179,35 @@ function Router() {
           : o
       );
       setOrgs(updated);
+
+      // Provision employee credentials with temp password (isTemp=true).
+      // Skip any employee whose credential already exists to preserve permanent passwords.
+      const org = orgs.find((o) => o.key === orgKey);
+      const tempPass = org?.temporaryPassword;
+      if (tempPass) {
+        const wizardState = readWizardStateSync(orgKey);
+        const employees = wizardState?.config?.employeeUploadData?.employees || [];
+        if (employees.length > 0) {
+          try {
+            const raw = localStorage.getItem(EMP_CREDENTIALS_KEY);
+            const existing = raw ? JSON.parse(raw) : {};
+            employees.forEach((emp) => {
+              const code = String(emp['Employee Code'] || '').trim();
+              if (code && !existing[code]) {
+                existing[code] = {
+                  password: tempPass,
+                  name: emp['Employee Name'] || '',
+                  designation: emp.Designation || emp.Role || '',
+                  managerCode: emp['Reporting Manager Code'] || '',
+                  orgKey: orgKey || '',
+                  isTemp: true,
+                };
+              }
+            });
+            localStorage.setItem(EMP_CREDENTIALS_KEY, JSON.stringify(existing));
+          } catch (_) {}
+        }
+      }
     }
 
     return <PMSWizard orgKeyOverride={orgKey || ''} orgNameOverride={orgName} onLaunched={handleLaunched} />;
