@@ -11,9 +11,7 @@ export default function OrgDetailModal({ orgKey, onClose }) {
   const setup = getOrganizationSetupMeta(org);
   const employeeCount = getOrganizationEmployeeCount(org);
   const seatPct = org.seats ? ((employeeCount || 0) / org.seats * 100).toFixed(1) + '%' : '0%';
-  const modulesText = Array.isArray(org.selectedModules) && org.selectedModules.length
-    ? org.selectedModules.join(', ')
-    : 'Core PMS only';
+  const modulesText = 'Performance Management';
 
   return (
     <div className="org-detail-overlay" onClick={e => { if (e.target === e.currentTarget) onClose(); }}>
@@ -82,8 +80,8 @@ export default function OrgDetailModal({ orgKey, onClose }) {
               </div>
               <div className="org-credential">
                 <div>
-                  <strong>Temporary Password</strong>
-                  <code>{org.temporaryPassword || 'Not assigned'}</code>
+                  <strong>Admin Access</strong>
+                  <code>Use Communications or Reset Password actions</code>
                 </div>
               </div>
             </div>

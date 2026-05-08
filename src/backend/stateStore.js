@@ -1,5 +1,6 @@
 import { shouldUseSupabase, getBackendDiagnostics } from './config';
 import { supabase } from './supabaseClient';
+import { hashPasswordValue } from './passwordCrypto';
 
 const APP_DATA_KEY = 'zarohr_app_data_v1';
 const WIZARD_STATE_KEY = 'zarohr_pms_wizard_state_v1';
@@ -8,7 +9,7 @@ const MESSAGES_KEY = 'zarohr_messages_v1';
 const SESSION_KEY = 'zarohr_auth_session';
 const EMP_SESSION_KEY = 'zarohr_emp_session';
 const EMP_CREDENTIALS_KEY = 'zarohr_emp_credentials';
-const NORMALIZED_SYNC_KEY_PREFIX = 'zarohr_normalized_sync_v1';
+const NORMALIZED_SYNC_KEY_PREFIX = 'zarohr_normalized_sync_v2';
 
 const warnedKeys = new Set();
 const ORGANIZATION_SELECT = `
@@ -110,7 +111,7 @@ function writeNormalizedSyncSignature(orgKey = '', signature) {
   writeLocalJson(getNormalizedSyncKey(orgKey), signature);
 }
 
-function getPrefillSlots(group) {
+function getAssignmentSlots(group) {
   const values = Array.isArray(group?.segmentValues)
     ? group.segmentValues.map((value) => String(value || '').trim()).filter(Boolean)
     : [];
@@ -121,7 +122,7 @@ function getPrefillSlots(group) {
 }
 
 function getPrefillAssignments(group) {
-  const expected = getPrefillSlots(group);
+  const expected = getAssignmentSlots(group);
   const existing = Array.isArray(group?.prefillAssignments) ? group.prefillAssignments : [];
   const fallbackData = expected.length === 1 ? (Array.isArray(group?.prefillData) ? group.prefillData : []) : [];
   return expected.map((slot) => {
@@ -134,6 +135,26 @@ function getPrefillAssignments(group) {
   });
 }
 
+function getLibraryAssignments(group) {
+  const expected = getAssignmentSlots(group);
+  const existing = Array.isArray(group?.libraryAssignments) ? group.libraryAssignments : [];
+  const fallbackLibraryId = expected.length === 1 ? group?.libraryId ?? null : null;
+  return expected.map((slot) => {
+    const match = existing.find((assignment) => normalizeLower(assignment?.slotKey) === normalizeLower(slot.slotKey));
+    return {
+      slotKey: slot.slotKey,
+      label: slot.label,
+      libraryId: match?.libraryId ?? fallbackLibraryId ?? null,
+    };
+  });
+}
+
+function makeLibraryKey(seed, fallback) {
+  const value = String(seed || '').trim();
+  if (value) return value;
+  return String(fallback || '').trim();
+}
+
 function buildGoalLibraryRows(organizationId, config) {
   const rows = [];
 
@@ -141,9 +162,12 @@ function buildGoalLibraryRows(organizationId, config) {
     config.goalLibraries.forEach((library, index) => {
       rows.push({
         organization_id: organizationId,
-        group_id: null,
+        library_key: makeLibraryKey(library?.id, `goal-library-${index + 1}`),
         name: String(library?.name || `Library ${index + 1}`).trim(),
-        library_type: `goal-library:${String(library?.type || 'unknown').trim() || 'unknown'}`,
+        library_type: String(library?.type || 'unknown').trim() || 'unknown',
+        scope_type: 'reusable-library',
+        status: 'active',
+        version: 1,
         payload: {
           source: 'goalLibraries',
           library,
@@ -157,12 +181,16 @@ function buildGoalLibraryRows(organizationId, config) {
       Object.entries(config.goalLibraryData.data || {}).forEach(([groupKey, kras]) => {
         rows.push({
           organization_id: organizationId,
-          group_id: String(groupKey || '').trim() || null,
+          library_key: makeLibraryKey(`legacy-goal-library:${groupKey}`, `legacy-goal-library-${rows.length + 1}`),
           name: String(groupKey || 'All Employees').trim() || 'All Employees',
-          library_type: 'goal-library-data',
+          library_type: 'legacy-goal-library',
+          scope_type: 'segment-library',
+          status: 'active',
+          version: 1,
           payload: {
             source: 'goalLibraryData',
             attrLabel: config.goalLibraryData.attrLabel || null,
+            groupKey: String(groupKey || '').trim() || null,
             data: kras || [],
           },
         });
@@ -170,9 +198,12 @@ function buildGoalLibraryRows(organizationId, config) {
     } else {
       rows.push({
         organization_id: organizationId,
-        group_id: null,
+        library_key: 'legacy-goal-library:all-employees',
         name: 'All Employees',
-        library_type: 'goal-library-data',
+        library_type: 'legacy-goal-library',
+        scope_type: 'common-library',
+        status: 'active',
+        version: 1,
         payload: {
           source: 'goalLibraryData',
           attrLabel: null,
@@ -182,16 +213,58 @@ function buildGoalLibraryRows(organizationId, config) {
     }
   }
 
-  if (config?.prefillDataAppliedSnapshot && Array.isArray(config?.goalGroups)) {
-    config.goalGroups.forEach((group) => {
-      getPrefillAssignments(group)
+  return rows.filter((row) => row.name);
+}
+
+function buildGoalLibraryAssignmentRows(organizationId, config) {
+  const groups = Array.isArray(config?.goalGroups) ? config.goalGroups : [];
+  return groups
+    .filter((group) => !!group?.hasLibrary)
+    .flatMap((group) => getLibraryAssignments(group)
+      .filter((assignment) => !!assignment.libraryId)
+      .map((assignment) => ({
+        organization_id: organizationId,
+        group_id: String(group?.id || '').trim() || null,
+        group_name: String(group?.name || 'Group').trim() || 'Group',
+        segment_attr: String(group?.segmentAttr || '').trim() || null,
+        slot_key: String(assignment.slotKey || '').trim() || '__default__',
+        slot_label: String(assignment.label || assignment.slotKey || group?.name || 'All Employees').trim() || 'All Employees',
+        source_library_key: makeLibraryKey(assignment.libraryId, `assignment:${group?.id || group?.name || 'group'}:${assignment.slotKey || 'default'}`),
+        payload: {
+          group: {
+            id: group?.id || null,
+            name: group?.name || '',
+            segmentAttr: group?.segmentAttr || null,
+            segmentValues: Array.isArray(group?.segmentValues) ? group.segmentValues : [],
+          },
+          assignment,
+          libraryType: String(group?.libraryType || '').trim() || null,
+        },
+      })));
+}
+
+function buildPrefillDatasetRows(organizationId, config) {
+  const groups = Array.isArray(config?.goalGroups) ? config.goalGroups : [];
+  return groups
+    .filter((group) => !!group?.prefillType)
+    .flatMap((group) => {
+      const libraryAssignments = getLibraryAssignments(group);
+      return getPrefillAssignments(group)
         .filter((assignment) => Array.isArray(assignment.data) && assignment.data.length > 0)
-        .forEach((assignment) => {
-          rows.push({
+        .map((assignment) => {
+          const linkedLibrary = libraryAssignments.find((item) => normalizeLower(item.slotKey) === normalizeLower(assignment.slotKey));
+          const sourceLibraryKey = linkedLibrary?.libraryId ? makeLibraryKey(linkedLibrary.libraryId, null) : null;
+          return {
             organization_id: organizationId,
-            group_id: String(group?.id || group?.name || '').trim() || null,
-            name: `${String(group?.name || 'Group').trim() || 'Group'} / ${String(assignment.label || assignment.slotKey || 'Prefill').trim()}`,
-            library_type: 'prefill-data',
+            group_id: String(group?.id || '').trim() || null,
+            group_name: String(group?.name || 'Group').trim() || 'Group',
+            segment_attr: String(group?.segmentAttr || '').trim() || null,
+            slot_key: String(assignment.slotKey || '').trim() || '__default__',
+            slot_label: String(assignment.label || assignment.slotKey || group?.name || 'All Employees').trim() || 'All Employees',
+            prefill_type: String(group?.prefillType || 'kra-only').trim() || 'kra-only',
+            source_type: sourceLibraryKey ? 'library' : 'custom',
+            source_library_key: sourceLibraryKey,
+            status: 'active',
             payload: {
               source: 'prefillAssignments',
               group: {
@@ -201,13 +274,11 @@ function buildGoalLibraryRows(organizationId, config) {
                 segmentValues: Array.isArray(group?.segmentValues) ? group.segmentValues : [],
               },
               assignment,
+              kpiRatingMode: String(group?.kpiRatingMode || 'rated').trim() || 'rated',
             },
-          });
+          };
         });
     });
-  }
-
-  return rows.filter((row) => row.name);
 }
 
 function buildEmployeeRows(organizationId, config) {
@@ -237,6 +308,17 @@ function buildEmployeeRows(organizationId, config) {
       };
     })
     .filter(Boolean);
+}
+
+function resolveEmployeeEmail(employee = {}) {
+  return String(
+    employee['Email ID']
+      || employee.Email
+      || employee.email
+      || employee['Work Email']
+      || employee['Official Email']
+      || ''
+  ).trim().toLowerCase();
 }
 
 function buildNormalizedWizardSignature(config) {
@@ -283,14 +365,73 @@ async function replaceGoalLibraries(organizationId, config) {
       .delete()
       .eq('organization_id', organizationId);
     if (deleteError) throw deleteError;
+    if (rows.length === 0) return [];
+    const { data, error: insertError } = await supabase
+      .from('goal_libraries')
+      .insert(rows)
+      .select('id, library_key');
+    if (insertError) throw insertError;
+    return Array.isArray(data) ? data : [];
+  } catch (error) {
+    warnOnce(`remote-write:goal_libraries:${organizationId}`, error);
+    return null;
+  }
+}
+
+function attachResolvedLibraryIds(rows, libraryRows) {
+  const libraryIdByKey = new Map(
+    (Array.isArray(libraryRows) ? libraryRows : [])
+      .map((row) => [String(row?.library_key || '').trim(), row?.id || null])
+      .filter(([key, id]) => key && id)
+  );
+
+  return (Array.isArray(rows) ? rows : []).map((row) => {
+    const key = String(row?.source_library_key || '').trim();
+    return {
+      ...row,
+      source_library_id: key ? (libraryIdByKey.get(key) || null) : null,
+    };
+  });
+}
+
+async function replaceGoalLibraryAssignments(organizationId, config, libraryRows) {
+  if (!shouldUseSupabase || !supabase || !organizationId) return true;
+  const rows = attachResolvedLibraryIds(buildGoalLibraryAssignmentRows(organizationId, config), libraryRows);
+  try {
+    const { error: deleteError } = await supabase
+      .from('goal_library_assignments')
+      .delete()
+      .eq('organization_id', organizationId);
+    if (deleteError) throw deleteError;
     if (rows.length === 0) return true;
     const { error: insertError } = await supabase
-      .from('goal_libraries')
+      .from('goal_library_assignments')
       .insert(rows);
     if (insertError) throw insertError;
     return true;
   } catch (error) {
-    warnOnce(`remote-write:goal_libraries:${organizationId}`, error);
+    warnOnce(`remote-write:goal_library_assignments:${organizationId}`, error);
+    return false;
+  }
+}
+
+async function replacePrefillDatasets(organizationId, config, libraryRows) {
+  if (!shouldUseSupabase || !supabase || !organizationId) return true;
+  const rows = attachResolvedLibraryIds(buildPrefillDatasetRows(organizationId, config), libraryRows);
+  try {
+    const { error: deleteError } = await supabase
+      .from('prefill_datasets')
+      .delete()
+      .eq('organization_id', organizationId);
+    if (deleteError) throw deleteError;
+    if (rows.length === 0) return true;
+    const { error: insertError } = await supabase
+      .from('prefill_datasets')
+      .insert(rows);
+    if (insertError) throw insertError;
+    return true;
+  } catch (error) {
+    warnOnce(`remote-write:prefill_datasets:${organizationId}`, error);
     return false;
   }
 }
@@ -356,16 +497,19 @@ async function syncNormalizedWizardState(orgKey, payload) {
     return configOk;
   }
 
-  const [librariesOk, employeesOk] = await Promise.all([
-    replaceGoalLibraries(identity.id, config),
+  const libraryRows = await replaceGoalLibraries(identity.id, config);
+  const librariesOk = libraryRows !== null;
+  const [assignmentsOk, prefillOk, employeesOk] = await Promise.all([
+    replaceGoalLibraryAssignments(identity.id, config, libraryRows || []),
+    replacePrefillDatasets(identity.id, config, libraryRows || []),
     replaceEmployees(identity.id, config),
   ]);
 
-  if (librariesOk && employeesOk) {
+  if (librariesOk && assignmentsOk && prefillOk && employeesOk) {
     writeNormalizedSyncSignature(orgKey, signature);
   }
 
-  return configOk && librariesOk && employeesOk;
+  return configOk && librariesOk && assignmentsOk && prefillOk && employeesOk;
 }
 
 function mapOrganizationRow(row) {
@@ -510,6 +654,23 @@ async function deleteOrganizationsRemote(orgKeys = []) {
   }
 }
 
+async function deleteOrgScopedStateRemote(orgKeys = []) {
+  if (!shouldUseSupabase || !supabase) return true;
+  const keys = (Array.isArray(orgKeys) ? orgKeys : []).map((key) => String(key || '').trim()).filter(Boolean);
+  if (keys.length === 0) return true;
+  try {
+    const { error } = await supabase
+      .from('app_state')
+      .delete()
+      .in('org_key', keys);
+    if (error) throw error;
+    return true;
+  } catch (error) {
+    warnOnce('remote-delete:app_state', error);
+    return false;
+  }
+}
+
 function stripOrganizationsFromPayload(payload) {
   if (!payload || typeof payload !== 'object') return payload;
   if (!shouldUseSupabase) return payload;
@@ -623,6 +784,9 @@ export async function deleteOrganizationRecord(orgKey = '') {
     writeOrganizationsToLocalCache(nextOrgs);
     return { ok: true };
   }
+
+  const stateOk = await deleteOrgScopedStateRemote([key]);
+  if (!stateOk) return { ok: false, error: 'Failed to delete organization state from backend.' };
 
   const ok = await deleteOrganizationsRemote([key]);
   if (!ok) return { ok: false, error: 'Failed to delete organization from backend.' };
@@ -774,6 +938,66 @@ export function persistMessages(orgKey, payload) {
 
 export function readEmployeeCredentialsSync() {
   return readLocalJson(EMP_CREDENTIALS_KEY, {});
+}
+
+export async function syncEmployeeCredentialsForOrg({ orgKey = '', tempPassword = '', employees = [] } = {}) {
+  const normalizedOrgKey = String(orgKey || '').trim();
+  const tempPass = String(tempPassword || '');
+  if (!normalizedOrgKey || !tempPass) return readEmployeeCredentialsSync();
+
+  const roster = Array.isArray(employees) ? employees : [];
+  const uploadedCodes = new Set(
+    roster
+      .map((employee) => normalizeCode(employee?.['Employee Code']))
+      .filter(Boolean)
+  );
+
+  const existing = { ...(readEmployeeCredentialsSync() || {}) };
+  let changed = false;
+
+  Object.entries(existing).forEach(([credentialKey, credential]) => {
+    if (credential?.orgKey !== normalizedOrgKey) return;
+    if (!credential?.isTemp) return;
+    if (uploadedCodes.has(normalizeCode(credentialKey))) return;
+    delete existing[credentialKey];
+    changed = true;
+  });
+
+  for (const employee of roster) {
+    const code = normalizeCode(employee?.['Employee Code']);
+    if (!code) continue;
+
+    const email = resolveEmployeeEmail(employee);
+    const current = existing[code];
+    const nextValue = current
+      ? {
+          ...current,
+          name: String(employee['Employee Name'] || current.name || '').trim(),
+          email: email || current.email || '',
+          empCode: code,
+          designation: String(employee.Designation || employee.Role || current.designation || '').trim(),
+          managerCode: normalizeCode(employee['Reporting Manager Code'] || current.managerCode || ''),
+          orgKey: normalizedOrgKey,
+        }
+      : {
+          passwordHash: await hashPasswordValue(tempPass),
+          name: String(employee['Employee Name'] || '').trim(),
+          email,
+          empCode: code,
+          designation: String(employee.Designation || employee.Role || '').trim(),
+          managerCode: normalizeCode(employee['Reporting Manager Code'] || ''),
+          orgKey: normalizedOrgKey,
+          isTemp: true,
+        };
+
+    if (JSON.stringify(current || null) !== JSON.stringify(nextValue)) {
+      existing[code] = nextValue;
+      changed = true;
+    }
+  }
+
+  if (changed) persistEmployeeCredentials(existing);
+  return existing;
 }
 
 export async function hydrateEmployeeCredentials() {

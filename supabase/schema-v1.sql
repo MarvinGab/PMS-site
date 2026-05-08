@@ -111,13 +111,74 @@ create index if not exists idx_goal_workflows_org_status on goal_workflows (orga
 create table if not exists goal_libraries (
   id uuid primary key default gen_random_uuid(),
   organization_id uuid not null references organizations(id) on delete cascade,
-  group_id text,
+  library_key text,
   name text not null,
   library_type text not null,
+  scope_type text,
+  status text,
+  version integer not null default 1,
   payload jsonb not null default '{}'::jsonb,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
+
+alter table goal_libraries
+  add column if not exists library_key text,
+  add column if not exists scope_type text,
+  add column if not exists status text,
+  add column if not exists version integer not null default 1;
+
+create unique index if not exists idx_goal_libraries_org_library_key
+  on goal_libraries (organization_id, library_key)
+  where library_key is not null;
+
+create index if not exists idx_goal_libraries_org_type
+  on goal_libraries (organization_id, library_type);
+
+create table if not exists goal_library_assignments (
+  id uuid primary key default gen_random_uuid(),
+  organization_id uuid not null references organizations(id) on delete cascade,
+  group_id text,
+  group_name text not null,
+  segment_attr text,
+  slot_key text not null,
+  slot_label text not null,
+  source_library_id uuid references goal_libraries(id) on delete set null,
+  source_library_key text,
+  payload jsonb not null default '{}'::jsonb,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create unique index if not exists idx_goal_library_assignments_org_slot
+  on goal_library_assignments (organization_id, group_id, slot_key);
+
+create index if not exists idx_goal_library_assignments_org_library
+  on goal_library_assignments (organization_id, source_library_id);
+
+create table if not exists prefill_datasets (
+  id uuid primary key default gen_random_uuid(),
+  organization_id uuid not null references organizations(id) on delete cascade,
+  group_id text,
+  group_name text not null,
+  segment_attr text,
+  slot_key text not null,
+  slot_label text not null,
+  prefill_type text not null,
+  source_type text not null default 'custom',
+  source_library_id uuid references goal_libraries(id) on delete set null,
+  source_library_key text,
+  status text not null default 'active',
+  payload jsonb not null default '{}'::jsonb,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create unique index if not exists idx_prefill_datasets_org_slot
+  on prefill_datasets (organization_id, group_id, slot_key);
+
+create index if not exists idx_prefill_datasets_org_status
+  on prefill_datasets (organization_id, status);
 
 create table if not exists messages (
   id uuid primary key default gen_random_uuid(),
@@ -146,6 +207,104 @@ create table if not exists notifications (
 );
 
 create index if not exists idx_notifications_org_recipient on notifications (organization_id, recipient_code, created_at desc);
+
+create table if not exists email_deliveries (
+  id uuid primary key default gen_random_uuid(),
+  organization_id uuid references organizations(id) on delete cascade,
+  recipient_email text not null,
+  recipient_code text,
+  delivery_type text not null,
+  subject text not null,
+  status text not null default 'queued',
+  provider text,
+  provider_message_id text,
+  error_message text,
+  payload jsonb not null default '{}'::jsonb,
+  created_at timestamptz not null default now(),
+  sent_at timestamptz
+);
+
+create index if not exists idx_email_deliveries_org_created
+  on email_deliveries (organization_id, created_at desc);
+
+create index if not exists idx_email_deliveries_status
+  on email_deliveries (status, created_at desc);
+
+create table if not exists email_templates (
+  id uuid primary key default gen_random_uuid(),
+  organization_id uuid references organizations(id) on delete cascade,
+  owner_key text not null default 'global',
+  template_key text not null,
+  name text not null,
+  subject text not null,
+  config jsonb not null default '{}'::jsonb,
+  is_active boolean not null default true,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  unique (owner_key, template_key)
+);
+
+create index if not exists idx_email_templates_template_key
+  on email_templates (template_key, owner_key);
+
+create table if not exists email_smtp_settings (
+  id uuid primary key default gen_random_uuid(),
+  organization_id uuid not null references organizations(id) on delete cascade,
+  is_enabled boolean not null default false,
+  use_tls boolean not null default true,
+  smtp_host text,
+  smtp_port integer,
+  smtp_username text,
+  smtp_password text,
+  from_name text,
+  from_email text,
+  footer_text text,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  unique (organization_id)
+);
+
+-- Multi-provider mail (SMTP / Microsoft Graph / Google Gmail API).
+-- All secret-bearing columns store ciphertext using the same
+-- enc:v1:<iv>:<ct> convention as smtp_password.
+alter table email_smtp_settings
+  add column if not exists provider text not null default 'smtp',
+  add column if not exists ms_tenant_id text,
+  add column if not exists ms_client_id text,
+  add column if not exists ms_client_secret text,
+  add column if not exists google_client_id text,
+  add column if not exists google_client_secret text,
+  add column if not exists google_refresh_token text;
+
+do $$
+begin
+  if not exists (
+    select 1 from pg_constraint where conname = 'email_smtp_settings_provider_check'
+  ) then
+    alter table email_smtp_settings
+      add constraint email_smtp_settings_provider_check
+      check (provider in ('smtp', 'microsoft', 'google'));
+  end if;
+end $$;
+
+create table if not exists app_audit_logs (
+  id uuid primary key default gen_random_uuid(),
+  org_key text,
+  actor_role text,
+  actor_code text,
+  actor_name text,
+  action_type text not null,
+  target_type text,
+  target_code text,
+  details jsonb not null default '{}'::jsonb,
+  created_at timestamptz not null default now()
+);
+
+create index if not exists idx_app_audit_logs_org_created
+  on app_audit_logs (org_key, created_at desc);
+
+create index if not exists idx_app_audit_logs_action_created
+  on app_audit_logs (action_type, created_at desc);
 
 -- Notes
 -- 1. `app_state` is the fast migration path for localhost parity.

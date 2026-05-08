@@ -4385,6 +4385,23 @@ export default function EmployeePage() {
     <div style={{ height: '100vh', overflow: 'hidden', display: 'flex', flexDirection: 'column', background: '#F0F4F8', fontFamily: "'Geist','Inter','Segoe UI',Arial,sans-serif", fontSize: 15, color: '#0D1117' }}>
 
       {(impersonatedFromAdmin || dualRoleFromHR) && <BackToAdminButton onClick={backToAdmin} />}
+      {(impersonatedFromAdmin || dualRoleFromHR) && (
+        <div style={{
+          margin: '14px 24px 0',
+          border: '1px solid #C7D2FE',
+          background: '#EEF2FF',
+          color: '#312E81',
+          borderRadius: 12,
+          padding: '12px 16px',
+          fontSize: 13,
+          lineHeight: 1.5,
+          flexShrink: 0,
+        }}>
+          {impersonatedFromAdmin
+            ? 'Admin proxy mode is active. Any edits or submissions on this page will be saved against this employee record.'
+            : 'HR dual-role mode is active. Changes here behave exactly like the employee experience for this record.'}
+        </div>
+      )}
 
       {reviewConfirm && createPortal(
         <ReviewConfirmModal

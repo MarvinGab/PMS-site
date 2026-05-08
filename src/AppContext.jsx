@@ -11,6 +11,7 @@ import {
   persistAuthSession,
   clearAuthSession,
 } from './backend/stateStore';
+import { revokeServerSession } from './backend/serverAuth';
 
 export const SESSION_KEY        = 'zarohr_auth_session';
 export const APP_DATA_KEY       = 'zarohr_app_data_v1';
@@ -77,6 +78,7 @@ export function AppProvider({ children }) {
   const [hrTeamId, setHrTeamId] = useState(initialSession?.hrTeamId || null);
   const [empCode, setEmpCode] = useState(initialSession?.empCode || null);
   const [allowedModules, setAllowedModules] = useState(initialSession?.allowedModules || null);
+  const [serverSessionToken, setServerSessionToken] = useState(initialSession?.serverSessionToken || null);
   const [authReady, setAuthReady] = useState(true);  // always ready since we read sync
 
   const [orgs, setOrgs] = useState(() => {
@@ -168,6 +170,7 @@ export function AppProvider({ children }) {
     setHrTeamId(data.hrTeamId || null);
     setEmpCode(data.empCode || null);
     setAllowedModules(data.allowedModules || null);
+    setServerSessionToken(data.serverSessionToken || null);
     persistAuthSession({
       isLoggedIn: true,
       role: loginRole,
@@ -178,10 +181,12 @@ export function AppProvider({ children }) {
       hrTeamId: data.hrTeamId || null,
       empCode: data.empCode || null,
       allowedModules: data.allowedModules || null,
+      serverSessionToken: data.serverSessionToken || null,
     });
   }
 
   function logout() {
+    if (serverSessionToken) void revokeServerSession(serverSessionToken);
     setRole(null);
     setOrgKey(null);
     setUserName('');
@@ -190,6 +195,7 @@ export function AppProvider({ children }) {
     setHrTeamId(null);
     setEmpCode(null);
     setAllowedModules(null);
+    setServerSessionToken(null);
     clearAuthSession();
   }
 
@@ -237,7 +243,7 @@ export function AppProvider({ children }) {
   }
 
   const value = {
-    role, orgKey, userName, authReady,
+    role, orgKey, userName, authReady, serverSessionToken,
     isCoAdmin, isScopedHR, hrTeamId, empCode, allowedModules,
     orgs, setOrgs: updateOrgs,
     pendingActions, setPendingActions: updatePendingActions,

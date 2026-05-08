@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import zaroLogo from '../images/final zaro logo.png';
 import { downloadGoalLibraryTemplate, parseGoalLibraryXlsx, downloadEmployeeTemplate, parseEmployeeXlsx, validateGoalLibraryData, downloadErrorReport, goalLibraryTemplateMeta, employeeTemplateMeta, validateEmployeeData, downloadAttributeValuesTemplate, parseAttributeValuesXlsx, downloadGoalLibraryBulkTemplate, downloadPrefillBulkTemplate, parseGoalLibraryBulkXlsx, getEmployeeRoutingColumns } from './templateUtils';
-import { readWizardStateSync, persistWizardState, hydrateWizardState, readEmployeeCredentialsSync, readOrganizationsSync } from './backend/stateStore';
+import { readWizardStateSync, persistWizardState, hydrateWizardState, readEmployeeCredentialsSync, readOrganizationsSync, syncEmployeeCredentialsForOrg } from './backend/stateStore';
 
 /* ─── CONSTANTS ──────────────────────────────────────────────────────────── */
 function getNavSteps(config) {
@@ -7074,7 +7074,7 @@ const GROUP_PALETTE = [
   { accent: '#0891B2' },
 ];
 
-function StepEmployeeUpload({ config, update }) {
+function StepEmployeeUpload({ config, update, orgKey }) {
   const buildUploadState = (result) => (
     result
       ? {
@@ -7199,6 +7199,17 @@ function StepEmployeeUpload({ config, update }) {
       const result = attachGoalLibraryToEmployees(parsed, config);
       const persistedResult = { ...result, validationWarnings: warnings };
       update('employeeUploadData', persistedResult);
+      const workspaceOrg = readOrganizationsSync().find((item) => item.key === orgKey) || null;
+      const uploadedEmployees = Array.isArray(persistedResult?.employees) ? persistedResult.employees : [];
+
+      if (workspaceOrg?.temporaryPassword && uploadedEmployees.length > 0) {
+        await syncEmployeeCredentialsForOrg({
+          orgKey: orgKey || '',
+          tempPassword: workspaceOrg.temporaryPassword,
+          employees: uploadedEmployees,
+        });
+      }
+
       setPreviewExpanded(false);
       setUploadBtnOpen(false);
       setUploadState({
@@ -7450,8 +7461,9 @@ function StepEmployeeUpload({ config, update }) {
         <CardBody>
           {config.requireEmail !== false ? (
             <>
-              <TogRow label="Auto-send invite email to employees" desc="Each employee gets a login link and goal-setting instructions" last={false} on={true} onChange={() => {}} />
-              <TogRow label="Send manager summary email" desc="Each manager gets a list of their reportees and pending actions" last={true} on={true} onChange={() => {}} />
+              <div style={{ padding: '14px 0 0', fontSize: 12.5, color: '#64748B', lineHeight: 1.6 }}>
+                Employee invites and manager summaries are sent manually from Communications when you are ready.
+              </div>
             </>
           ) : (
             <div style={{ fontSize: 13, color: '#6B7280', padding: '4px 0' }}>No email actions — email is disabled for this organisation.</div>
@@ -7945,7 +7957,7 @@ function StepExport({ config }) {
         <CardBody>
           <Banner type="blue">
             <span>📋</span>
-            <span>Once configuration is complete, download this Excel template. Managers fill in employee details, KRA assignments, and targets. Upload the filled sheet to auto-create employee records and trigger invite emails.</span>
+            <span>Once configuration is complete, download this Excel template. Managers fill in employee details, KRA assignments, and targets. Upload the filled sheet to create employee records; invite emails are sent manually from Communications.</span>
           </Banner>
           <div style={{ fontSize: 12, fontWeight: 600, color: '#374151', textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: 10 }}>Columns in the generated template</div>
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 20 }}>
@@ -7967,8 +7979,9 @@ function StepExport({ config }) {
         <CardBody>
           {config.requireEmail !== false ? (
             <>
-              <TogRow label="Auto-send invite email to employees on upload" desc="Each employee gets a login link and goal-setting instructions" last={false} on={true} onChange={() => {}} />
-              <TogRow label="Send manager summary email" desc="Each manager gets a list of their reportees and pending actions" last={true} on={true} onChange={() => {}} />
+              <div style={{ padding: '14px 0 0', fontSize: 12.5, color: '#64748B', lineHeight: 1.6 }}>
+                Uploading employees does not send mail automatically. Use Communications to review the draft and send invites manually.
+              </div>
             </>
           ) : (
             <div style={{ fontSize: 13, color: '#6B7280', padding: '4px 0' }}>No email actions — email is disabled for this organisation.</div>
@@ -9240,7 +9253,7 @@ export default function PMSWizard({ onLaunched, orgKeyOverride, orgNameOverride 
       case 'emp_settings':
         return <StepEmployeeSettings key="emp_settings" config={config} update={update} />;
       case 'upload':
-        return <StepEmployeeUpload key="upload" config={config} update={update} />;
+        return <StepEmployeeUpload key="upload" config={config} update={update} orgKey={workspace.orgKey} />;
       case 'summary':
         return <StepSummary key="summary" config={config} onLaunched={onLaunched} />;
       case 'goals':

@@ -4,49 +4,11 @@ import { useApp } from '../AppContext';
 import { saveOrganizationRecord } from '../backend/stateStore';
 import '../admin.css';
 
-const COUNTRY_OPTIONS = [
-  'Afghanistan','Albania','Algeria','Argentina','Australia','Austria','Bangladesh','Belgium','Brazil','Canada',
-  'Chile','China','Colombia','Croatia','Czech Republic','Denmark','Egypt','Finland','France','Germany',
-  'Greece','Hong Kong','Hungary','India','Indonesia','Ireland','Israel','Italy','Japan','Kenya',
-  'Malaysia','Mexico','Morocco','Netherlands','New Zealand','Nigeria','Norway','Pakistan','Philippines','Poland',
-  'Portugal','Qatar','Romania','Saudi Arabia','Singapore','South Africa','South Korea','Spain','Sri Lanka','Sweden',
-  'Switzerland','Taiwan','Thailand','Turkey','UAE','Ukraine','United Kingdom','United States','Vietnam',
-];
+const PMS_MODULES = ['Performance Management'];
 
-const INDUSTRY_OPTIONS = [
-  'IT / Software',
-  'BFSI (Banking, Financial Services, Insurance)',
-  'Healthcare & Pharma',
-  'Manufacturing',
-  'Retail & E-commerce',
-  'Consulting / Professional Services',
-  'Education / EdTech',
-  'Telecom',
-  'Media & Entertainment',
-  'Logistics & Supply Chain',
-  'Real Estate / Construction',
-  'Energy / Utilities',
-  'Hospitality / Travel',
-  'Government / Public Sector',
-  'Non-Profit / NGO',
-  'Other',
-];
-
-const MODULES = [
-  { id: 'Performance Management', name: 'Performance Management', desc: 'Core appraisal cycles and ratings', locked: true, icon: '🎯' },
-  { id: 'Goal Management',        name: 'Goal Management',        desc: 'KRA / KPI libraries and goal tracking', locked: false, icon: '📋' },
-  { id: '360 Feedback',           name: '360 Feedback',           desc: 'Peer and multi-rater assessments', locked: false, icon: '🔄' },
-  { id: 'Compensation Planning',  name: 'Compensation Planning',  desc: 'Pay reviews and salary adjustments', locked: false, icon: '💰' },
-  { id: 'Succession Planning',    name: 'Succession Planning',    desc: 'Talent pipeline and career pathing', locked: false, icon: '📈' },
-  { id: 'Learning & Development', name: 'Learning & Development', desc: 'Training plans and skill tracking', locked: false, icon: '📚' },
-];
-
-const STEPS = ['Organization Details', 'Workspace Settings', 'HR Admin Setup'];
+const STEPS = ['Workspace Setup', 'Admin Access'];
 
 function buildEditSnapshot(form, modules) {
-  const normalizedCountries = Array.isArray(form?.operating_countries)
-    ? [...form.operating_countries].filter(Boolean).sort((left, right) => left.localeCompare(right))
-    : [];
   const normalizedModules = Array.isArray(modules)
     ? [...modules].filter(Boolean).sort((left, right) => left.localeCompare(right))
     : [];
@@ -54,16 +16,10 @@ function buildEditSnapshot(form, modules) {
   return JSON.stringify({
     organization_name: String(form?.organization_name || '').trim(),
     organization_code: normalizeCode(form?.organization_code || ''),
-    industry: String(form?.industry || '').trim(),
-    legal_entity_type: String(form?.legal_entity_type || '').trim(),
-    headquarters_country: String(form?.headquarters_country || '').trim(),
-    operating_countries: normalizedCountries,
-    company_website: String(form?.company_website || '').trim(),
     workspace_slug: normalizeSlug(form?.workspace_slug || ''),
     financial_year: String(form?.financial_year || '').trim(),
     custom_pms_start_date: String(form?.custom_pms_start_date || '').trim(),
     custom_pms_end_date: String(form?.custom_pms_end_date || '').trim(),
-    estimated_company_size: String(form?.estimated_company_size || '').trim(),
     hr_admin_name: String(form?.hr_admin_name || '').trim(),
     hr_admin_email: String(form?.hr_admin_email || '').trim().toLowerCase(),
     temporary_password: String(form?.temporary_password || ''),
@@ -85,18 +41,18 @@ function normalizeSlug(v) {
     .replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-').replace(/^-+|-+$/g, '');
 }
 
+function isEmail(v) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(v || '').trim());
+}
+
+function generateTempPassword() {
+  return `Pass@${Math.random().toString(36).slice(2, 8)}`;
+}
+
 function genCodeFromName(name) {
   const stop = new Set(['pvt','ltd','limited','inc','llc','plc','private','company','co','technologies','technology','solutions','services','global','group']);
   const words = String(name || '').toLowerCase().replace(/[^a-z0-9\s]/g,' ').split(/\s+/).filter(Boolean).filter(w => !stop.has(w));
   return words.length ? normalizeCode(words[0]) : '';
-}
-
-function industryBadgeClass(industry) {
-  if (!industry) return 'badge-gray';
-  if (industry.startsWith('IT')) return 'badge-blue';
-  if (industry.startsWith('Healthcare')) return 'badge-green';
-  if (industry.startsWith('BFSI')) return 'badge-amber';
-  return 'badge-gray';
 }
 
 // Get hash param
@@ -131,12 +87,19 @@ export default function CreateOrgPage() {
 
   const [step, setStep]     = useState(() => _d?.step ?? 0);
   const [form, setForm]     = useState(() => _d?.form ?? initForm(existingOrg));
-  const [modules, setModules] = useState(() => _d?.modules ?? initModules(existingOrg));
+  const modules = PMS_MODULES;
   const [slugManual, setSlugManual]   = useState(() => _d?.slugManual ?? isEdit);
   const [codeManual, setCodeManual]   = useState(() => _d?.codeManual ?? isEdit);
   const [feedback, setFeedback]       = useState('');
   const [saving, setSaving]           = useState(false);
-  const initialSnapshot = buildEditSnapshot(initForm(existingOrg), initModules(existingOrg));
+  // Additional admins added inline at org creation. The first admin is the
+  // primary HR admin (saved on the org); these go into org.hrTeam[] as Co-Admins.
+  const [additionalAdmins, setAdditionalAdmins] = useState(() =>
+    Array.isArray(existingOrg?.hrTeam) ? existingOrg.hrTeam.filter((m) => m.type === 'co-admin' && !m.isInPMS).map((m) => ({
+      id: m.id || `co_${Date.now()}`, name: m.name || '', email: m.email || '', password: m.password || '',
+    })) : []
+  );
+  const initialSnapshot = buildEditSnapshot(initForm(existingOrg), PMS_MODULES);
   const currentSnapshot = buildEditSnapshot(form, modules);
   const isDirty = !isEdit || currentSnapshot !== initialSnapshot;
 
@@ -144,36 +107,24 @@ export default function CreateOrgPage() {
   useEffect(() => {
     if (isEdit) return;
     try {
-      window.sessionStorage.setItem(DRAFT_KEY, JSON.stringify({ step, form, modules, slugManual, codeManual }));
+      window.sessionStorage.setItem(DRAFT_KEY, JSON.stringify({ step, form, slugManual, codeManual }));
     } catch (_) {}
-  }, [step, form, modules, slugManual, codeManual, isEdit]);
+  }, [step, form, slugManual, codeManual, isEdit]);
 
   function initForm(org) {
-    if (!org) return { headquarters_country: 'India', operating_countries: [] };
+    if (!org) return { financial_year: 'April–March' };
     const s = org.setupFormSnapshot || {};
     return {
       organization_name: s.organization_name || org.name || '',
       organization_code: s.organization_code || normalizeCode(org.orgCode || ''),
-      industry: s.industry || org.industry || '',
-      legal_entity_type: s.legal_entity_type || org.legalEntityType || '',
-      headquarters_country: s.headquarters_country || org.headquartersCountry || 'India',
-      operating_countries: Array.isArray(s.operating_countries) ? [...s.operating_countries] : Array.isArray(org.operatingCountries) ? [...org.operatingCountries] : [],
-      company_website: s.company_website || org.companyWebsite || '',
       workspace_slug: s.workspace_slug || org.workspaceSlug || '',
-      financial_year: s.financial_year || org.pmsCalendar || '',
+      financial_year: s.financial_year || org.pmsCalendar || 'April–March',
       custom_pms_start_date: s.custom_pms_start_date || org.customPmsStartDate || '',
       custom_pms_end_date: s.custom_pms_end_date || org.customPmsEndDate || '',
-      estimated_company_size: s.estimated_company_size || org.estimatedCompanySize || '',
       hr_admin_name: s.hr_admin_name || org.hrAdminName || '',
       hr_admin_email: s.hr_admin_email || org.hrAdminEmail || '',
       temporary_password: s.temporary_password || org.temporaryPassword || '',
     };
-  }
-
-  function initModules(org) {
-    if (!org || !Array.isArray(org.selectedModules)) return ['Performance Management'];
-    const has = org.selectedModules.includes('Performance Management') ? org.selectedModules : ['Performance Management', ...org.selectedModules];
-    return has;
   }
 
   function setField(key, value) {
@@ -241,43 +192,33 @@ export default function CreateOrgPage() {
     setField('workspace_slug', normalizeSlug(value));
   }
 
-  function addCountry(value) {
-    if (!value) return;
-    const list = Array.isArray(form.operating_countries) ? form.operating_countries : [];
-    if (list.includes(value)) return;
-    setField('operating_countries', [...list, value]);
-  }
-
-  function removeCountry(c) {
-    setField('operating_countries', (form.operating_countries || []).filter(x => x !== c));
-  }
-
-  function toggleModule(id) {
-    if (id === 'Performance Management') return; // locked
-    setModules(prev => prev.includes(id) ? prev.filter(m => m !== id) : [...prev, id]);
-  }
-
   function validateStep0(showErr = false) {
     const nameOk = Boolean((form.organization_name || '').trim());
     const codeCheck = validateCode(form.organization_code || '');
-    if (showErr && !nameOk) { setFeedback('Organization name is required.'); return false; }
-    if (showErr && !codeCheck.ok) { setFeedback(codeCheck.msg); return false; }
-    return nameOk && codeCheck.ok;
-  }
-
-  function validateStep1(showErr = false) {
     const slugCheck = validateSlug(form.workspace_slug || '');
     const fyOk = Boolean((form.financial_year || '').trim());
     const isCustom = form.financial_year === 'Custom';
     const customOk = !isCustom || (form.custom_pms_start_date && form.custom_pms_end_date);
     const rangeOk  = !isCustom || (form.custom_pms_end_date >= form.custom_pms_start_date);
     if (showErr) {
+      if (!nameOk) { setFeedback('Organization name is required.'); return false; }
+      if (!codeCheck.ok) { setFeedback(codeCheck.msg); return false; }
       if (!slugCheck.ok) { setFeedback(slugCheck.msg); return false; }
       if (!fyOk) { setFeedback('Select a PMS calendar option.'); return false; }
       if (!customOk) { setFeedback('Custom calendar requires both start and end dates.'); return false; }
       if (!rangeOk)  { setFeedback('End date must be on or after start date.'); return false; }
     }
-    return slugCheck.ok && fyOk && customOk && rangeOk;
+    return nameOk && codeCheck.ok && slugCheck.ok && fyOk && customOk && rangeOk;
+  }
+
+  function validateStep1(showErr = false) {
+    const adminNameOk = Boolean((form.hr_admin_name || '').trim());
+    const adminEmailOk = isEmail(form.hr_admin_email);
+    if (showErr) {
+      if (!adminNameOk) { setFeedback('HR admin name is required.'); return false; }
+      if (!adminEmailOk) { setFeedback('Enter a valid HR admin email address.'); return false; }
+    }
+    return adminNameOk && adminEmailOk;
   }
 
   function buildOrg() {
@@ -286,11 +227,11 @@ export default function CreateOrgPage() {
     const tenantKey = existingOrg ? normalizeCode(existingOrg.key || existingOrg.orgCode || '') : requestedOrgCode;
     const orgCode = existingOrg ? normalizeCode(existingOrg.orgCode || existingOrg.key || '') : requestedOrgCode;
     const slugRaw = (form.workspace_slug || tenantKey).toLowerCase().replace(/[^a-z0-9-]/g,'').replace(/-+/g,'-').replace(/^-|-$/g,'') || `org-${Date.now().toString().slice(-4)}`;
-    const industry = form.industry || 'Other';
+    const industry = existingOrg?.industry || 'Other';
     const logoText = (orgName[0] || 'N').toUpperCase();
     const hrAdminName  = (form.hr_admin_name || '').trim();
     const hrAdminEmail = (form.hr_admin_email || '').trim().toLowerCase();
-    const temporaryPassword = form.temporary_password || '';
+    const temporaryPassword = form.temporary_password || generateTempPassword();
     const snapshot = { ...form, workspace_slug: slugRaw };
 
     return {
@@ -300,23 +241,17 @@ export default function CreateOrgPage() {
       name: orgName,
       domain: `${slugRaw}.zarohr.com`,
       industry,
-      industryBadgeClass: industryBadgeClass(industry),
+      industryBadgeClass: existingOrg?.industryBadgeClass || 'badge-gray',
       employees: existingOrg ? existingOrg.employees : 0,
-      seats: existingOrg ? existingOrg.seats : 200,
       setupPct: existingOrg ? existingOrg.setupPct : 5,
       setupColor: existingOrg ? existingOrg.setupColor : '#2563EB',
       status: existingOrg ? existingOrg.status : 'Setup',
       statusBadgeClass: existingOrg ? existingOrg.statusBadgeClass : 'badge-amber',
       actionLabel: existingOrg ? existingOrg.actionLabel : 'Continue',
-      legalEntityType: form.legal_entity_type || '',
-      headquartersCountry: form.headquarters_country || 'India',
-      operatingCountries: Array.isArray(form.operating_countries) ? [...form.operating_countries] : [],
-      companyWebsite: form.company_website || '',
       workspaceSlug: slugRaw,
       pmsCalendar: form.financial_year || '',
       customPmsStartDate: form.custom_pms_start_date || '',
       customPmsEndDate: form.custom_pms_end_date || '',
-      estimatedCompanySize: form.estimated_company_size || '',
       selectedModules: [...modules],
       setupFormSnapshot: snapshot,
       hrAdminName,
@@ -351,6 +286,26 @@ export default function CreateOrgPage() {
     setSaving(true);
     setTimeout(async () => {
       const nextOrg = buildOrg();
+
+      // Merge additional admins as Co-Admins on org.hrTeam, preserving any
+      // pre-existing entries (e.g. PMS-employee co-admins from edit mode).
+      const existingHrTeam = Array.isArray(nextOrg.hrTeam) ? nextOrg.hrTeam : [];
+      const additionalEntries = additionalAdmins
+        .filter((a) => String(a.email || '').trim() && String(a.name || '').trim())
+        .map((a) => ({
+          id: a.id || `co_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+          type: 'co-admin',
+          name: a.name.trim(),
+          email: a.email.trim().toLowerCase(),
+          empCode: null,
+          isInPMS: false,
+          password: a.password || generateTempPassword(),
+          isTemp: true,
+        }));
+      // Drop any inline-co-admins (non-PMS) we previously stored, so re-edits replace cleanly.
+      const preserved = existingHrTeam.filter((m) => !(m.type === 'co-admin' && !m.isInPMS));
+      nextOrg.hrTeam = [...preserved, ...additionalEntries];
+
       const persisted = await saveOrganizationRecord(nextOrg);
       if (!persisted.ok) {
         setSaving(false);
@@ -368,6 +323,7 @@ export default function CreateOrgPage() {
       } else {
         applyAppData((current) => ({ orgs: [nextOrg, ...current.orgs] }));
       }
+
       clearDraft();
       setSaving(false);
       window.location.hash = '#organizations';
@@ -384,8 +340,8 @@ export default function CreateOrgPage() {
 
   const title = isEdit ? 'Edit Organization' : 'Create Organization';
   const subtitle = isEdit
-    ? 'Update organization details, workspace settings, and assigned HR administrator.'
-    : 'Set up a new company workspace and assign its HR administrator.';
+    ? 'Update workspace settings and admin access.'
+    : 'Create the PMS workspace and send admin access.';
 
   return (
     <AdminShell title={title} page="organizations">
@@ -420,31 +376,23 @@ export default function CreateOrgPage() {
         <div className="card create-org-card">
           <div className="create-org-body">
             {step === 0 && (
-              <Step0
+              <StepWorkspace
                 isEdit={isEdit}
                 form={form}
                 onNameInput={handleNameInput}
                 onCodeInput={handleCodeInput}
                 setField={setField}
                 codeCheck={codeCheck}
-                addCountry={addCountry}
-                removeCountry={removeCountry}
-              />
-            )}
-            {step === 1 && (
-              <Step1
-                form={form}
-                setField={setField}
                 onSlugInput={handleSlugInput}
                 slugCheck={slugCheck}
               />
             )}
-            {step === 2 && (
+            {step === 1 && (
               <Step2
                 form={form}
                 setField={setField}
-                modules={modules}
-                toggleModule={toggleModule}
+                additionalAdmins={additionalAdmins}
+                setAdditionalAdmins={setAdditionalAdmins}
               />
             )}
           </div>
@@ -466,86 +414,7 @@ export default function CreateOrgPage() {
   );
 }
 
-function Step0({ isEdit, form, onNameInput, onCodeInput, setField, codeCheck, addCountry, removeCountry }) {
-  return (
-    <div>
-      <div className="wiz-grid">
-        <div className="form-group">
-          <label className="lbl">Organization Name <span className="req">*</span></label>
-          <input type="text" value={form.organization_name || ''} placeholder="e.g. Acme Technologies Pvt. Ltd."
-            onChange={e => onNameInput(e.target.value)} />
-        </div>
-        <div className="form-group">
-          <label className="lbl">Org Code (Tenant Identifier) <span className="req">*</span></label>
-          <input type="text" value={form.organization_code || ''} placeholder="Auto from name"
-            disabled={isEdit}
-            onChange={e => onCodeInput(e.target.value)} />
-          {form.organization_code && (
-            <div className={`f-hint ${codeCheck.ok ? 'hint-ok' : 'hint-err'}`}>{codeCheck.msg}</div>
-          )}
-          <div className="f-hint" style={{ marginTop: 4, color: 'var(--ink-4)' }}>
-            {isEdit
-              ? 'Locked after creation because this value is the backend tenant key.'
-              : 'This value is used as the tenant key for backend-scoped org data.'}
-          </div>
-        </div>
-      </div>
-
-      <div className="wiz-grid">
-        <div className="form-group">
-          <label className="lbl">Industry</label>
-          <select value={form.industry || ''} onChange={e => setField('industry', e.target.value)}>
-            <option value="">Select industry</option>
-            {INDUSTRY_OPTIONS.map(opt => <option key={opt} value={opt}>{opt}</option>)}
-          </select>
-        </div>
-        <div className="form-group">
-          <label className="lbl">Legal Entity Type</label>
-          <select value={form.legal_entity_type || ''} onChange={e => setField('legal_entity_type', e.target.value)}>
-            <option value="">Select legal entity</option>
-            {['Private Limited','Public Limited','LLP','Partnership','Proprietorship'].map(opt => <option key={opt} value={opt}>{opt}</option>)}
-          </select>
-        </div>
-      </div>
-
-      <div className="wiz-grid">
-        <div className="form-group">
-          <label className="lbl">Headquarters Country</label>
-          <select value={form.headquarters_country || 'India'} onChange={e => setField('headquarters_country', e.target.value)}>
-            {COUNTRY_OPTIONS.map(c => <option key={c} value={c}>{c}</option>)}
-          </select>
-        </div>
-        <div className="form-group">
-          <label className="lbl">Company Website</label>
-          <input type="url" value={form.company_website || ''} placeholder="https://company.com"
-            onChange={e => setField('company_website', e.target.value)} />
-        </div>
-      </div>
-
-      <div className="wiz-full">
-        <div className="form-group">
-          <label className="lbl">Operating Countries</label>
-          <select onChange={e => { addCountry(e.target.value); e.target.value = ''; }}>
-            <option value="">Add a country…</option>
-            {COUNTRY_OPTIONS.map(c => <option key={c} value={c}>{c}</option>)}
-          </select>
-        </div>
-        {Array.isArray(form.operating_countries) && form.operating_countries.length > 0 && (
-          <div className="selected-countries">
-            {form.operating_countries.map(c => (
-              <span key={c} className="country-pill">
-                {c}
-                <button type="button" onClick={() => removeCountry(c)}>×</button>
-              </span>
-            ))}
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
-function Step1({ form, setField, onSlugInput, slugCheck }) {
+function StepWorkspace({ isEdit, form, onNameInput, onCodeInput, setField, codeCheck, onSlugInput, slugCheck }) {
   const isCustom = form.financial_year === 'Custom';
 
   function formatDatePreview(v) {
@@ -563,6 +432,31 @@ function Step1({ form, setField, onSlugInput, slugCheck }) {
 
   return (
     <div>
+      <div className="ws-card">
+        <div className="ws-card-title">Organization</div>
+        <div className="wiz-grid">
+          <div className="form-group">
+            <label className="lbl">Organization Name <span className="req">*</span></label>
+            <input type="text" value={form.organization_name || ''} placeholder="e.g. Acme Technologies"
+              onChange={e => onNameInput(e.target.value)} />
+          </div>
+          <div className="form-group">
+            <label className="lbl">Org Code <span className="req">*</span></label>
+            <input type="text" value={form.organization_code || ''} placeholder="Auto from name"
+              disabled={isEdit}
+              onChange={e => onCodeInput(e.target.value)} />
+            {form.organization_code && (
+              <div className={`f-hint ${codeCheck.ok ? 'hint-ok' : 'hint-err'}`}>{codeCheck.msg}</div>
+            )}
+            <div className="f-hint" style={{ marginTop: 4, color: 'var(--ink-4)' }}>
+              {isEdit
+                ? 'Locked after creation because this is the backend tenant key.'
+                : 'Used as the tenant key for this PMS workspace.'}
+            </div>
+          </div>
+        </div>
+      </div>
+
       <div className="ws-card">
         <div className="ws-card-title">Workspace Domain</div>
         <div className="form-group">
@@ -637,70 +531,92 @@ function Step1({ form, setField, onSlugInput, slugCheck }) {
         )}
       </div>
 
-      <div className="ws-card">
-        <div className="ws-card-title">Company Size</div>
-        <div className="form-group">
-          <label className="lbl">Estimated Company Size</label>
-          <select value={form.estimated_company_size || ''} onChange={e => setField('estimated_company_size', e.target.value)}>
-            <option value="">Select size range</option>
-            {['1-50','51-100','101-200','201-500','501-1000','1001-5000','5000+'].map(s => <option key={s} value={s}>{s} employees</option>)}
-          </select>
-        </div>
-      </div>
     </div>
   );
 }
 
-function Step2({ form, setField, modules, toggleModule }) {
+function Step2({ form, setField, additionalAdmins, setAdditionalAdmins }) {
+  function addAdmin() {
+    setAdditionalAdmins((prev) => [...prev, { id: `co_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`, name: '', email: '', password: '' }]);
+  }
+  function updateAdmin(id, patch) {
+    setAdditionalAdmins((prev) => prev.map((a) => (a.id === id ? { ...a, ...patch } : a)));
+  }
+  function removeAdmin(id) {
+    setAdditionalAdmins((prev) => prev.filter((a) => a.id !== id));
+  }
+
   return (
     <div>
-      <div className="ws-card">
-        <div className="ws-card-title">Module Selection</div>
-        <div className="create-mod-grid">
-          {MODULES.map(mod => {
-            const isSel = modules.includes(mod.id);
-            const isLocked = mod.locked;
-            let cls = 'create-mod-card';
-            if (isLocked) cls += ' locked';
-            else if (isSel) cls += ' sel';
-            return (
-              <div key={mod.id} className={cls} onClick={() => !isLocked && toggleModule(mod.id)}>
-                <div className="create-mod-check">{(isLocked || isSel) ? '✓' : ''}</div>
-                <div>
-                  <div className="create-mod-name">{mod.icon} {mod.name}</div>
-                  <div className="create-mod-desc">{mod.desc}{isLocked ? ' — included by default' : ''}</div>
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      </div>
-
       <div className="ws-card">
         <div className="ws-card-title">HR Administrator</div>
         <div className="wiz-grid">
           <div className="form-group">
-            <label className="lbl">Full Name</label>
+            <label className="lbl">Full Name <span className="req">*</span></label>
             <input type="text" value={form.hr_admin_name || ''} placeholder="e.g. Priya Sharma"
               onChange={e => setField('hr_admin_name', e.target.value)} />
           </div>
           <div className="form-group">
-            <label className="lbl">Email Address</label>
+            <label className="lbl">Email Address <span className="req">*</span></label>
             <input type="email" value={form.hr_admin_email || ''} placeholder="hr@company.com"
               onChange={e => setField('hr_admin_email', e.target.value)} />
           </div>
         </div>
         <div className="wiz-full">
           <div className="form-group">
-            <label className="lbl">Temporary Password</label>
-            <input type="text" value={form.temporary_password || ''} placeholder="e.g. Acme@2024"
+            <label className="lbl">Temporary Password <span style={{ fontWeight: 400, color: '#94A3B8' }}>(auto-generated if blank)</span></label>
+            <input type="text" value={form.temporary_password || ''} placeholder="leave blank to auto-generate"
               onChange={e => setField('temporary_password', e.target.value)} />
           </div>
         </div>
-        <div className="banner banner-blue" style={{ marginTop: 12, marginBottom: 0 }}>
+        <div className="banner banner-blue" style={{ marginTop: 12, marginBottom: 16 }}>
           <span>ℹ️</span>
-          <span>An invitation email with login credentials will be sent to the HR Admin once the organization is created.</span>
+          <span>Invite emails are not sent automatically. Use <strong>Communications</strong> to review and send admin access emails manually.</span>
         </div>
+      </div>
+
+      <div className="ws-card">
+        <div className="ws-card-title">Additional admins (Co-Admins)</div>
+        <div style={{ fontSize: 12.5, color: '#64748B', marginTop: -6, marginBottom: 14 }}>
+          Optional. Add as many Co-Admins as you like. Each can receive an invite manually from Communications and gets full HR-admin access.
+        </div>
+        {additionalAdmins.length === 0 && (
+          <div style={{ border: '1.5px dashed #E2E8F0', borderRadius: 10, padding: 16, textAlign: 'center', color: '#94A3B8', fontSize: 13, marginBottom: 12 }}>
+            No additional admins. Just the primary HR Admin will receive the invite.
+          </div>
+        )}
+        {additionalAdmins.map((a, idx) => (
+          <div key={a.id} style={{ border: '1.5px solid #E2E8F0', borderRadius: 10, padding: '12px 14px', marginBottom: 10, background: '#FAFBFF' }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
+              <div style={{ fontSize: 12.5, fontWeight: 700, color: '#475569' }}>Co-Admin #{idx + 1}</div>
+              <button type="button" onClick={() => removeAdmin(a.id)}
+                style={{ padding: '4px 10px', background: '#fff', color: '#DC2626', border: '1.5px solid #FECACA', borderRadius: 7, fontSize: 11.5, cursor: 'pointer', fontFamily: 'inherit', fontWeight: 600 }}>Remove</button>
+            </div>
+            <div className="wiz-grid">
+              <div className="form-group">
+                <label className="lbl">Full Name</label>
+                <input type="text" value={a.name} placeholder="e.g. Aman Verma"
+                  onChange={(e) => updateAdmin(a.id, { name: e.target.value })} />
+              </div>
+              <div className="form-group">
+                <label className="lbl">Email Address</label>
+                <input type="email" value={a.email} placeholder="coadmin@company.com"
+                  onChange={(e) => updateAdmin(a.id, { email: e.target.value.toLowerCase() })} />
+              </div>
+            </div>
+            <div className="wiz-full">
+              <div className="form-group">
+                <label className="lbl">Temporary Password <span style={{ fontWeight: 400, color: '#94A3B8' }}>(auto-generated if blank)</span></label>
+                <input type="text" value={a.password} placeholder="leave blank to auto-generate"
+                  onChange={(e) => updateAdmin(a.id, { password: e.target.value })} />
+              </div>
+            </div>
+          </div>
+        ))}
+        <button type="button" onClick={addAdmin}
+          style={{ padding: '8px 14px', background: '#EEF2FF', color: '#4338CA', border: '1.5px solid #C7D2FE', borderRadius: 8, fontSize: 12.5, cursor: 'pointer', fontFamily: 'inherit', fontWeight: 700 }}>
+          + Add Co-Admin
+        </button>
       </div>
     </div>
   );

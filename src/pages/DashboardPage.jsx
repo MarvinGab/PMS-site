@@ -190,11 +190,7 @@ export default function DashboardPage() {
             <div className="card-head"><div className="fw-600">Module Usage</div></div>
             <div className="card-p compact-list">
               {[
-                { label: 'Performance Mgmt', val: '3/3' },
-                { label: 'Goal Management',  val: '2/3' },
-                { label: '360 Feedback',     val: '1/3' },
-                { label: 'Compensation',     val: '1/3' },
-                { label: 'Succession Planning', val: '0/3' },
+                { label: 'Performance Management', val: `${orgs.length}/${orgs.length}` },
               ].map(row => (
                 <div key={row.label} className="health-row">
                   <span>{row.label}</span><span>{row.val}</span>

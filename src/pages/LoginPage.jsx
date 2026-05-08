@@ -7,6 +7,7 @@ import {
 } from '../AppContext';
 import { resolveLoginUser, changeEmployeePassword } from '../backend/authService';
 import { persistEmployeeSession } from '../backend/stateStore';
+import { loginWithServerSession } from '../backend/serverAuth';
 
 function RightPanel() {
   return (
@@ -163,10 +164,19 @@ export default function LoginPage() {
     setError('');
     setLoading(true);
 
-    const user = await resolveLoginUser(identifier, password, {
-      email: SUPER_ADMIN_EMAIL,
-      password: SUPER_ADMIN_PASS,
-    });
+    let user = null;
+    const serverAuthResult = await loginWithServerSession(identifier, password);
+    if (serverAuthResult?.ok && serverAuthResult?.user) {
+      user = {
+        ...serverAuthResult.user,
+        serverSessionToken: serverAuthResult.serverSessionToken || null,
+      };
+    } else {
+      user = await resolveLoginUser(identifier, password, {
+        email: SUPER_ADMIN_EMAIL,
+        password: SUPER_ADMIN_PASS,
+      });
+    }
     if (!user) {
       setError('Invalid credentials. Check your email / employee code and password.');
       setLoading(false);
@@ -198,10 +208,11 @@ export default function LoginPage() {
         hrTeamId: user.hrTeamId || null,
         empCode: user.empCode || null,
         allowedModules: user.allowedModules || null,
+        serverSessionToken: user.serverSessionToken || null,
       });
       window.location.hash = '#hr-home';
     } else {
-      login('super-admin', { userName: user.userName });
+      login('super-admin', { userName: user.userName, serverSessionToken: user.serverSessionToken || null });
       window.location.hash = '#organizations';
     }
   }

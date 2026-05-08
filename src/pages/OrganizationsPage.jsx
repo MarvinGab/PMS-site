@@ -9,7 +9,6 @@ import '../admin.css';
 function OrgRow({ org, activeMenu, onMenuToggle, onOpen, onEdit, onDelete }) {
   const setup = getOrganizationSetupMeta(org);
   const employeeCount = getOrganizationEmployeeCount(org);
-  const seatPct = org.seats ? Math.round((employeeCount / org.seats) * 100) : 0;
   const progressNote = setup.pct >= 100
     ? 'Ready for launch'
     : setup.pct >= 50
@@ -33,10 +32,8 @@ function OrgRow({ org, activeMenu, onMenuToggle, onOpen, onEdit, onDelete }) {
       <td>
         <div className="org-metric-value">
           <span>{employeeCount}</span>
-          <span className="org-metric-sep">/</span>
-          <span className="org-metric-total">{org.seats}</span>
         </div>
-        <div className="org-metric-sub">{seatPct}% seats occupied</div>
+        <div className="org-metric-sub">{employeeCount === 1 ? 'employee' : 'employees'}</div>
       </td>
       <td>
         <div className="org-progress-cell">
@@ -78,13 +75,12 @@ export default function OrganizationsPage() {
 
   const summary = useMemo(() => {
     const totalEmployees = orgs.reduce((sum, org) => sum + getOrganizationEmployeeCount(org), 0);
-    const totalSeats = orgs.reduce((sum, org) => sum + (org.seats || 0), 0);
     const configured = orgs.filter((org) => getOrganizationSetupMeta(org).pct >= 100).length;
     const inProgress = orgs.filter((org) => {
       const pct = getOrganizationSetupMeta(org).pct;
       return pct > 0 && pct < 100;
     }).length;
-    return { totalEmployees, totalSeats, configured, inProgress };
+    return { totalEmployees, configured, inProgress };
   }, [orgs]);
 
   function handleMenuToggle(event, key) {
@@ -124,7 +120,7 @@ export default function OrganizationsPage() {
           <div className="workspace-stat">
             <div className="workspace-stat-label">Employees</div>
             <div className="workspace-stat-value">{summary.totalEmployees}</div>
-            <div className="workspace-stat-copy">{summary.totalEmployees} of {summary.totalSeats.toLocaleString()} seats</div>
+            <div className="workspace-stat-copy">Across all workspaces</div>
           </div>
         </div>
 

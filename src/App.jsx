@@ -1,9 +1,10 @@
 import { useState, useEffect, Component, lazy, Suspense } from 'react';
 import { AppProvider, useApp } from './AppContext';
-import { readWizardStateSync } from './backend/stateStore';
+import { readWizardStateSync, syncEmployeeCredentialsForOrg } from './backend/stateStore';
 import LoginPage from './pages/LoginPage';
 import DashboardPage from './pages/DashboardPage';
 import OrganizationsPage from './pages/OrganizationsPage';
+import SuperAdminCommsPage from './pages/SuperAdminCommsPage';
 import CreateOrgPage from './pages/CreateOrgPage';
 import EmployeePage from './pages/EmployeePage';
 
@@ -180,32 +181,17 @@ function Router() {
       );
       setOrgs(updated);
 
-      // Provision employee credentials with temp password (isTemp=true).
-      // Skip any employee whose credential already exists to preserve permanent passwords.
       const org = orgs.find((o) => o.key === orgKey);
       const tempPass = org?.temporaryPassword;
       if (tempPass) {
         const wizardState = readWizardStateSync(orgKey);
         const employees = wizardState?.config?.employeeUploadData?.employees || [];
         if (employees.length > 0) {
-          try {
-            const raw = localStorage.getItem(EMP_CREDENTIALS_KEY);
-            const existing = raw ? JSON.parse(raw) : {};
-            employees.forEach((emp) => {
-              const code = String(emp['Employee Code'] || '').trim();
-              if (code && !existing[code]) {
-                existing[code] = {
-                  password: tempPass,
-                  name: emp['Employee Name'] || '',
-                  designation: emp.Designation || emp.Role || '',
-                  managerCode: emp['Reporting Manager Code'] || '',
-                  orgKey: orgKey || '',
-                  isTemp: true,
-                };
-              }
-            });
-            localStorage.setItem(EMP_CREDENTIALS_KEY, JSON.stringify(existing));
-          } catch (_) {}
+          void syncEmployeeCredentialsForOrg({
+            orgKey: orgKey || '',
+            tempPassword: tempPass,
+            employees,
+          });
         }
       }
     }
@@ -219,6 +205,7 @@ function Router() {
   // Super admin routes
   if (route === 'create-org' || route === 'edit-org') return <CreateOrgPage />;
   if (route === 'organizations') return <OrganizationsPage />;
+  if (route === 'super-comms') return <SuperAdminCommsPage />;
 
   // Keep #dashboard as compatibility, but use the organizations-first admin surface
   if (route === 'dashboard') return <OrganizationsPage />;

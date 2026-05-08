@@ -22,12 +22,10 @@ export default function AdminShell({ children, title, page }) {
     <div className="admin-app-root">
       <aside className="sidebar">
         <div className="sidebar-logo" onClick={() => { window.location.hash = '#organizations'; }}>
-          <div className="sidebar-brand-mark">
-            <img src={zaroLogo} alt="Zaro HR" className="sidebar-brand-icon" />
-          </div>
+          <img src={zaroLogo} alt="Zaro HR" className="sidebar-brand-icon" />
           <div className="sidebar-brand-text">
             <div className="sb-brand-name">Zaro<span style={{ color: '#FFBF00' }}>HR</span></div>
-            <div className="sb-brand-tag">PMS Suite</div>
+            <div className="sb-brand-tag">Platform</div>
           </div>
         </div>
 
@@ -38,6 +36,13 @@ export default function AdminShell({ children, title, page }) {
           >
             <svg width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.8" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
             Organizations
+          </div>
+          <div
+            className={`sb-item${page === 'comms' ? ' active' : ''}`}
+            onClick={() => { window.location.hash = '#super-comms'; }}
+          >
+            <svg width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.8" viewBox="0 0 24 24"><rect x="2.5" y="5" width="19" height="14" rx="2.2"/><path d="m3.5 7 8.5 6.2L20.5 7"/></svg>
+            Communications
           </div>
         </nav>
 

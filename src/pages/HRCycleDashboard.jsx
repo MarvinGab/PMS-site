@@ -2,7 +2,7 @@ import { useState, useMemo, useEffect, useRef } from 'react';
 import { useApp } from '../AppContext';
 import { LaunchOverview, OrgChartPanel } from '../PMSWizard';
 import zaroLogo from '../../images/final zaro logo.png';
-import { downloadEmployeeTemplate, parseEmployeeXlsx } from '../templateUtils';
+import { downloadEmployeeTemplate, parseEmployeeXlsx, employeeTemplateMeta } from '../templateUtils';
 import { BRAND_PALETTES, resolveBrandPalette, deriveCustomPalette, buildHeroGradient, buildSwatchGradient, buildHeroBackground, resolveHero, fillAccent, CARD_ACCENT_MODES, CARD_PREVIEW_TINTS, normalizeCardsMode, cardStripeWidth } from '../brandPalettes';
 import {
   readWorkflowSync,
@@ -15,6 +15,17 @@ import {
   persistEmployeeCredentials,
   persistEmployeeSession,
 } from '../backend/stateStore';
+import { resetUserPasswordByAdmin } from '../backend/authService';
+import { sendCustomBroadcast, sendManagerSummaryEmails } from '../backend/emailService';
+import { hashPasswordValue } from '../backend/passwordCrypto';
+import { logAuditEvent } from '../backend/auditLog';
+import {
+  getDefaultSmtpSettings,
+  loadOrgSmtpSettings,
+  saveOrgSmtpSettings,
+  sendOrgSmtpTestEmail,
+  verifyOrgSmtpConnection,
+} from '../backend/emailSmtpService';
 
 const WIZARD_STATE_KEY = 'zarohr_pms_wizard_state_v1';
 const GOAL_WORKFLOW_KEY = 'zarohr_goal_workflow_v1';
@@ -343,6 +354,57 @@ async function parseObjectsXlsx(file) {
   } catch { return []; }
 }
 
+// Reporting managers referenced by code but not themselves uploaded as employees.
+// They show up alongside regular employees in admin lists. Their email lives on
+// the children's "Reporting Manager Email" field — `_external` flags the row so
+// updates can fan out to every child that reports to them.
+function synthesizeExternalManagers(employees) {
+  const byCode = new Map();
+  employees.forEach((e) => byCode.set(String(e['Employee Code'] || '').trim().toLowerCase(), e));
+  const map = new Map();
+  employees.forEach((e) => {
+    const raw = String(e['Reporting Manager Code'] || '').trim();
+    if (!raw) return;
+    const lower = raw.toLowerCase();
+    if (byCode.has(lower)) return;
+    if (map.has(lower)) { map.get(lower)._reportsCount += 1; return; }
+    const name = String(e['Reporting Manager Name'] || '').trim() || raw;
+    const email = String(e['Reporting Manager Email'] || '').trim();
+    map.set(lower, {
+      'Employee Code': raw,
+      'Employee Name': name,
+      'Email ID': email,
+      'Designation': '',
+      _external: true,
+      _reportsCount: 1,
+    });
+  });
+  return Array.from(map.values()).sort((a, b) => (a['Employee Name'] || '').localeCompare(b['Employee Name'] || ''));
+}
+
+// Combined roster: real employees + synthesized external-manager rows.
+function buildRoster(employees) {
+  return [...employees, ...synthesizeExternalManagers(employees)];
+}
+
+// Patch an email onto an employee. For a regular row it updates "Email ID".
+// For an external manager row it walks every child whose Reporting Manager Code
+// matches and updates their "Reporting Manager Email" — that is where the value
+// is actually stored.
+function applyEmailPatch(employees, code, newEmail) {
+  const lower = String(code || '').trim().toLowerCase();
+  const realIdx = employees.findIndex((e) => String(e['Employee Code'] || '').trim().toLowerCase() === lower);
+  if (realIdx >= 0) {
+    return employees.map((e, i) => i === realIdx ? { ...e, 'Email ID': newEmail } : e);
+  }
+  return employees.map((e) => {
+    if (String(e['Reporting Manager Code'] || '').trim().toLowerCase() === lower) {
+      return { ...e, 'Reporting Manager Email': newEmail };
+    }
+    return e;
+  });
+}
+
 /* ══════════════════════════════════════════════════════════════
    NAV MODULES definition
 ══════════════════════════════════════════════════════════════ */
@@ -356,6 +418,7 @@ const NAV_MODULES = [
   { id: 'roster',      icon: '📋', label: 'Add / Remove',        group: 'ops' },
   { id: 'test-creds',  icon: '👁',  label: 'View as Proxy',       group: 'dev' },
   { id: 'hr-team',     icon: '🛡',  label: 'HR Team',             group: 'dev' },
+  { id: 'email-settings', icon: '📨', label: 'Email Settings',    group: 'dev' },
   { id: 'config',      icon: '⚙️',  label: 'Configuration',       group: 'dev' },
 ];
 
@@ -665,11 +728,13 @@ function ModuleEmpStatus({ employees, groups, orgKey, org }) {
   const [filterLogin, setFilterLogin] = useState('');
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [downloading, setDownloading] = useState(false);
+  const [credTick, setCredTick] = useState(0);
+  const [resetState, setResetState] = useState({ key: '', message: '', tone: 'info' });
 
   // Read credentials once on mount and whenever orgKey changes
   const credentials = useMemo(() => {
     return readEmployeeCredentialsSync();
-  }, [orgKey]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [orgKey, credTick]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const workflow = useMemo(() => loadWorkflowState(orgKey), [orgKey]);
 
@@ -718,6 +783,39 @@ function ModuleEmpStatus({ employees, groups, orgKey, org }) {
     try {
       await downloadEmpStatusExcel({ employees: filtered, credentials, workflow, orgName: org?.name });
     } finally { setDownloading(false); }
+  }
+
+  async function handleResetPassword(emp) {
+    const code = String(emp?.['Employee Code'] || '').trim();
+    if (!code) return;
+    setResetState({ key: code, message: '', tone: 'info' });
+    const result = await resetUserPasswordByAdmin({ orgKey, credentialKey: code, prefix: 'Emp' });
+    if (result?.ok) {
+      void logAuditEvent({
+        orgKey,
+        actorRole: 'hr-admin',
+        actorName: org?.hrAdminName || 'HR Admin',
+        actionType: 'employee-password-reset',
+        targetType: 'employee',
+        targetCode: code,
+        details: {
+          employeeName: emp['Employee Name'] || '',
+        },
+      });
+      setCredTick((v) => v + 1);
+      navigator.clipboard?.writeText(result.tempPassword || '').catch(() => {});
+      setResetState({
+        key: code,
+        tone: 'good',
+        message: `Temporary password reset and copied for ${emp['Employee Name'] || code}.`,
+      });
+      return;
+    }
+    setResetState({
+      key: code,
+      tone: 'bad',
+      message: result?.error || 'Password reset failed.',
+    });
   }
 
   return (
@@ -823,21 +921,22 @@ function ModuleEmpStatus({ employees, groups, orgKey, org }) {
           <colgroup>
             <col style={{ width: '17%' }} />
             <col style={{ width: '8%' }} />
-            <col style={{ width: '16%' }} />
+            <col style={{ width: '15%' }} />
             <col style={{ width: '11%' }} />
             <col style={{ width: '14%' }} />
-            <col style={{ width: '14%' }} />
-            <col style={{ width: '20%' }} />
+            <col style={{ width: '12%' }} />
+            <col style={{ width: '15%' }} />
+            <col style={{ width: '8%' }} />
           </colgroup>
           <thead>
             <tr style={{ background: '#F8FAFC' }}>
-              {['Employee', 'Code', 'Designation', 'Group', 'Manager', 'Login', 'Stage'].map((h) => (
+              {['Employee', 'Code', 'Designation', 'Group', 'Manager', 'Login', 'Stage', 'Actions'].map((h) => (
                 <th key={h} style={{ padding: '9px 12px', textAlign: 'left', fontSize: 11, fontWeight: 700, color: '#94A3B8', textTransform: 'uppercase', letterSpacing: '0.05em', borderBottom: '1px solid #E9EDF2' }}>{h}</th>
               ))}
             </tr>
           </thead>
           <tbody>
-            {filtered.length === 0 && <tr><td colSpan={7} style={{ padding: '20px', textAlign: 'center', color: '#94A3B8' }}>No employees match your filter.</td></tr>}
+            {filtered.length === 0 && <tr><td colSpan={8} style={{ padding: '20px', textAlign: 'center', color: '#94A3B8' }}>No employees match your filter.</td></tr>}
             {filtered.slice(0, 100).map((emp, i) => {
               const code = emp['Employee Code'] || '—';
               const name = emp['Employee Name'] || code;
@@ -863,12 +962,27 @@ function ModuleEmpStatus({ employees, groups, orgKey, org }) {
                   </td>
                   <td style={{ padding: '9px 12px' }}><LoginStatusPill status={getLoginStatus(code)} /></td>
                   <td style={{ padding: '9px 12px' }}><StagePill stageId={getEmpStage(emp)} /></td>
+                  <td style={{ padding: '9px 12px' }}>
+                    <button
+                      type="button"
+                      onClick={() => handleResetPassword(emp)}
+                      disabled={resetState.key === code && !resetState.message}
+                      style={{ padding: '6px 10px', background: '#fff', color: '#4338CA', border: '1.5px solid #C7D2FE', borderRadius: 8, fontSize: 11.5, fontWeight: 700, cursor: 'pointer', fontFamily: 'inherit', whiteSpace: 'nowrap' }}
+                    >
+                      Reset password
+                    </button>
+                  </td>
                 </tr>
               );
             })}
           </tbody>
         </table>
-        {filtered.length > 100 && <div style={{ padding: '8px 12px', fontSize: 11.5, color: '#94A3B8', borderTop: '1px solid #F1F5F9' }}>Showing 100 of {filtered.length} — use search to narrow down</div>}
+        {(resetState.message || filtered.length > 100) && (
+          <div style={{ padding: '8px 12px', fontSize: 11.5, color: resetState.tone === 'bad' ? '#B91C1C' : resetState.tone === 'good' ? '#166534' : '#94A3B8', borderTop: '1px solid #F1F5F9', display: 'flex', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
+            <span>{resetState.message || '\u00A0'}</span>
+            {filtered.length > 100 && <span style={{ color: '#94A3B8' }}>Showing 100 of {filtered.length} — use search to narrow down</span>}
+          </div>
+        )}
       </div>
     </div>
   );
@@ -947,20 +1061,22 @@ const DEFAULT_EMAIL_THEME = {
   brand:      COMMS_THEME_PRESETS[0].brand,
   ctaLabel:   'Log in to Performance Hub',
   footerText: '',
-  logo:       null,          // data URL
-  logoPosition: 'header-left', // header-left | header-center | header-right | above-title | watermark | none
-  logoSize:   'medium',      // small | medium | large
-  buttonStyle: 'solid',      // solid | outline | pill | ghost
-  buttonAlign: 'left',       // left | center | right
+  showFooter: true,
+  showZaroBadge: true,
+  logo:       null,            // data URL
+  logoPosition: 'header-left', // header-left | header-center | header-right | hide
+  logoSize:   'medium',        // small | medium | large
+  buttonStyle: 'solid',        // solid | outline | pill | ghost
+  buttonAlign: 'left',         // left | center | right
 };
+
 const LOGO_POSITIONS = [
-  { id: 'header-left',   label: 'Header · left' },
-  { id: 'header-center', label: 'Header · center' },
-  { id: 'header-right',  label: 'Header · right' },
-  { id: 'above-title',   label: 'Above title' },
-  { id: 'watermark',     label: 'Background' },
-  { id: 'none',          label: 'Hide' },
+  { id: 'header-left',   label: 'Left' },
+  { id: 'header-center', label: 'Center' },
+  { id: 'header-right',  label: 'Right' },
+  { id: 'hide',          label: 'Hide' },
 ];
+const LOGO_SIZES = ['small', 'medium', 'large'];
 const BUTTON_STYLES = [
   { id: 'solid',   label: 'Solid' },
   { id: 'outline', label: 'Outline' },
@@ -1010,22 +1126,459 @@ function PreviewHotspot({ label, onClick, children, inline = false }) {
   );
 }
 
-function ModuleComms({ employees, groups, org }) {
+function ComposeRecipients({
+  recipients, groups,
+  recipSearch, setRecipSearch,
+  recipFilter, setRecipFilter,
+  emailEdits, setEmailEdits,
+  commitEmail, getEmail,
+  bulkEmailFileRef, handleBulkEmailFile,
+  bulkEmailPreview, setBulkEmailPreview,
+  applyBulkEmail,
+  downloadCurrentEmailList,
+  recipToast,
+  sendConfig,
+  sendState,
+  onSend,
+  activeTemplate,
+}) {
+  const totalCount = recipients.length;
+  const withEmail = recipients.filter((e) => getEmail(e)).length;
+  const missingCount = totalCount - withEmail;
+
+  const filteredList = useMemo(() => {
+    const q = recipSearch.trim().toLowerCase();
+    return recipients.filter((e) => {
+      if (recipFilter === 'missing' && getEmail(e)) return false;
+      if (q) {
+        const hay = `${e['Employee Name'] || ''} ${e['Employee Code'] || ''} ${getEmail(e)}`.toLowerCase();
+        if (!hay.includes(q)) return false;
+      }
+      return true;
+    });
+  }, [recipients, recipSearch, recipFilter, getEmail]);
+
+  const inputCell = { width: '100%', boxSizing: 'border-box', border: '1.5px solid #E2E8F0', borderRadius: 7, padding: '6px 10px', fontSize: 12.5, outline: 'none', fontFamily: 'inherit', color: '#0F172A', background: '#fff' };
+
+  return (
+    <div style={{ position: 'relative' }}>
+      {recipToast && <div style={{ position: 'fixed', bottom: 28, right: 28, zIndex: 50, background: '#F0FDF4', border: '1px solid #BBF7D0', borderRadius: 9, padding: '10px 16px', fontSize: 12.5, fontWeight: 600, color: '#15803D', boxShadow: '0 4px 16px rgba(0,0,0,.1)' }}>✓ {recipToast}</div>}
+
+      {/* Summary chips */}
+      <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginBottom: 14 }}>
+        <Chip label="Total" value={totalCount} tone="neutral" />
+        <Chip label="With email" value={withEmail} tone="ok" />
+        <Chip label="Missing email" value={missingCount} tone={missingCount > 0 ? 'warn' : 'neutral'} />
+        <Chip label="Groups" value={groups.length} tone="neutral" />
+      </div>
+
+      {/* Toolbar */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12, flexWrap: 'wrap' }}>
+        <input value={recipSearch} onChange={(e) => setRecipSearch(e.target.value)}
+          placeholder="Search name, code, or email…"
+          style={{ flex: 1, minWidth: 240, boxSizing: 'border-box', border: '1.5px solid #E2E8F0', borderRadius: 9, padding: '8px 12px', fontSize: 13, outline: 'none', fontFamily: 'inherit', color: '#0F172A', background: '#fff' }} />
+
+        <div style={{ display: 'inline-flex', background: '#F1F5F9', padding: 3, borderRadius: 9, gap: 2 }}>
+          {[{ k: 'all', label: 'All' }, { k: 'missing', label: `Missing email${missingCount > 0 ? ` · ${missingCount}` : ''}` }].map((f) => (
+            <button key={f.k} type="button" onClick={() => setRecipFilter(f.k)}
+              style={{ padding: '6px 12px', borderRadius: 7, border: 'none', cursor: 'pointer', fontFamily: 'inherit', fontSize: 12, fontWeight: recipFilter === f.k ? 700 : 500, background: recipFilter === f.k ? '#fff' : 'transparent', color: recipFilter === f.k ? '#0F172A' : '#64748B', boxShadow: recipFilter === f.k ? '0 1px 3px rgba(15,23,42,.08)' : 'none' }}>
+              {f.label}
+            </button>
+          ))}
+        </div>
+
+        <input ref={bulkEmailFileRef} type="file" accept=".xlsx,.xls,.csv" style={{ display: 'none' }} onChange={handleBulkEmailFile} />
+        <button type="button" onClick={downloadCurrentEmailList}
+          title="Exports a CSV with the current Employee Code and Email for every recipient. Edit the second column and re-upload."
+          style={{ padding: '8px 12px', background: '#fff', color: '#475569', border: '1.5px solid #E2E8F0', borderRadius: 9, fontSize: 12, cursor: 'pointer', fontFamily: 'inherit', fontWeight: 600, display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+          Download current list
+        </button>
+        <button type="button" onClick={() => bulkEmailFileRef.current?.click()}
+          style={{ padding: '8px 14px', background: '#4F46E5', color: '#fff', border: 'none', borderRadius: 9, fontSize: 12.5, cursor: 'pointer', fontFamily: 'inherit', fontWeight: 700, boxShadow: '0 4px 12px rgba(79,70,229,.25)' }}>
+          Upload edited list
+        </button>
+      </div>
+
+      {/* Bulk preview */}
+      {bulkEmailPreview && (
+        <div style={{ background: '#fff', border: '1px solid #E9EDF2', borderRadius: 12, padding: 14, marginBottom: 14 }}>
+          <div style={{ fontSize: 12, fontWeight: 700, color: '#374151', marginBottom: 8 }}>
+            {bulkEmailPreview.filter((r) => r.found && r.valid && r.changed).length} will update,
+            {' '}{bulkEmailPreview.filter((r) => !r.found).length} not found,
+            {' '}{bulkEmailPreview.filter((r) => r.found && !r.valid).length} invalid
+          </div>
+          <div style={{ border: '1px solid #E9EDF2', borderRadius: 8, overflow: 'hidden', maxHeight: 240, overflowY: 'auto', marginBottom: 10 }}>
+            <table style={{ width: '100%', fontSize: 12.5, borderCollapse: 'collapse' }}>
+              <thead><tr style={{ background: '#F8FAFC' }}>
+                {['Employee', 'Current', 'New', 'Status'].map((h) => <th key={h} style={{ padding: '7px 10px', textAlign: 'left', fontSize: 11, fontWeight: 700, color: '#94A3B8', textTransform: 'uppercase', position: 'sticky', top: 0, background: '#F8FAFC' }}>{h}</th>)}
+              </tr></thead>
+              <tbody>{bulkEmailPreview.map((r, i) => (
+                <tr key={i} style={{ borderTop: '1px solid #F1F5F9' }}>
+                  <td style={{ padding: '6px 10px' }}>
+                    <span style={{ fontFamily: 'monospace', fontWeight: 700, color: '#4F46E5' }}>{r.code}</span>
+                    {r.name && <span style={{ color: '#374151' }}> — {r.name}</span>}
+                  </td>
+                  <td style={{ padding: '6px 10px', color: '#94A3B8' }}>{r.currentEmail || '—'}</td>
+                  <td style={{ padding: '6px 10px', color: '#0F172A' }}>{r.newEmail || '—'}</td>
+                  <td style={{ padding: '6px 10px' }}>
+                    {!r.found && <Pill text="Not found" tone="warn" />}
+                    {r.found && !r.valid && <Pill text="Invalid format" tone="warn" />}
+                    {r.found && r.valid && r.changed && <Pill text="Will update" tone="ok" />}
+                    {r.found && r.valid && !r.changed && <Pill text="No change" tone="neutral" />}
+                  </td>
+                </tr>
+              ))}</tbody>
+            </table>
+          </div>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button type="button" onClick={applyBulkEmail} disabled={!bulkEmailPreview.some((r) => r.found && r.valid && r.changed)}
+              style={{ padding: '8px 16px', background: '#16A34A', color: '#fff', border: 'none', borderRadius: 7, fontSize: 12.5, fontWeight: 700, cursor: 'pointer', fontFamily: 'inherit' }}>
+              Apply changes
+            </button>
+            <button type="button" onClick={() => setBulkEmailPreview(null)} style={{ padding: '7px 14px', background: '#F1F5F9', color: '#374151', border: '1.5px solid #E2E8F0', borderRadius: 7, fontSize: 12.5, cursor: 'pointer', fontFamily: 'inherit' }}>Cancel</button>
+          </div>
+        </div>
+      )}
+
+      {/* Recipients table */}
+      <div style={{ background: '#fff', border: '1px solid #E9EDF2', borderRadius: 12, overflow: 'hidden' }}>
+        <div style={{ maxHeight: 460, overflow: 'auto' }}>
+          <table style={{ width: '100%', fontSize: 12.5, borderCollapse: 'collapse' }}>
+            <thead><tr style={{ background: '#F8FAFC', position: 'sticky', top: 0 }}>
+              {['Name', 'Code', 'Email', ''].map((h, i) => (
+                <th key={i} style={{ padding: '10px 14px', textAlign: 'left', fontSize: 11, fontWeight: 700, color: '#94A3B8', textTransform: 'uppercase', letterSpacing: '0.04em', borderBottom: '1px solid #E2E8F0', background: '#F8FAFC', whiteSpace: 'nowrap' }}>{h}</th>
+              ))}
+            </tr></thead>
+            <tbody>
+              {filteredList.map((emp) => {
+                const code = String(emp['Employee Code'] || '').trim();
+                const current = getEmail(emp);
+                const editVal = emailEdits[code];
+                const editing = editVal !== undefined;
+                const value = editing ? editVal : current;
+                const dirty = editing && (editVal ?? '').trim() !== current;
+                const valid = !value || /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
+                return (
+                  <tr key={code} style={{ borderTop: '1px solid #F1F5F9' }}>
+                    <td style={{ padding: '8px 14px', fontWeight: 600, color: '#0F172A' }}>{emp['Employee Name'] || '—'}</td>
+                    <td style={{ padding: '8px 14px', color: '#94A3B8', fontFamily: 'monospace' }}>{code}</td>
+                    <td style={{ padding: '6px 10px' }}>
+                      <input
+                        value={value}
+                        onChange={(e) => setEmailEdits((p) => ({ ...p, [code]: e.target.value }))}
+                        placeholder={current ? '' : 'Add email…'}
+                        type="email"
+                        style={{ ...inputCell, borderColor: !valid ? '#FCA5A5' : dirty ? '#A5B4FC' : '#E2E8F0' }}
+                      />
+                    </td>
+                    <td style={{ padding: '6px 10px', whiteSpace: 'nowrap' }}>
+                      {dirty && valid && (
+                        <button type="button" onClick={() => commitEmail(code)}
+                          style={{ padding: '6px 12px', background: '#4F46E5', color: '#fff', border: 'none', borderRadius: 7, fontSize: 11.5, fontWeight: 700, cursor: 'pointer', fontFamily: 'inherit' }}>
+                          Save
+                        </button>
+                      )}
+                      {dirty && !valid && (
+                        <span style={{ fontSize: 11, color: '#991B1B', fontWeight: 600 }}>Invalid</span>
+                      )}
+                      {!dirty && !current && <span style={{ fontSize: 11, color: '#92400E', fontWeight: 600 }}>Missing</span>}
+                    </td>
+                  </tr>
+                );
+              })}
+              {filteredList.length === 0 && (
+                <tr><td colSpan={4} style={{ padding: '32px 14px', textAlign: 'center', color: '#94A3B8', fontSize: 13 }}>No employees match this filter.</td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {/* Send footer */}
+      {(() => {
+        const sending = sendState?.status === 'sending';
+        const sent = sendState?.status === 'sent';
+        const failed = sendState?.status === 'failed';
+        const disabled = !!sendConfig?.disabled || sending;
+        const banner = sent
+          ? { bg: '#F0FDF4', bd: '#BBF7D0', tx: '#166534', label: sendState.message || 'Sent.' }
+          : failed
+          ? { bg: '#FEF2F2', bd: '#FECACA', tx: '#991B1B', label: sendState.message || 'Send failed.' }
+          : { bg: '#EFF6FF', bd: '#BFDBFE', tx: '#1D4ED8', label: activeTemplate === 'cycle-launch'
+              ? 'Manual broadcast — sends when you click below.'
+              : activeTemplate === 'co-admin-invite'
+              ? 'Sends the welcome email to all Co-Admins on the HR Team that have an email and a temp password.'
+              : activeTemplate === 'scoped-hr-invite'
+              ? 'Sends the welcome email to all Scoped HR members on the HR Team that have an email and a temp password.'
+              : 'Manual manager summary — sends to reporting managers only when you click below.' };
+        return (
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: 14, padding: '12px 16px', background: banner.bg, border: `1px solid ${banner.bd}`, borderRadius: 11, gap: 12, flexWrap: 'wrap' }}>
+            <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8, fontSize: 12, color: banner.tx }}>
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0, marginTop: 1 }}>
+                {sent ? <><polyline points="20 6 9 17 4 12"/></> : failed ? <><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></> : <><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></>}
+              </svg>
+              <span>{banner.label}</span>
+            </div>
+            <button type="button" disabled={disabled} onClick={onSend}
+              style={{ padding: '9px 18px', background: disabled ? '#E2E8F0' : '#4F46E5', color: disabled ? '#94A3B8' : '#fff', border: 'none', borderRadius: 9, fontSize: 13, fontWeight: 700, cursor: disabled ? 'not-allowed' : 'pointer', fontFamily: 'inherit', display: 'inline-flex', alignItems: 'center', gap: 7, boxShadow: disabled ? 'none' : '0 4px 12px rgba(79,70,229,.25)' }}>
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+              {sending ? 'Sending…' : (sendConfig?.label || `Send to ${withEmail}`)}
+            </button>
+          </div>
+        );
+      })()}
+    </div>
+  );
+}
+
+function Chip({ label, value, tone }) {
+  const colors = tone === 'ok'    ? { bg: '#F0FDF4', bd: '#BBF7D0', tx: '#166534' }
+              : tone === 'warn'   ? { bg: '#FFFBEB', bd: '#FDE68A', tx: '#92400E' }
+              :                     { bg: '#F8FAFC', bd: '#E2E8F0', tx: '#475569' };
+  return (
+    <div style={{ display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 12px', background: colors.bg, border: `1px solid ${colors.bd}`, borderRadius: 999 }}>
+      <span style={{ fontSize: 11.5, fontWeight: 600, color: colors.tx, opacity: 0.85 }}>{label}</span>
+      <span style={{ fontSize: 13, fontWeight: 800, color: colors.tx }}>{value}</span>
+    </div>
+  );
+}
+
+function Pill({ text, tone }) {
+  const colors = tone === 'ok'    ? { bg: '#F0FDF4', tx: '#15803D' }
+              : tone === 'warn'   ? { bg: '#FEF2F2', tx: '#991B1B' }
+              :                     { bg: '#F1F5F9', tx: '#64748B' };
+  return <span style={{ fontSize: 11, fontWeight: 600, color: colors.tx, background: colors.bg, borderRadius: 5, padding: '2px 8px' }}>{text}</span>;
+}
+
+function ModuleComms({ employees, groups, org, config, onUpdate, onConfigPatch }) {
   const [activeTab, setActiveTab] = useState('email');
-  const defaultSubject = `Welcome to ${org.name || 'the PMS'} — Your Goal Setting is Now Open`;
-  const defaultBody = `Dear {employee_name},\n\nThe Performance Management System for ${org.name || 'our organization'} is now live!\n\nYour login credentials:\n  Employee Code : {employee_code}\n  Password      : {password}\n\nPlease log in to complete your goal-setting for this appraisal cycle.\n\nWarm regards,\n${org.hrAdminName || 'HR Team'}`;
-  const [subject, setSubject] = useState(defaultSubject);
-  const [body, setBody]       = useState(defaultBody);
+  const [stepTab, setStepTab] = useState('compose'); // 'compose' | 'design' | 'recipients'
+  const [activeTemplate, setActiveTemplate] = useState('cycle-launch');
+
+  const defaultTemplates = useMemo(() => ({
+    'cycle-launch': {
+      subject: `Welcome to ${org.name || 'the PMS'} — Your Goal Setting is Now Open`,
+      body: `Dear {employee_name},\n\nThe Performance Management System for ${org.name || 'our organization'} is now live!\n\nYour login credentials:\n  Employee Code : {employee_code}\n  Password      : {password}\n\nPlease log in to complete your goal-setting for this appraisal cycle.\n\nWarm regards,\n${org.hrAdminName || 'HR Team'}`,
+    },
+    'co-admin-invite': {
+      subject: `${org.name || 'PMS'} — you've been added as a Co-Admin`,
+      body: `Hello {employee_name},\n\n${org.hrAdminName || 'HR'} has added you as a Co-Admin for ${org.name || 'our organization'} on Zaro HR.\n\nYour login email : {recipient_email}\nTemporary password : {temporary_password}\n\nYou'll have full HR-admin access. Please log in and change your password right after.\n\nWarm regards,\n${org.hrAdminName || 'HR Team'}`,
+    },
+    'scoped-hr-invite': {
+      subject: `${org.name || 'PMS'} — your Scoped HR access is ready`,
+      body: `Hello {employee_name},\n\n${org.hrAdminName || 'HR'} has set you up as a Scoped HR member for ${org.name || 'our organization'} on Zaro HR.\n\nYour login email : {recipient_email}\nTemporary password : {temporary_password}\n\nYour access is limited to the scope HR has assigned. Please log in and change your password right after.\n\nWarm regards,\n${org.hrAdminName || 'HR Team'}`,
+    },
+    'manager-summary': {
+      subject: `${org.name || 'PMS'} — your reportee setup summary`,
+      body: `Hello {employee_name},\n\nThe following reportees are mapped to you for this cycle:\n\n{reportee_list}\n\nLog in to review their goal-setting progress.\n\nWarm regards,\n${org.hrAdminName || 'HR Team'}`,
+    },
+  }), [org.name, org.hrAdminName]);
+
+  const initialTemplates = config?.emailTemplates?.templates || defaultTemplates;
+  const [templates, setTemplates] = useState(initialTemplates);
   const [previewIndex, setPreviewIndex] = useState(0);
-  const [emailTheme, setEmailTheme] = useState(DEFAULT_EMAIL_THEME);
+
+  // Auto-populate the email-design logo from the org-level brand logo (captured
+  // during setup or HR Team page) on first mount. Users can replace or remove it.
+  const [emailTheme, setEmailTheme] = useState(() => ({
+    ...DEFAULT_EMAIL_THEME,
+    logo: org?.brandLogo || null,
+    ...(config?.emailTemplates?.theme || {}),
+  }));
   function updateTheme(patch) { setEmailTheme((prev) => ({ ...prev, ...patch })); }
   function applyPreset(preset) { updateTheme({ brand: preset.brand }); }
   async function uploadLogo(file) {
     if (!file || !file.type?.startsWith('image/')) return;
     try {
       const dataUrl = await readImageAsDataUrl(file);
-      updateTheme({ logo: dataUrl, logoPosition: emailTheme.logoPosition === 'none' ? 'header-left' : emailTheme.logoPosition });
+      updateTheme({ logo: dataUrl });
     } catch (_) { /* silently ignore — UI stays in previous state */ }
+  }
+
+  // Subject/body are derived from the active template; setters route back into
+  // the templates store. Persistence is debounced into `config.emailTemplates`
+  // so manual Communications sends use the same drafts the HR admin designed here.
+  const subject = templates[activeTemplate]?.subject ?? '';
+  const body = templates[activeTemplate]?.body ?? '';
+  const setSubject = (v) => setTemplates((p) => ({ ...p, [activeTemplate]: { ...(p[activeTemplate] || {}), subject: typeof v === 'function' ? v(p[activeTemplate]?.subject ?? '') : v } }));
+  const setBody = (v) => setTemplates((p) => ({ ...p, [activeTemplate]: { ...(p[activeTemplate] || {}), body: typeof v === 'function' ? v(p[activeTemplate]?.body ?? '') : v } }));
+
+  const initialPersistRef = useRef(true);
+  useEffect(() => {
+    if (initialPersistRef.current) { initialPersistRef.current = false; return; }
+    const id = setTimeout(() => {
+      onConfigPatch?.({ emailTemplates: { templates, theme: emailTheme } });
+    }, 400);
+    return () => clearTimeout(id);
+  }, [templates, emailTheme, onConfigPatch]);
+
+  // Send state — broadcasts go through the Edge Function via emailService.
+  const [sendState, setSendState] = useState({ status: 'idle', message: '' });
+
+  const sendConfig = useMemo(() => {
+    if (activeTemplate === 'cycle-launch') {
+      const recipients = (employees || []).filter((e) => String(e?.['Email ID'] || e?.Email || '').trim());
+      return {
+        label: `Send launch email to ${recipients.length} employee${recipients.length !== 1 ? 's' : ''}`,
+        disabled: recipients.length === 0,
+        recipients,
+        kind: 'broadcast',
+      };
+    }
+    if (activeTemplate === 'co-admin-invite' || activeTemplate === 'scoped-hr-invite') {
+      const wantedType = activeTemplate === 'co-admin-invite' ? 'co-admin' : 'scoped-hr';
+      const team = (org?.hrTeam || []).filter((m) => m.type === wantedType && String(m.email || '').trim() && !m.isInPMS);
+      const recipients = team.map((m) => ({
+        'Employee Name': m.name || m.email,
+        'Employee Code': m.empCode || m.id || '',
+        'Email ID': m.email,
+        _hrTeamMember: m,
+      }));
+      const label = activeTemplate === 'co-admin-invite' ? 'Co-Admin' : 'Scoped HR';
+      return {
+        label: `Send ${label} invite to ${recipients.length} member${recipients.length !== 1 ? 's' : ''}`,
+        disabled: recipients.length === 0,
+        recipients,
+        kind: 'broadcast',
+      };
+    }
+    // manager-summary
+    const seen = new Set();
+    (employees || []).forEach((e) => {
+      const m = String(e?.['Reporting Manager Email'] || '').trim().toLowerCase();
+      if (m) seen.add(m);
+    });
+    return {
+      label: `Send summary to ${seen.size} manager${seen.size !== 1 ? 's' : ''}`,
+      disabled: seen.size === 0,
+      recipients: [],
+      kind: 'manager-summary',
+    };
+  }, [activeTemplate, employees, org?.hrTeam]);
+
+  async function handleSend() {
+    if (sendConfig.disabled || sendState.status === 'sending') return;
+    const tpl = templates[activeTemplate];
+    if (!tpl?.subject || !tpl?.body) {
+      setSendState({ status: 'failed', message: 'Subject and body are required.' });
+      return;
+    }
+    setSendState({ status: 'sending', message: '' });
+    try {
+      let res;
+      if (sendConfig.kind === 'broadcast') {
+        // HR-team invites need per-recipient passwords (each member has their own
+        // temp password); cycle-launch uses the org-wide one. Provide a tokensFor
+        // resolver so the renderer picks up the right value per message.
+        const tokensFor = (rcpt) => {
+          const member = rcpt?._hrTeamMember;
+          if (!member) return undefined;
+          return {
+            temporary_password: member.password || '',
+            password: member.password || '',
+          };
+        };
+        res = await sendCustomBroadcast({ org, recipients: sendConfig.recipients, theme: emailTheme, template: tpl, tokensFor });
+      } else {
+        res = await sendManagerSummaryEmails({ org, employees, theme: emailTheme, template: tpl });
+      }
+      if (res?.ok || res?.skipped) {
+        const sent = res.sent ?? sendConfig.recipients.length ?? 0;
+        const failed = res.failed ?? 0;
+        setSendState({
+          status: 'sent',
+          message: res.skipped ? 'Nothing to send.' : `Sent ${sent}${failed ? ` · ${failed} failed` : ''}.`,
+        });
+      } else {
+        setSendState({ status: 'failed', message: res?.error || 'Send failed.' });
+      }
+    } catch (err) {
+      setSendState({ status: 'failed', message: err?.message || 'Send failed.' });
+    }
+  }
+
+  // Recipients-tab state. The list shown in admin includes external managers
+  // (referenced as Reporting Manager Code but not in `employees`); they are
+  // first-class here per HR's request.
+  const getEmail = (emp) => String(emp?.['Email ID'] || emp?.['Email'] || '').trim();
+  const allRecipients = useMemo(() => buildRoster(employees), [employees]);
+  const [recipSearch, setRecipSearch] = useState('');
+  const [recipFilter, setRecipFilter] = useState('all'); // 'all' | 'missing'
+  const [emailEdits, setEmailEdits] = useState({});
+  const [bulkEmailPreview, setBulkEmailPreview] = useState(null);
+  const [recipToast, setRecipToast] = useState(null);
+  const bulkEmailFileRef = useRef(null);
+  function showRecipToast(m) { setRecipToast(m); setTimeout(() => setRecipToast(null), 2500); }
+
+  function commitEmail(code) {
+    const newEmail = String(emailEdits[code] ?? '').trim();
+    const updated = applyEmailPatch(employees, code, newEmail);
+    onUpdate?.(updated);
+    setEmailEdits((p) => { const x = { ...p }; delete x[code]; return x; });
+    showRecipToast(newEmail ? 'Email saved' : 'Email cleared');
+  }
+
+  function downloadCurrentEmailList() {
+    const rows = allRecipients.map((r) => [r['Employee Code'] || '', r['Employee Name'] || '', getEmail(r)]);
+    const csv = [['Employee Code', 'Employee Name', 'Email'], ...rows].map((row) => row.map((cell) => {
+      const s = String(cell ?? '');
+      return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+    }).join(',')).join('\n');
+    const blob = new Blob([csv], { type: 'text/csv' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'employee_emails.csv';
+    a.click();
+  }
+
+  async function handleBulkEmailFile(e) {
+    const file = e.target.files?.[0]; if (!file) return;
+    e.target.value = '';
+    try {
+      // Read with headers so we can support either "Code, Email" or "Code, Name, Email" layouts.
+      const rows = await parseObjectsXlsx(file);
+      if (!rows.length) { showRecipToast('No rows found'); return; }
+      // Find the email column by name, with a fallback to whatever the second non-name column is.
+      const headers = Object.keys(rows[0] || {});
+      const emailKey = headers.find((h) => /^email/i.test(String(h).trim())) ||
+                       headers.find((h) => !/code|name/i.test(String(h).trim())) ||
+                       headers[1];
+      const codeKey = headers.find((h) => /employee\s*code|^code$/i.test(String(h).trim())) || headers[0];
+      const recipByCode = {};
+      allRecipients.forEach((r) => { recipByCode[String(r['Employee Code'] || '').trim().toLowerCase()] = r; });
+      const seen = new Set();
+      const preview = rows.map((row) => {
+        const code = String(row[codeKey] ?? '').trim();
+        const email = String(row[emailKey] ?? '').trim();
+        if (!code) return null;
+        const key = code.toLowerCase();
+        if (seen.has(key)) return null;
+        seen.add(key);
+        const match = recipByCode[key];
+        const current = match ? getEmail(match) : '';
+        const valid = !email || /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+        return {
+          code, name: match?.['Employee Name'] || '',
+          newEmail: email, currentEmail: current,
+          found: !!match, valid,
+          changed: !!match && valid && email !== current,
+        };
+      }).filter(Boolean);
+      setBulkEmailPreview(preview);
+    } catch (err) {
+      showRecipToast(err?.message || 'Could not parse file');
+    }
+  }
+
+  function applyBulkEmail() {
+    const valid = bulkEmailPreview.filter((r) => r.found && r.valid && r.changed);
+    if (valid.length === 0) { setBulkEmailPreview(null); return; }
+    let updated = employees;
+    valid.forEach((r) => { updated = applyEmailPatch(updated, r.code, r.newEmail); });
+    onUpdate?.(updated);
+    showRecipToast(`${valid.length} email${valid.length !== 1 ? 's' : ''} updated`);
+    setBulkEmailPreview(null);
   }
 
   // Derived brand tones
@@ -1033,13 +1586,76 @@ function ModuleComms({ employees, groups, org }) {
   const brandDark = darkenHex(brand, 0.22);
   const brandTheme = { accent: brand, credBg: withAlpha(brand, 0.08), credBorder: withAlpha(brand, 0.25) };
 
-  const previewEmp = employees[previewIndex] || employees[0] || null;
+  // Preview context — driven by which template is being edited so that admin
+  // and manager-summary drafts don't render against an employee. Each template
+  // has its own sensible "stand-in" recipient.
+  const sampleEmployee = employees[previewIndex] || employees[0] || null;
+  const previewContext = (() => {
+    const hrTeam = org?.hrTeam || [];
+    if (activeTemplate === 'co-admin-invite') {
+      const sample = hrTeam.find((m) => m.type === 'co-admin' && m.email);
+      return {
+        kind: 'co-admin',
+        name: sample?.name || 'Co-Admin Name',
+        email: sample?.email || 'coadmin@example.com',
+        code: sample?.empCode || '—',
+        password: sample?.password || 'TempPass123',
+        sampleReportees: [],
+      };
+    }
+    if (activeTemplate === 'scoped-hr-invite') {
+      const sample = hrTeam.find((m) => m.type === 'scoped-hr' && m.email);
+      return {
+        kind: 'scoped-hr',
+        name: sample?.name || 'Scoped HR Name',
+        email: sample?.email || 'scopedhr@example.com',
+        code: sample?.empCode || '—',
+        password: sample?.password || 'TempPass123',
+        sampleReportees: [],
+      };
+    }
+    if (activeTemplate === 'manager-summary') {
+      const samples = (employees || []).slice(0, 3).map((e) => ({
+        name: e['Employee Name'] || e['Employee Code'] || 'Employee',
+        code: e['Employee Code'] || '',
+        designation: e.Designation || e.Role || '',
+      }));
+      const synthName = sampleEmployee?.['Reporting Manager Name'] || 'Reporting Manager';
+      const synthEmail = sampleEmployee?.['Reporting Manager Email'] || 'manager@example.com';
+      return {
+        kind: 'manager',
+        name: synthName,
+        email: synthEmail,
+        code: sampleEmployee?.['Reporting Manager Code'] || '—',
+        sampleReportees: samples,
+      };
+    }
+    return {
+      kind: 'employee',
+      name: sampleEmployee?.['Employee Name'] || 'Aftab Alam',
+      email: sampleEmployee?.['Email ID'] || sampleEmployee?.Email || 'employee@example.com',
+      code: sampleEmployee?.['Employee Code'] || '1001',
+      sampleReportees: [],
+    };
+  })();
+  const previewEmp = previewContext.kind === 'employee' ? sampleEmployee : { _preview: true };
   const resolve = (text) => {
-    if (!previewEmp) return text;
+    if (!text) return text;
+    const reportees = previewContext.sampleReportees;
+    const reporteeList = reportees.length
+      ? reportees.map((r) => `• ${r.name}${r.designation ? ` — ${r.designation}` : ''}${r.code ? ` (${r.code})` : ''}`).join('\n')
+      : '—';
     return text
-      .replace(/\{employee_name\}/g, previewEmp['Employee Name'] || 'Employee')
-      .replace(/\{employee_code\}/g, previewEmp['Employee Code'] || '—')
-      .replace(/\{password\}/g, org.temporaryPassword || 'Pass@1234');
+      .replace(/\{employee_name\}/g, previewContext.name)
+      .replace(/\{employee_code\}/g, previewContext.code)
+      .replace(/\{recipient_email\}/g, previewContext.email)
+      .replace(/\{temporary_password\}/g, previewContext.password || org.temporaryPassword || 'Pass@1234')
+      .replace(/\{password\}/g, previewContext.password || org.temporaryPassword || 'Pass@1234')
+      .replace(/\{manager_name\}/g, previewContext.name)
+      .replace(/\{reportee_list\}/g, reporteeList)
+      .replace(/\{reportee_count\}/g, String(reportees.length || 0))
+      .replace(/\{organization_name\}/g, org.name || 'Your organization')
+      .replace(/\{login_url\}/g, '#');
   };
   const previewSubject = resolve(subject);
   const previewBody = resolve(body);
@@ -1090,10 +1706,16 @@ function ModuleComms({ employees, groups, org }) {
     // solid (default)
     return { ...base, background: `linear-gradient(135deg, ${brand} 0%, ${brandDark} 100%)`, color: '#fff', border: 'none', borderRadius: 10, boxShadow: `0 6px 14px ${withAlpha(brand, 0.32)}` };
   }
-  const logoHeightPx = emailTheme.logoSize === 'small' ? 24 : emailTheme.logoSize === 'large' ? 46 : 34;
-  const logoInHeader = emailTheme.logo && ['header-left', 'header-center', 'header-right'].includes(emailTheme.logoPosition);
-  const logoAboveTitle = emailTheme.logo && emailTheme.logoPosition === 'above-title';
-  const logoAsWatermark = emailTheme.logo && emailTheme.logoPosition === 'watermark';
+  // Free-position logo — dragged anywhere over the email card, resized via the
+  // bottom-right handle. Coordinates and width live on the email theme.
+  // Simple logo placement — derived from `logoPosition` + `logoSize`. No drag.
+  const logoHeightPx = emailTheme.logoSize === 'small' ? 26 : emailTheme.logoSize === 'large' ? 48 : 36;
+  const showLogo = emailTheme.logo && emailTheme.logoPosition !== 'hide';
+  const logoJustify = emailTheme.logoPosition === 'header-center'
+    ? 'center'
+    : emailTheme.logoPosition === 'header-right'
+    ? 'flex-end'
+    : 'flex-start';
 
   return (
     <div>
@@ -1121,6 +1743,64 @@ function ModuleComms({ employees, groups, org }) {
       </div>
 
       {activeTab === 'email' && (
+        <>
+          {/* Always-visible primary Send button so HR can ship from any tab */}
+          {(() => {
+            const sending = sendState.status === 'sending';
+            const sent = sendState.status === 'sent';
+            const failed = sendState.status === 'failed';
+            const disabled = !!sendConfig.disabled || sending;
+            return (
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12, gap: 10, flexWrap: 'wrap' }}>
+                <div style={{ fontSize: 12.5, color: sent ? '#166534' : failed ? '#991B1B' : '#64748B', fontWeight: sent || failed ? 700 : 500 }}>
+                  {sendState.message || (sending ? 'Sending…' : 'Pick a template, edit it, then send.')}
+                </div>
+                <button type="button" disabled={disabled} onClick={handleSend}
+                  style={{ padding: '8px 16px', background: disabled ? '#E2E8F0' : '#4F46E5', color: disabled ? '#94A3B8' : '#fff', border: 'none', borderRadius: 9, fontSize: 12.5, fontWeight: 700, cursor: disabled ? 'not-allowed' : 'pointer', fontFamily: 'inherit', display: 'inline-flex', alignItems: 'center', gap: 7, boxShadow: disabled ? 'none' : '0 4px 12px rgba(79,70,229,.25)' }}>
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+                  {sending ? 'Sending…' : (sendConfig.label || 'Send')}
+                </button>
+              </div>
+            );
+          })()}
+
+          {/* Template switcher — drafts share the same brand/design but each has its own subject + body */}
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 12 }}>
+            {[
+              { k: 'cycle-launch',     label: 'Cycle launch',     desc: 'Broadcast to all employees' },
+              { k: 'co-admin-invite',  label: 'Co-Admin invite',  desc: 'Send when you add a Co-Admin' },
+              { k: 'scoped-hr-invite', label: 'Scoped HR invite', desc: 'Send when you add a Scoped HR' },
+              { k: 'manager-summary',  label: 'Manager summary',  desc: 'Manual send to reporting managers' },
+            ].map((t) => {
+              const active = activeTemplate === t.k;
+              return (
+                <button key={t.k} type="button" onClick={() => setActiveTemplate(t.k)}
+                  style={{ flex: '1 1 200px', textAlign: 'left', padding: '10px 14px', borderRadius: 10, border: `1.5px solid ${active ? '#4F46E5' : '#E2E8F0'}`, background: active ? '#EEF2FF' : '#fff', cursor: 'pointer', fontFamily: 'inherit', boxShadow: active ? '0 4px 12px rgba(79,70,229,.15)' : 'none', transition: 'all 160ms ease' }}>
+                  <div style={{ fontSize: 12.5, fontWeight: 700, color: active ? '#312E81' : '#0F172A' }}>{t.label}</div>
+                  <div style={{ fontSize: 11, color: '#64748B', marginTop: 2 }}>{t.desc}</div>
+                </button>
+              );
+            })}
+          </div>
+
+          {/* Step tabs */}
+          <div style={{ display: 'inline-flex', gap: 2, padding: 4, background: '#F1F5F9', borderRadius: 11, marginBottom: 16 }}>
+            {[
+              { k: 'compose', label: 'Compose' },
+              { k: 'design',  label: 'Design' },
+              { k: 'recipients', label: `Recipients · ${allRecipients.length}` },
+            ].map((t) => {
+              const active = stepTab === t.k;
+              return (
+                <button key={t.k} type="button" onClick={() => setStepTab(t.k)}
+                  style={{ padding: '7px 16px', borderRadius: 8, border: 'none', cursor: 'pointer', fontFamily: 'inherit', fontSize: 12.5, fontWeight: active ? 700 : 500, background: active ? '#fff' : 'transparent', color: active ? '#0F172A' : '#64748B', boxShadow: active ? '0 1px 4px rgba(15,23,42,.08)' : 'none', transition: 'all 160ms ease' }}>
+                  {t.label}
+                </button>
+              );
+            })}
+          </div>
+
+          {(stepTab === 'compose' || stepTab === 'design') && (
         <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0,1.05fr) minmax(0,1fr)', gap: 16 }}>
 
           {/* ── Editor column ── */}
@@ -1130,12 +1810,13 @@ function ModuleComms({ employees, groups, org }) {
                 {activeChannel.icon}
               </div>
               <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontSize: 13.5, fontWeight: 700, color: '#0F172A' }}>Email template</div>
-                <div style={{ fontSize: 11.5, color: '#94A3B8' }}>Click a token below to insert it where your cursor is.</div>
+                <div style={{ fontSize: 13.5, fontWeight: 700, color: '#0F172A' }}>{stepTab === 'design' ? 'Brand & design' : 'Email template'}</div>
+                <div style={{ fontSize: 11.5, color: '#94A3B8' }}>{stepTab === 'design' ? 'Pick a colour, drop a logo, choose a button — preview updates live.' : 'Click a token to insert it where your cursor is.'}</div>
               </div>
             </div>
 
             <div style={{ padding: '16px 18px 18px', display: 'flex', flexDirection: 'column', gap: 14 }}>
+              {stepTab === 'compose' && <>
               {/* Subject */}
               <div>
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
@@ -1170,9 +1851,18 @@ function ModuleComms({ employees, groups, org }) {
                   style={{ width: '100%', boxSizing: 'border-box', border: '1.5px solid #E2E8F0', borderRadius: 9, padding: '12px 14px', fontSize: 13, lineHeight: 1.7, outline: 'none', fontFamily: "'Geist Mono','SF Mono',Menlo,monospace", color: '#0D1117', resize: 'vertical', background: '#fff' }} />
               </div>
 
-              {/* ── Design: all controls live on the left. Clicking the preview only scrolls here. ── */}
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '6px 2px' }}>
+                <span style={{ fontSize: 12, color: '#64748B' }}>Want a different look or logo?</span>
+                <button type="button" onClick={() => setStepTab('design')} style={{ background: 'transparent', border: 'none', color: '#4F46E5', fontWeight: 700, fontSize: 12.5, cursor: 'pointer', fontFamily: 'inherit', padding: 0 }}>
+                  Customize design →
+                </button>
+              </div>
+              </>}
+
+              {stepTab === 'design' && <>
+              {/* ── Design: palette / logo / button / footer ── */}
               <div ref={paletteRef} style={{ border: `1.5px solid ${flashSection === 'header' ? '#A5B4FC' : '#E2E8F0'}`, borderRadius: 10, background: '#fff', padding: '12px 14px', display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 10, boxShadow: flashRing('header'), transition: 'box-shadow 260ms ease, border-color 260ms ease' }}>
-                <div style={{ fontSize: 11, fontWeight: 700, color: '#94A3B8', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Palette</div>
+                <div style={{ fontSize: 11, fontWeight: 700, color: '#94A3B8', textTransform: 'uppercase', letterSpacing: '0.05em', minWidth: 80 }}>Palette</div>
                 {COMMS_THEME_PRESETS.map((p) => {
                   const active = brand.toLowerCase() === p.brand.toLowerCase();
                   return (
@@ -1207,40 +1897,56 @@ function ModuleComms({ employees, groups, org }) {
                       </button>
                     </>
                   ) : (
-                    <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, padding: '6px 12px', border: '1.5px dashed #CBD5E1', borderRadius: 8, cursor: 'pointer', fontSize: 11.5, fontWeight: 600, color: '#475569', background: '#fff' }}>
-                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
-                      Upload company logo
-                      <input
-                        type="file"
-                        accept="image/*"
-                        onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ''; uploadLogo(f); }}
-                        style={{ display: 'none' }}
-                      />
-                    </label>
+                    <>
+                      <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, padding: '6px 12px', border: '1.5px dashed #CBD5E1', borderRadius: 8, cursor: 'pointer', fontSize: 11.5, fontWeight: 600, color: '#475569', background: '#fff' }}>
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+                        Upload company logo
+                        <input
+                          type="file"
+                          accept="image/*"
+                          onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ''; uploadLogo(f); }}
+                          style={{ display: 'none' }}
+                        />
+                      </label>
+                      {org?.brandLogo && (
+                        <button type="button"
+                          onClick={() => updateTheme({ logo: org.brandLogo })}
+                          style={{ padding: '6px 12px', background: '#EEF2FF', color: '#4338CA', border: '1.5px solid #C7D2FE', borderRadius: 8, fontSize: 11.5, cursor: 'pointer', fontFamily: 'inherit', fontWeight: 600, display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                          <img src={org.brandLogo} alt="" style={{ width: 16, height: 16, borderRadius: 3, objectFit: 'contain' }} />
+                          Use org logo
+                        </button>
+                      )}
+                    </>
                   )}
                 </div>
                 {emailTheme.logo && (
-                  <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+                  <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', paddingTop: 6, borderTop: '1px dashed #E2E8F0' }}>
                     <div>
                       <div style={{ fontSize: 10.5, fontWeight: 600, color: '#94A3B8', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 4 }}>Position</div>
                       <div style={{ display: 'inline-flex', gap: 4, background: '#F1F5F9', padding: 3, borderRadius: 8 }}>
-                        {LOGO_POSITIONS.map((p) => (
-                          <button key={p.id} type="button" onClick={() => updateTheme({ logoPosition: p.id })}
-                            style={{ padding: '5px 9px', borderRadius: 6, border: 'none', background: emailTheme.logoPosition === p.id ? '#fff' : 'transparent', color: emailTheme.logoPosition === p.id ? '#0F172A' : '#64748B', fontWeight: emailTheme.logoPosition === p.id ? 700 : 500, fontSize: 11, cursor: 'pointer', fontFamily: 'inherit', boxShadow: emailTheme.logoPosition === p.id ? '0 1px 3px rgba(15,23,42,.08)' : 'none' }}>
-                            {p.label}
-                          </button>
-                        ))}
+                        {LOGO_POSITIONS.map((p) => {
+                          const active = (emailTheme.logoPosition || 'header-left') === p.id;
+                          return (
+                            <button key={p.id} type="button" onClick={() => updateTheme({ logoPosition: p.id })}
+                              style={{ padding: '5px 11px', borderRadius: 6, border: 'none', background: active ? '#fff' : 'transparent', color: active ? '#0F172A' : '#64748B', fontWeight: active ? 700 : 500, fontSize: 11, cursor: 'pointer', fontFamily: 'inherit', boxShadow: active ? '0 1px 3px rgba(15,23,42,.08)' : 'none' }}>
+                              {p.label}
+                            </button>
+                          );
+                        })}
                       </div>
                     </div>
                     <div>
                       <div style={{ fontSize: 10.5, fontWeight: 600, color: '#94A3B8', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 4 }}>Size</div>
                       <div style={{ display: 'inline-flex', gap: 4, background: '#F1F5F9', padding: 3, borderRadius: 8 }}>
-                        {['small', 'medium', 'large'].map((s) => (
-                          <button key={s} type="button" onClick={() => updateTheme({ logoSize: s })}
-                            style={{ padding: '5px 10px', borderRadius: 6, border: 'none', background: emailTheme.logoSize === s ? '#fff' : 'transparent', color: emailTheme.logoSize === s ? '#0F172A' : '#64748B', fontWeight: emailTheme.logoSize === s ? 700 : 500, fontSize: 11, cursor: 'pointer', fontFamily: 'inherit', textTransform: 'capitalize', boxShadow: emailTheme.logoSize === s ? '0 1px 3px rgba(15,23,42,.08)' : 'none' }}>
-                            {s}
-                          </button>
-                        ))}
+                        {LOGO_SIZES.map((s) => {
+                          const active = (emailTheme.logoSize || 'medium') === s;
+                          return (
+                            <button key={s} type="button" onClick={() => updateTheme({ logoSize: s })}
+                              style={{ padding: '5px 11px', borderRadius: 6, border: 'none', background: active ? '#fff' : 'transparent', color: active ? '#0F172A' : '#64748B', fontWeight: active ? 700 : 500, fontSize: 11, cursor: 'pointer', fontFamily: 'inherit', textTransform: 'capitalize', boxShadow: active ? '0 1px 3px rgba(15,23,42,.08)' : 'none' }}>
+                              {s}
+                            </button>
+                          );
+                        })}
                       </div>
                     </div>
                   </div>
@@ -1282,112 +1988,106 @@ function ModuleComms({ employees, groups, org }) {
               </div>
 
               {/* Footer section */}
-              <div ref={footerSectionRef} style={{ border: `1.5px solid ${flashSection === 'footer' ? '#A5B4FC' : '#E2E8F0'}`, borderRadius: 10, background: '#fff', padding: '12px 14px', display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', boxShadow: flashRing('footer'), transition: 'box-shadow 260ms ease, border-color 260ms ease' }}>
-                <div style={{ fontSize: 11, fontWeight: 700, color: '#94A3B8', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Footer</div>
-                <input type="text" value={emailTheme.footerText} onChange={(e) => updateTheme({ footerText: e.target.value })}
-                  placeholder={`Sent on behalf of ${org.hrAdminName || 'HR Team'}`}
-                  style={{ flex: 1, minWidth: 200, border: '1.5px solid #E2E8F0', borderRadius: 7, padding: '6px 10px', fontSize: 12.5, outline: 'none', fontFamily: 'inherit', color: '#0F172A', background: '#fff' }} />
-                <button type="button" onClick={() => setEmailTheme(DEFAULT_EMAIL_THEME)}
-                  style={{ padding: '6px 12px', background: 'transparent', color: '#64748B', border: 'none', borderRadius: 7, fontSize: 11.5, cursor: 'pointer', fontFamily: 'inherit', fontWeight: 600 }}>
-                  Reset all
+              <div ref={footerSectionRef} style={{ border: `1.5px solid ${flashSection === 'footer' ? '#A5B4FC' : '#E2E8F0'}`, borderRadius: 10, background: '#fff', padding: '12px 14px', display: 'flex', flexDirection: 'column', gap: 10, boxShadow: flashRing('footer'), transition: 'box-shadow 260ms ease, border-color 260ms ease' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+                  <div style={{ fontSize: 11, fontWeight: 700, color: '#94A3B8', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Footer</div>
+                  <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12, color: '#475569', cursor: 'pointer', userSelect: 'none', marginLeft: 'auto' }}>
+                    <input type="checkbox" checked={emailTheme.showFooter !== false}
+                      onChange={(e) => updateTheme({ showFooter: e.target.checked })}
+                      style={{ width: 14, height: 14, accentColor: '#4F46E5' }} />
+                    <span>Show footer</span>
+                  </label>
+                  <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12, color: '#475569', cursor: 'pointer', userSelect: 'none' }}>
+                    <input type="checkbox" checked={emailTheme.showZaroBadge !== false}
+                      onChange={(e) => updateTheme({ showZaroBadge: e.target.checked })}
+                      disabled={emailTheme.showFooter === false}
+                      style={{ width: 14, height: 14, accentColor: '#4F46E5' }} />
+                    <span>Show Zaro HR badge</span>
+                  </label>
+                  <button type="button" onClick={() => setEmailTheme(DEFAULT_EMAIL_THEME)}
+                    style={{ padding: '6px 12px', background: 'transparent', color: '#64748B', border: 'none', borderRadius: 7, fontSize: 11.5, cursor: 'pointer', fontFamily: 'inherit', fontWeight: 600 }}>
+                    Reset all
+                  </button>
+                </div>
+                {emailTheme.showFooter !== false && (
+                  <input type="text" value={emailTheme.footerText} onChange={(e) => updateTheme({ footerText: e.target.value })}
+                    style={{ width: '100%', boxSizing: 'border-box', border: '1.5px solid #E2E8F0', borderRadius: 7, padding: '7px 10px', fontSize: 12.5, outline: 'none', fontFamily: 'inherit', color: '#0F172A', background: '#fff' }} />
+                )}
+              </div>
+
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '6px 2px' }}>
+                <span style={{ fontSize: 11.5, color: '#94A3B8' }}>Tip · click any element in the preview to jump to its control.</span>
+                <button type="button" onClick={() => setStepTab('compose')} style={{ background: 'transparent', border: 'none', color: '#4F46E5', fontWeight: 700, fontSize: 12.5, cursor: 'pointer', fontFamily: 'inherit', padding: 0 }}>
+                  ← Back to compose
                 </button>
               </div>
-
-              <div style={{ fontSize: 11, color: '#94A3B8' }}>
-                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
-                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
-                  Click the header, button, or footer in the preview to jump to its controls here.
-                </span>
-              </div>
-
-              {/* Send-delivery status note */}
-              <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8, padding: '10px 12px', background: '#FFFBEB', border: '1px solid #FDE68A', borderRadius: 10, fontSize: 12, color: '#92400E' }}>
-                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0, marginTop: 1 }}><path d="M12 9v4"/><path d="M12 17h.01"/><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/></svg>
-                <div>
-                  <strong>Delivery is not connected yet.</strong> Send is disabled until an SMTP / transactional-email provider (SendGrid, Postmark, etc.) is wired. The template you design here will be used as-is once it is.
-                </div>
-              </div>
-
-              {/* Recipients + Send */}
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', background: 'linear-gradient(135deg,#F8FAFF 0%,#FFFFFF 100%)', borderRadius: 10, padding: '12px 14px', border: '1px solid #E2E8F0', gap: 12, flexWrap: 'wrap' }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
-                  <div style={{ width: 30, height: 30, borderRadius: '50%', background: '#EEF2FF', color: '#4F46E5', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
-                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
-                  </div>
-                  <div>
-                    <div style={{ fontSize: 13, fontWeight: 700, color: '#0F172A' }}>{employees.length} recipient{employees.length !== 1 ? 's' : ''}</div>
-                    <div style={{ fontSize: 11.5, color: '#64748B' }}>Across {groups.length} group{groups.length !== 1 ? 's' : ''} · all employees in the cycle</div>
-                  </div>
-                </div>
-                <button type="button" disabled
-                  title="Email delivery wiring not yet connected"
-                  style={{ padding: '9px 18px', background: '#E2E8F0', color: '#94A3B8', border: 'none', borderRadius: 9, fontSize: 13, fontWeight: 700, cursor: 'not-allowed', fontFamily: 'inherit', display: 'inline-flex', alignItems: 'center', gap: 7 }}>
-                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
-                  Send all
-                </button>
-              </div>
+              </>}
             </div>
           </div>
 
           {/* ── Preview column (no chrome) ── */}
           <div style={{ background: '#fff', border: '1px solid #E9EDF2', borderRadius: 14, overflow: 'hidden', display: 'flex', flexDirection: 'column', position: 'relative' }}>
-            {/* Floating employee switcher */}
+            {/* Preview toolbar — sits above the rendered email instead of floating */}
             {employees.length > 0 && (
-              <div style={{ position: 'absolute', top: 12, right: 12, zIndex: 3, display: 'inline-flex', alignItems: 'center', gap: 6, padding: '5px 8px 5px 10px', background: 'rgba(255,255,255,0.92)', border: '1.5px solid #E2E8F0', borderRadius: 999, boxShadow: '0 4px 12px rgba(15,23,42,.06)', fontSize: 11.5, color: '#475569', fontWeight: 600, backdropFilter: 'blur(8px)' }}>
-                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/></svg>
-                <span style={{ color: '#94A3B8' }}>Preview as</span>
-                <select value={previewIndex} onChange={(e) => setPreviewIndex(Number(e.target.value))}
-                  style={{ border: 'none', background: 'transparent', fontSize: 11.5, fontFamily: 'inherit', color: '#0F172A', fontWeight: 700, outline: 'none', cursor: 'pointer', maxWidth: 160 }}>
-                  {employees.map((e, i) => (
-                    <option key={e['Employee Code'] + i} value={i}>
-                      {e['Employee Name'] || e['Employee Code']}
-                    </option>
-                  ))}
-                </select>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, padding: '10px 14px', borderBottom: '1px solid #F1F5F9', background: '#fff' }}>
+                <div style={{ display: 'inline-flex', alignItems: 'center', gap: 7, fontSize: 11, fontWeight: 700, color: '#94A3B8', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-10 6L2 7"/></svg>
+                  Live preview
+                </div>
+                <label style={{ display: 'inline-flex', alignItems: 'center', gap: 7, fontSize: 12, color: '#475569' }}>
+                  <span style={{ color: '#94A3B8' }}>Preview as</span>
+                  {previewContext.kind === 'employee' ? (
+                    <select value={previewIndex} onChange={(e) => setPreviewIndex(Number(e.target.value))}
+                      style={{ border: '1.5px solid #E2E8F0', background: '#fff', padding: '5px 10px', borderRadius: 7, fontSize: 12, fontFamily: 'inherit', color: '#0F172A', fontWeight: 600, outline: 'none', cursor: 'pointer', maxWidth: 180 }}>
+                      {employees.map((e, i) => (
+                        <option key={e['Employee Code'] + i} value={i}>
+                          {e['Employee Name'] || e['Employee Code']}
+                        </option>
+                      ))}
+                    </select>
+                  ) : (
+                    <span style={{ padding: '5px 10px', borderRadius: 7, fontSize: 12, fontWeight: 600, color: '#0F172A', background: '#F1F5F9', border: '1.5px solid #E2E8F0', maxWidth: 220, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      {previewContext.kind === 'admin' ? `${previewContext.name} · admin` : `${previewContext.name} · manager`}
+                    </span>
+                  )}
+                </label>
               </div>
             )}
             {previewEmp ? (
-              <div style={{ padding: '46px 18px 22px', flex: 1, overflow: 'auto', background: 'linear-gradient(180deg,#F1F5F9 0%,#FAFBFF 100%)' }}>
+              <div style={{ padding: '20px 18px 22px', flex: 1, overflow: 'auto', background: 'linear-gradient(180deg,#F1F5F9 0%,#FAFBFF 100%)' }}>
                 {/* The rendered email — styling-only. Clicks scroll the editor to the relevant controls. */}
-                <div style={{ background: '#fff', borderRadius: 14, overflow: 'hidden', boxShadow: '0 10px 30px rgba(15,23,42,.08)', border: '1px solid #E2E8F0' }}>
+                <div style={{ position: 'relative', background: '#fff', borderRadius: 14, overflow: 'hidden', boxShadow: '0 10px 30px rgba(15,23,42,.08)', border: '1px solid #E2E8F0' }}>
                   {/* Brand header */}
                   <PreviewHotspot label="Edit header" onClick={() => focusSection('header')}>
                     <div style={{ background: `linear-gradient(135deg, ${brand} 0%, ${brandDark} 100%)`, padding: '22px 24px', color: '#fff', position: 'relative', overflow: 'hidden' }}>
                       <div style={{ position: 'absolute', right: -40, top: -40, width: 160, height: 160, borderRadius: '50%', background: 'rgba(255,255,255,.08)' }} />
-                      {logoAboveTitle && (
-                        <PreviewHotspot label="Edit logo" onClick={(e) => { e.stopPropagation(); focusSection('logo'); }} inline>
-                          <img src={emailTheme.logo} alt="Logo" style={{ display: 'block', height: logoHeightPx, maxWidth: 180, marginBottom: 10, borderRadius: 6, background: 'rgba(255,255,255,0.95)', padding: 4, objectFit: 'contain', position: 'relative' }} />
-                        </PreviewHotspot>
-                      )}
-                      <div style={{ position: 'relative', display: 'flex', alignItems: 'center', gap: 12, justifyContent: emailTheme.logoPosition === 'header-center' ? 'center' : emailTheme.logoPosition === 'header-right' ? 'flex-end' : 'flex-start' }}>
-                        {logoInHeader && emailTheme.logoPosition === 'header-left' && (
+                      {showLogo && (
+                        <div style={{ position: 'relative', display: 'flex', justifyContent: logoJustify, marginBottom: 12 }}>
                           <PreviewHotspot label="Edit logo" onClick={(e) => { e.stopPropagation(); focusSection('logo'); }} inline>
-                            <img src={emailTheme.logo} alt="Logo" style={{ height: logoHeightPx, width: 'auto', maxWidth: 140, borderRadius: 6, background: 'rgba(255,255,255,0.95)', padding: 4, objectFit: 'contain' }} />
+                            <img src={emailTheme.logo} alt="Logo" draggable={false}
+                              style={{ height: logoHeightPx, width: 'auto', maxWidth: 200, borderRadius: 6, background: 'rgba(255,255,255,0.95)', padding: 4, boxSizing: 'border-box', objectFit: 'contain', display: 'block' }} />
                           </PreviewHotspot>
-                        )}
-                        <div style={{ flex: emailTheme.logoPosition === 'header-center' ? 'unset' : 1, minWidth: 0, textAlign: emailTheme.logoPosition === 'header-center' ? 'center' : 'left' }}>
-                          {emailTheme.logoPosition === 'header-center' && logoInHeader && (
-                            <PreviewHotspot label="Edit logo" onClick={(e) => { e.stopPropagation(); focusSection('logo'); }} inline>
-                              <img src={emailTheme.logo} alt="Logo" style={{ height: logoHeightPx, width: 'auto', maxWidth: 140, borderRadius: 6, background: 'rgba(255,255,255,0.95)', padding: 4, objectFit: 'contain', display: 'inline-block', marginBottom: 8 }} />
-                            </PreviewHotspot>
-                          )}
-                          <div style={{ fontSize: 11.5, fontWeight: 700, opacity: 0.78, letterSpacing: '0.06em', textTransform: 'uppercase', marginBottom: 6 }}>
-                            {org.name || 'Performance Hub'}
-                          </div>
-                          <div style={{ fontSize: 19, fontWeight: 800, lineHeight: 1.3 }}>{previewSubject}</div>
                         </div>
-                        {logoInHeader && emailTheme.logoPosition === 'header-right' && (
-                          <PreviewHotspot label="Edit logo" onClick={(e) => { e.stopPropagation(); focusSection('logo'); }} inline>
-                            <img src={emailTheme.logo} alt="Logo" style={{ height: logoHeightPx, width: 'auto', maxWidth: 140, borderRadius: 6, background: 'rgba(255,255,255,0.95)', padding: 4, objectFit: 'contain' }} />
-                          </PreviewHotspot>
+                      )}
+                      <div style={{ position: 'relative', minWidth: 0 }}>
+                        {(() => {
+                          const effective = emailTheme.headerLabel != null ? emailTheme.headerLabel : (org.name || '');
+                          if (!effective.trim()) return null;
+                          return (
+                            <div style={{ fontSize: 11.5, fontWeight: 700, opacity: 0.78, letterSpacing: '0.06em', textTransform: 'uppercase', marginBottom: 6 }}>
+                              {effective}
+                            </div>
+                          );
+                        })()}
+                        {previewSubject.trim() && (
+                          <div style={{ fontSize: 19, fontWeight: 800, lineHeight: 1.3 }}>{previewSubject}</div>
                         )}
                       </div>
                     </div>
                   </PreviewHotspot>
 
-                  {/* Body (optional watermark) */}
-                  <div style={{ position: 'relative', background: logoAsWatermark ? `url(${emailTheme.logo}) no-repeat center / 60% auto` : 'transparent' }}>
-                    {logoAsWatermark && <div style={{ position: 'absolute', inset: 0, background: 'rgba(255,255,255,0.88)' }} />}
+                  {/* Body */}
+                  <div style={{ position: 'relative' }}>
                     <div style={{ position: 'relative', padding: '22px 26px 14px', fontSize: 13.5, lineHeight: 1.7, color: '#1E293B' }}>
                       {renderEmailBody(previewBody, brandTheme)}
                     </div>
@@ -1404,12 +2104,14 @@ function ModuleComms({ employees, groups, org }) {
                   </div>
 
                   {/* Footer */}
-                  <PreviewHotspot label="Edit footer" onClick={() => focusSection('footer')}>
-                    <div style={{ borderTop: '1px solid #F1F5F9', background: '#FAFBFF', padding: '12px 26px', fontSize: 11, color: '#94A3B8', display: 'flex', justifyContent: 'space-between', gap: 10, flexWrap: 'wrap' }}>
-                      <span>{emailTheme.footerText || <>Sent on behalf of <strong style={{ color: '#475569' }}>{org.hrAdminName || 'HR Team'}</strong></>}</span>
-                      <span>Powered by Zaro HR</span>
-                    </div>
-                  </PreviewHotspot>
+                  {emailTheme.showFooter !== false && (
+                    <PreviewHotspot label="Edit footer" onClick={() => focusSection('footer')}>
+                      <div style={{ borderTop: '1px solid #F1F5F9', background: '#FAFBFF', padding: '12px 26px', fontSize: 11, color: '#94A3B8', display: 'flex', justifyContent: 'space-between', gap: 10, flexWrap: 'wrap' }}>
+                        <span>{emailTheme.footerText || ''}</span>
+                        {emailTheme.showZaroBadge !== false && <span>Powered by Zaro HR</span>}
+                      </div>
+                    </PreviewHotspot>
+                  )}
                 </div>
               </div>
             ) : (
@@ -1420,6 +2122,30 @@ function ModuleComms({ employees, groups, org }) {
           </div>
 
         </div>
+          )}
+
+          {stepTab === 'recipients' && (
+            <ComposeRecipients
+              recipients={allRecipients}
+              groups={groups}
+              recipSearch={recipSearch} setRecipSearch={setRecipSearch}
+              recipFilter={recipFilter} setRecipFilter={setRecipFilter}
+              emailEdits={emailEdits} setEmailEdits={setEmailEdits}
+              commitEmail={commitEmail}
+              getEmail={getEmail}
+              bulkEmailFileRef={bulkEmailFileRef}
+              handleBulkEmailFile={handleBulkEmailFile}
+              bulkEmailPreview={bulkEmailPreview} setBulkEmailPreview={setBulkEmailPreview}
+              applyBulkEmail={applyBulkEmail}
+              downloadCurrentEmailList={downloadCurrentEmailList}
+              recipToast={recipToast}
+              sendConfig={sendConfig}
+              sendState={sendState}
+              onSend={handleSend}
+              activeTemplate={activeTemplate}
+            />
+          )}
+        </>
       )}
 
       {activeTab !== 'email' && (
@@ -1840,7 +2566,8 @@ function ModuleStageControl({ employees, onUpdate, orgKey }) {
 }
 
 /* ── Manager Change ─────────────────────────────────────────── */
-function ModuleMgrChange({ employees, onUpdate }) {
+function ModuleMgrChange({ employees, config, onUpdate }) {
+  const hasL2 = (config?.managerLevels || 1) >= 2;
   const [mode, setMode]       = useState('single');
   const [search, setSearch]   = useState('');
   const [selected, setSelected] = useState(null);
@@ -1917,13 +2644,15 @@ function ModuleMgrChange({ employees, onUpdate }) {
             {selected && <div style={{ marginTop: 8, background: '#F0FDF4', border: '1.5px solid #BBF7D0', borderRadius: 9, padding: '8px 12px', fontSize: 12.5, color: '#166534' }}>✓ <strong>{selected['Employee Name']}</strong> — current L1: <strong>{selected['Reporting Manager Code'] || '—'}</strong></div>}
           </div>
           <div>
-            <label style={{ fontSize: 11.5, fontWeight: 600, color: '#64748B', display: 'block', marginBottom: 5 }}>New L1 Manager Code</label>
+            <label style={{ fontSize: 11.5, fontWeight: 600, color: '#64748B', display: 'block', marginBottom: 5 }}>New {hasL2 ? 'L1 ' : ''}Manager Code</label>
             <input value={newL1} onChange={(e) => setNewL1(e.target.value)} placeholder="e.g. 3000" style={inputStyle} />
           </div>
-          <div>
-            <label style={{ fontSize: 11.5, fontWeight: 600, color: '#64748B', display: 'block', marginBottom: 5 }}>New L2 Manager Code <span style={{ fontWeight: 400, color: '#94A3B8' }}>(optional)</span></label>
-            <input value={newL2} onChange={(e) => setNewL2(e.target.value)} placeholder="e.g. 4000" style={inputStyle} />
-          </div>
+          {hasL2 && (
+            <div>
+              <label style={{ fontSize: 11.5, fontWeight: 600, color: '#64748B', display: 'block', marginBottom: 5 }}>New L2 Manager Code <span style={{ fontWeight: 400, color: '#94A3B8' }}>(optional)</span></label>
+              <input value={newL2} onChange={(e) => setNewL2(e.target.value)} placeholder="e.g. 4000" style={inputStyle} />
+            </div>
+          )}
           <button type="button" onClick={applyChange} disabled={!selected || !newL1.trim()}
             style={{ ...btnP, width: 'fit-content', opacity: !selected || !newL1.trim() ? 0.5 : 1, cursor: !selected || !newL1.trim() ? 'not-allowed' : 'pointer' }}>
             Update Manager
@@ -1935,9 +2664,19 @@ function ModuleMgrChange({ employees, onUpdate }) {
         <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
           <div style={{ background: '#F8FAFC', border: '1px solid #E9EDF2', borderRadius: 10, padding: '14px 16px' }}>
             <div style={{ fontSize: 12.5, fontWeight: 600, color: '#374151', marginBottom: 4 }}>Columns: <code style={{ background: '#E2E8F0', padding: '1px 6px', borderRadius: 4, fontSize: 12 }}>Employee Code, New Manager Code</code></div>
-            <div style={{ fontSize: 12, color: '#94A3B8' }}>Optionally add a 3rd column for L2 Manager Code</div>
+            {hasL2 && <div style={{ fontSize: 12, color: '#94A3B8' }}>Optionally add a 3rd column for L2 Manager Code</div>}
           </div>
-          <div><input ref={fileRef} type="file" accept=".xlsx,.xls,.csv" style={{ display: 'none' }} onChange={handleFile} /><UploadSheetButton onDownload={() => downloadCsvTemplate('manager_change.csv', ['Employee Code', 'New Manager Code', 'New L2 Manager Code'], ['E001', '3000', '4000'])} fileRef={fileRef} /></div>
+          <div>
+            <input ref={fileRef} type="file" accept=".xlsx,.xls,.csv" style={{ display: 'none' }} onChange={handleFile} />
+            <UploadSheetButton
+              onDownload={() => downloadCsvTemplate(
+                'manager_change.csv',
+                hasL2 ? ['Employee Code', 'New Manager Code', 'New L2 Manager Code'] : ['Employee Code', 'New Manager Code'],
+                hasL2 ? ['E001', '3000', '4000'] : ['E001', '3000'],
+              )}
+              fileRef={fileRef}
+            />
+          </div>
           {bulkPreview && (
             <div>
               <div style={{ fontSize: 12, fontWeight: 600, color: '#374151', marginBottom: 8 }}>Preview — {bulkPreview.filter(r => r.found).length} valid</div>
@@ -2186,14 +2925,140 @@ function ModuleGrpTransfer({ employees, groups, onUpdate }) {
   );
 }
 
+// Manager picker for the manual-add form. When the typed code matches an existing
+// roster row, the name (and email, if configured) auto-fill from that row and are
+// shown read-only; otherwise the fields are editable so HR can capture a brand-new
+// manager inline. The new manager will appear in the recipients/pick lists via the
+// synthesized-external-manager pathway.
+function ManagerBlock({ code, match, onCodeChange, nameValue, onNameChange, emailValue, onEmailChange, needsEmail, inputBase, getStoredEmail }) {
+  const isExisting = !!match;
+  const displayName = isExisting ? (match['Employee Name'] || '') : nameValue;
+  const displayEmail = isExisting ? getStoredEmail(match) : (emailValue || '');
+  const lockedStyle = { ...inputBase, background: '#F1F5F9', color: '#475569', cursor: 'default' };
+  return (
+    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 12 }}>
+      <div>
+        <label style={{ fontSize: 11.5, fontWeight: 600, color: '#64748B', display: 'block', marginBottom: 5 }}>Code</label>
+        <input value={code} onChange={(e) => onCodeChange(e.target.value)} placeholder="e.g. 1005" style={inputBase} />
+      </div>
+      <div>
+        <label style={{ fontSize: 11.5, fontWeight: 600, color: '#64748B', display: 'block', marginBottom: 5 }}>Name</label>
+        {isExisting ? (
+          <input value={displayName} readOnly style={lockedStyle} />
+        ) : (
+          <input value={nameValue} onChange={(e) => onNameChange(e.target.value)} placeholder={code ? 'Enter manager name…' : '—'} disabled={!code} style={code ? inputBase : lockedStyle} />
+        )}
+      </div>
+      {needsEmail && (
+        <div>
+          <label style={{ fontSize: 11.5, fontWeight: 600, color: '#64748B', display: 'block', marginBottom: 5 }}>Email</label>
+          {isExisting ? (
+            <input value={displayEmail} readOnly placeholder="—" style={lockedStyle} />
+          ) : (
+            <input type="email" value={emailValue || ''} onChange={(e) => onEmailChange(e.target.value)} placeholder={code ? 'Enter manager email…' : '—'} disabled={!code} style={code ? inputBase : lockedStyle} />
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 /* ── Add / Remove ───────────────────────────────────────────── */
 function ModuleRoster({ employees, config, onUpdate }) {
+  const [addMode, setAddMode] = useState('upload');           // 'upload' | 'manual'
+  const [removeMode, setRemoveMode] = useState('pick');        // 'pick' | 'bulk'
   const [addPreview, setAddPreview] = useState(null);
+  const [manualForm, setManualForm] = useState({});
+  const [manualError, setManualError] = useState('');
+  // When the typed reporting-manager code is new, HR can opt to also create a
+  // full PMS employee record for that manager (group + role + email). Otherwise
+  // the manager surfaces only as a reference (synthesized external).
+  const [l1NewMgrInPMS, setL1NewMgrInPMS] = useState(false);
+  const [l1NewMgrGroup, setL1NewMgrGroup] = useState('');
+  const [l1NewMgrSegment, setL1NewMgrSegment] = useState('');
   const [removeSearch, setRemoveSearch] = useState('');
   const [removeSelected, setRemoveSelected] = useState([]);
   const [confirmRemove, setConfirmRemove] = useState(false);
+  const [bulkDelPreview, setBulkDelPreview] = useState(null);
+  const [confirmBulkDel, setConfirmBulkDel] = useState(false);
   const [toast, setToast] = useState(null);
   const addFileRef = useRef(null);
+  const delFileRef = useRef(null);
+
+  const meta = useMemo(() => employeeTemplateMeta(config || {}), [config]);
+  const goalGroups = useMemo(() => (config?.goalGroups || []), [config]);
+
+  // Per-group routing field — derive from currently-picked group only.
+  const selectedGroupName = String(manualForm['Group Name'] || '').trim();
+  const selectedGroup = useMemo(
+    () => goalGroups.find((g) => String(g?.name || '').trim().toLowerCase() === selectedGroupName.toLowerCase()) || null,
+    [goalGroups, selectedGroupName],
+  );
+  const segmentAttr = String(selectedGroup?.segmentAttr || '').trim();
+  const segmentValues = useMemo(
+    () => [...new Set((selectedGroup?.segmentValues || []).map((v) => String(v || '').trim()).filter(Boolean))],
+    [selectedGroup],
+  );
+
+  // Manager autofill — when the user types a manager code that already exists in
+  // the org (PMS or external-manager reference), pull their name/email from there
+  // instead of asking again. New codes get blank fields the user can fill in.
+  const rosterByCode = useMemo(() => {
+    const m = {};
+    buildRoster(employees).forEach((e) => {
+      const code = String(e['Employee Code'] || '').trim().toLowerCase();
+      if (code) m[code] = e;
+    });
+    return m;
+  }, [employees]);
+  function lookupByCode(code) {
+    const k = String(code || '').trim().toLowerCase();
+    return k ? (rosterByCode[k] || null) : null;
+  }
+
+  const l1Code = String(manualForm['Reporting Manager Code'] || '').trim();
+  const l1Match = lookupByCode(l1Code);
+  const l2Code = String(manualForm['L2 Manager Code'] || '').trim();
+  const l2Match = lookupByCode(l2Code);
+  function getStoredEmail(emp) {
+    return String(emp?.['Email ID'] || emp?.['Email'] || '').trim();
+  }
+
+  // Group + segment options for the new-manager-in-PMS sub-form.
+  const l1MgrGroupObj = useMemo(
+    () => goalGroups.find((g) => String(g?.name || '').trim().toLowerCase() === l1NewMgrGroup.trim().toLowerCase()) || null,
+    [goalGroups, l1NewMgrGroup],
+  );
+  const l1MgrSegmentAttr = String(l1MgrGroupObj?.segmentAttr || '').trim();
+  const l1MgrSegmentValues = useMemo(
+    () => [...new Set((l1MgrGroupObj?.segmentValues || []).map((v) => String(v || '').trim()).filter(Boolean))],
+    [l1MgrGroupObj],
+  );
+
+  // Build the field list dynamically. Manager fields are rendered separately
+  // because they auto-fill when the code already exists in the org.
+  const manualFields = useMemo(() => {
+    const f = [
+      { key: 'Employee Code',  required: true },
+      { key: 'Employee Name',  required: true },
+    ];
+    if (meta.needsEmail)    f.push({ key: 'Email ID' });
+    if (meta.hasGoalGroups) f.push({ key: 'Group Name', required: true, type: 'group' });
+    if (segmentAttr && segmentValues.length > 0) f.push({ key: segmentAttr, required: true, type: 'segment' });
+    return f;
+  }, [meta, segmentAttr, segmentValues]);
+
+  function setGroupAndResetRouting(value) {
+    setManualForm((prev) => {
+      const next = { ...prev, 'Group Name': value };
+      // Clear any prior routing-field value when the group changes.
+      goalGroups.forEach((g) => {
+        const a = String(g?.segmentAttr || '').trim();
+        if (a) delete next[a];
+      });
+      return next;
+    });
+  }
 
   function showToast(msg) { setToast(msg); setTimeout(() => setToast(null), 3000); }
 
@@ -2222,11 +3087,93 @@ function ModuleRoster({ employees, config, onUpdate }) {
     setAddPreview(null);
   }
 
+  function applyManualAdd() {
+    setManualError('');
+    const code = String(manualForm['Employee Code'] || '').trim();
+    const name = String(manualForm['Employee Name'] || '').trim();
+    if (!code) { setManualError('Employee Code is required'); return; }
+    if (!name) { setManualError('Employee Name is required'); return; }
+    const existingCodes = new Set(employees.map((emp) => String(emp['Employee Code'] || '').trim().toLowerCase()));
+    if (existingCodes.has(code.toLowerCase())) { setManualError(`Employee Code "${code}" already exists`); return; }
+    if (meta.hasGoalGroups && !selectedGroup) {
+      setManualError('Group Name is required'); return;
+    }
+    if (segmentAttr && segmentValues.length > 0) {
+      const v = String(manualForm[segmentAttr] || '').trim();
+      if (!v) { setManualError(`${segmentAttr} is required for "${selectedGroup.name}"`); return; }
+      if (!segmentValues.some((cv) => cv.toLowerCase() === v.toLowerCase())) {
+        setManualError(`${segmentAttr} must be one of: ${segmentValues.join(', ')}`);
+        return;
+      }
+    }
+
+    const newEmp = {};
+    // Basic + group + segment from form / template headers.
+    meta.headers.forEach((h) => { newEmp[h] = String(manualForm[h] || '').trim(); });
+    if (segmentAttr) newEmp[segmentAttr] = String(manualForm[segmentAttr] || '').trim();
+
+    // If the new L1 manager is being added as a full PMS employee, validate now
+    // so we fail before mutating state.
+    let mgrEmp = null;
+    if (l1Code && !l1Match && l1NewMgrInPMS) {
+      const mgrName = String(manualForm['Reporting Manager Name'] || '').trim();
+      if (!mgrName) { setManualError('Reporting manager name is required'); return; }
+      if (meta.hasGoalGroups) {
+        if (!l1MgrGroupObj) { setManualError("Pick a group for the new manager (or uncheck 'Also add as PMS employee')"); return; }
+        if (l1MgrSegmentAttr && l1MgrSegmentValues.length > 0) {
+          if (!l1NewMgrSegment) { setManualError(`${l1MgrSegmentAttr} is required for the new manager`); return; }
+          if (!l1MgrSegmentValues.some((v) => v.toLowerCase() === l1NewMgrSegment.toLowerCase())) {
+            setManualError(`${l1MgrSegmentAttr} must be one of: ${l1MgrSegmentValues.join(', ')}`);
+            return;
+          }
+        }
+      }
+      mgrEmp = {};
+      meta.headers.forEach((h) => { mgrEmp[h] = ''; });
+      mgrEmp['Employee Code'] = l1Code;
+      mgrEmp['Employee Name'] = mgrName;
+      if (meta.needsEmail) mgrEmp['Email ID'] = String(manualForm['Reporting Manager Email'] || '').trim();
+      if (meta.hasGoalGroups) mgrEmp['Group Name'] = l1MgrGroupObj?.name || '';
+      if (l1MgrSegmentAttr) mgrEmp[l1MgrSegmentAttr] = l1NewMgrSegment;
+    }
+
+    // Resolve L1 manager — prefer existing roster row over what the user typed.
+    if (l1Code) {
+      newEmp['Reporting Manager Code'] = l1Code;
+      if (l1Match) {
+        newEmp['Reporting Manager Name']  = l1Match['Employee Name'] || '';
+        if (meta.needsEmail) newEmp['Reporting Manager Email'] = getStoredEmail(l1Match);
+      } else {
+        newEmp['Reporting Manager Name']  = String(manualForm['Reporting Manager Name'] || '').trim();
+        if (meta.needsEmail) newEmp['Reporting Manager Email'] = String(manualForm['Reporting Manager Email'] || '').trim();
+      }
+    }
+
+    // Resolve L2 manager same way.
+    if (meta.hasL2 && l2Code) {
+      newEmp['L2 Manager Code'] = l2Code;
+      newEmp['L2 Manager Name'] = l2Match
+        ? (l2Match['Employee Name'] || '')
+        : String(manualForm['L2 Manager Name'] || '').trim();
+    }
+
+    const additions = mgrEmp ? [mgrEmp, newEmp] : [newEmp];
+    onUpdate([...employees, ...additions]);
+    showToast(mgrEmp ? `${name} added · manager ${mgrEmp['Employee Name']} also added to PMS` : `${name} added`);
+    setManualForm({});
+    setL1NewMgrInPMS(false); setL1NewMgrGroup(''); setL1NewMgrSegment('');
+  }
+
+  // Pick & Remove operates on the full roster — real employees + reporting managers
+  // who only exist as references. Removing an external is a no-op against `employees`,
+  // but they remain selectable so HR can clear them via the upstream Manager Change
+  // module without losing sight of them here.
+  const fullRoster = useMemo(() => buildRoster(employees), [employees]);
   const removeResults = useMemo(() => {
     const q = removeSearch.trim().toLowerCase();
-    if (!q || q.length < 2) return [];
-    return employees.filter((e) => `${e['Employee Name'] || ''} ${e['Employee Code'] || ''}`.toLowerCase().includes(q)).slice(0, 8);
-  }, [removeSearch, employees]);
+    if (!q) return fullRoster;
+    return fullRoster.filter((e) => `${e['Employee Name'] || ''} ${e['Employee Code'] || ''} ${e['Group Name'] || ''}`.toLowerCase().includes(q));
+  }, [removeSearch, fullRoster]);
 
   function toggleRemove(code) {
     setRemoveSelected((prev) => prev.includes(code) ? prev.filter((c) => c !== code) : [...prev, code]);
@@ -2234,117 +3181,402 @@ function ModuleRoster({ employees, config, onUpdate }) {
 
   function applyRemove() {
     const toRemove = new Set(removeSelected);
-    onUpdate(employees.filter((e) => !toRemove.has(String(e['Employee Code'] || '').trim())));
-    showToast(`${removeSelected.length} employee${removeSelected.length !== 1 ? 's' : ''} removed`);
+    const before = employees.length;
+    const next = employees.filter((e) => !toRemove.has(String(e['Employee Code'] || '').trim()));
+    const removedCount = before - next.length;
+    onUpdate(next);
+    showToast(`${removedCount} employee${removedCount !== 1 ? 's' : ''} removed`);
     setRemoveSelected([]); setRemoveSearch(''); setConfirmRemove(false);
   }
 
-  const btnP = { padding: '8px 16px', background: '#4F46E5', color: '#fff', border: 'none', borderRadius: 7, fontSize: 12.5, fontWeight: 600, cursor: 'pointer', fontFamily: 'inherit' };
-  const btnS = { padding: '7px 14px', background: '#F1F5F9', color: '#374151', border: '1.5px solid #E2E8F0', borderRadius: 7, fontSize: 12.5, cursor: 'pointer', fontFamily: 'inherit' };
-  const btnD = { padding: '8px 16px', background: '#DC2626', color: '#fff', border: 'none', borderRadius: 7, fontSize: 12.5, fontWeight: 600, cursor: 'pointer', fontFamily: 'inherit' };
+  async function handleBulkDelFile(e) {
+    const file = e.target.files?.[0]; if (!file) return;
+    e.target.value = '';
+    try {
+      const rows = await parseTwoColXlsx(file);
+      if (!rows.length) { showToast('No employee codes found — first column must be Employee Code'); return; }
+      const empByCode = {};
+      fullRoster.forEach((emp) => { empByCode[String(emp['Employee Code'] || '').trim().toLowerCase()] = emp; });
+      const seen = new Set();
+      const preview = rows.map((r) => {
+        const code = r.col1;
+        const key = code.toLowerCase();
+        if (seen.has(key)) return null;
+        seen.add(key);
+        const match = empByCode[key];
+        return { code, name: match?.['Employee Name'] || '', found: !!match };
+      }).filter(Boolean);
+      setBulkDelPreview(preview);
+      setConfirmBulkDel(false);
+    } catch (err) {
+      showToast(err?.message || 'Could not parse file — use .xlsx or .csv');
+    }
+  }
+
+  function applyBulkDelete() {
+    const toRemove = new Set(bulkDelPreview.filter((r) => r.found).map((r) => r.code.toLowerCase()));
+    if (toRemove.size === 0) { showToast('No matching employees to remove'); setBulkDelPreview(null); return; }
+    onUpdate(employees.filter((e) => !toRemove.has(String(e['Employee Code'] || '').trim().toLowerCase())));
+    showToast(`${toRemove.size} employee${toRemove.size !== 1 ? 's' : ''} removed`);
+    setBulkDelPreview(null); setConfirmBulkDel(false);
+  }
+
+  const btnP = { padding: '8px 16px', background: '#4F46E5', color: '#fff', border: 'none', borderRadius: 8, fontSize: 12.5, fontWeight: 700, cursor: 'pointer', fontFamily: 'inherit' };
+  const btnS = { padding: '7px 14px', background: '#fff', color: '#475569', border: '1.5px solid #E2E8F0', borderRadius: 8, fontSize: 12.5, cursor: 'pointer', fontFamily: 'inherit', fontWeight: 600 };
+  const btnD = { padding: '8px 16px', background: '#DC2626', color: '#fff', border: 'none', borderRadius: 8, fontSize: 12.5, fontWeight: 700, cursor: 'pointer', fontFamily: 'inherit' };
+  const inputBase = { width: '100%', boxSizing: 'border-box', border: '1.5px solid #E2E8F0', borderRadius: 8, padding: '8px 12px', fontSize: 13, outline: 'none', fontFamily: 'inherit', color: '#0F172A', background: '#fff' };
+  const cardBase = { background: '#fff', border: '1px solid #E9EDF2', borderRadius: 14 };
+  const tabPills = (active, options, onPick) => (
+    <div style={{ display: 'inline-flex', background: '#F1F5F9', padding: 3, borderRadius: 9, gap: 2 }}>
+      {options.map((o) => (
+        <button key={o.k} type="button" onClick={() => onPick(o.k)}
+          style={{ padding: '6px 14px', borderRadius: 7, border: 'none', cursor: 'pointer', fontFamily: 'inherit', fontSize: 12.5, fontWeight: active === o.k ? 700 : 500, background: active === o.k ? '#fff' : 'transparent', color: active === o.k ? '#0F172A' : '#64748B', boxShadow: active === o.k ? '0 1px 3px rgba(15,23,42,.08)' : 'none' }}>
+          {o.label}
+        </button>
+      ))}
+    </div>
+  );
+
+  const visibleNotSelected = removeResults.filter((e) => !removeSelected.includes(String(e['Employee Code'] || '').trim()));
+  const allVisibleSelected = visibleNotSelected.length === 0 && removeResults.length > 0;
+  function toggleSelectAllVisible() {
+    if (allVisibleSelected) {
+      const visibleCodes = new Set(removeResults.map((e) => String(e['Employee Code'] || '').trim()));
+      setRemoveSelected((prev) => prev.filter((c) => !visibleCodes.has(c)));
+    } else {
+      const additions = visibleNotSelected.map((e) => String(e['Employee Code'] || '').trim());
+      setRemoveSelected((prev) => Array.from(new Set([...prev, ...additions])));
+    }
+  }
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 16, maxWidth: 600, position: 'relative' }}>
+    <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', alignItems: 'flex-start', position: 'relative', maxWidth: 1320 }}>
       {toast && <div style={{ position: 'fixed', bottom: 28, right: 28, zIndex: 50, background: '#F0FDF4', border: '1px solid #BBF7D0', borderRadius: 9, padding: '10px 16px', fontSize: 12.5, fontWeight: 600, color: '#15803D', boxShadow: '0 4px 16px rgba(0,0,0,.1)' }}>✓ {toast}</div>}
 
-      {/* ADD */}
-      <div style={{ border: '1.5px solid #E9EDF2', borderRadius: 12, padding: '18px 20px' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
-          <span style={{ fontSize: 17 }}>➕</span>
-          <span style={{ fontSize: 13, fontWeight: 700, color: '#0D1117' }}>Add Employees to PMS</span>
-        </div>
-        <div style={{ fontSize: 12.5, color: '#64748B', lineHeight: 1.6, marginBottom: 14 }}>
-          Upload a filled employee sheet. New employees are appended; duplicate codes are skipped automatically.
-        </div>
-        <input ref={addFileRef} type="file" accept=".xlsx,.xls,.csv" style={{ display: 'none' }} onChange={handleAddFile} />
-        <UploadSheetButton onDownload={() => downloadEmployeeTemplate(config || {})} fileRef={addFileRef} />
-
-        {addPreview && (
-          <div style={{ marginTop: 14 }}>
-            <div style={{ fontSize: 12, fontWeight: 600, color: '#374151', marginBottom: 8 }}>
-              Preview — {addPreview.filter((r) => !r._duplicate).length} new, {addPreview.filter((r) => r._duplicate).length} duplicates (will be skipped)
-            </div>
-            <div style={{ border: '1px solid #E9EDF2', borderRadius: 9, overflow: 'hidden', maxHeight: 220, overflowY: 'auto', marginBottom: 10 }}>
-              <table style={{ width: '100%', fontSize: 12.5, borderCollapse: 'collapse' }}>
-                <thead><tr style={{ background: '#F8FAFC' }}>
-                  {['Name', 'Code', 'Group', 'Status'].map((h) => <th key={h} style={{ padding: '7px 10px', textAlign: 'left', fontSize: 11, fontWeight: 700, color: '#94A3B8', textTransform: 'uppercase' }}>{h}</th>)}
-                </tr></thead>
-                <tbody>{addPreview.map((r, i) => (
-                  <tr key={i} style={{ borderTop: '1px solid #F1F5F9', opacity: r._duplicate ? 0.5 : 1 }}>
-                    <td style={{ padding: '6px 10px' }}>{r['Employee Name'] || '—'}</td>
-                    <td style={{ padding: '6px 10px', fontFamily: 'monospace', fontWeight: 700, color: '#4F46E5' }}>{r['Employee Code']}</td>
-                    <td style={{ padding: '6px 10px', color: '#64748B' }}>{r['Group Name'] || '—'}</td>
-                    <td style={{ padding: '6px 10px' }}>
-                      <span style={{ fontSize: 11, fontWeight: 600, color: r._duplicate ? '#92400E' : '#15803D', background: r._duplicate ? '#FFFBEB' : '#F0FDF4', borderRadius: 5, padding: '2px 7px' }}>
-                        {r._duplicate ? 'Duplicate' : '✓ New'}
-                      </span>
-                    </td>
-                  </tr>
-                ))}</tbody>
-              </table>
-            </div>
-            <div style={{ display: 'flex', gap: 8 }}>
-              <button type="button" style={{ ...btnP, background: '#16A34A' }} onClick={applyAdd} disabled={!addPreview.some((r) => !r._duplicate)}>
-                Add {addPreview.filter((r) => !r._duplicate).length} Employees
-              </button>
-              <button type="button" style={btnS} onClick={() => setAddPreview(null)}>Cancel</button>
-            </div>
+      {/* ── ADD ─────────────────────────────────────────────────── */}
+      <section style={{ ...cardBase, flex: '1 1 360px', maxWidth: 460, minWidth: 0 }}>
+        <header style={{ padding: '14px 18px', borderBottom: '1px solid #F1F5F9', display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 13.5, fontWeight: 700, color: '#0F172A' }}>Add employees</div>
+            <div style={{ fontSize: 11.5, color: '#94A3B8' }}>Upload a sheet, or add a single employee manually.</div>
           </div>
-        )}
-      </div>
+          {tabPills(addMode, [{ k: 'upload', label: 'Upload sheet' }, { k: 'manual', label: 'Add manually' }],
+            (k) => { setAddMode(k); setAddPreview(null); setManualForm({}); setManualError(''); })}
+        </header>
 
-      {/* REMOVE */}
-      <div style={{ border: '1.5px solid #FEE2E2', borderRadius: 12, padding: '18px 20px' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
-          <span style={{ fontSize: 17 }}>🗑️</span>
-          <span style={{ fontSize: 13, fontWeight: 700, color: '#0D1117' }}>Remove Employees from PMS</span>
-        </div>
-        <div style={{ fontSize: 12.5, color: '#64748B', lineHeight: 1.6, marginBottom: 14 }}>
-          Search and select employees to remove. A confirmation step will appear before any removal is applied.
-        </div>
-        <input
-          value={removeSearch}
-          onChange={(e) => setRemoveSearch(e.target.value)}
-          placeholder="Search name or code to remove…"
-          style={{ width: '100%', boxSizing: 'border-box', border: '1.5px solid #E2E8F0', borderRadius: 8, padding: '8px 11px', fontSize: 12.5, outline: 'none', fontFamily: 'inherit', color: '#0D1117', marginBottom: 8 }}
-        />
-        {removeResults.length > 0 && (
-          <div style={{ border: '1px solid #E9EDF2', borderRadius: 8, overflow: 'hidden', marginBottom: 10 }}>
-            {removeResults.map((emp) => {
-              const code = String(emp['Employee Code'] || '').trim();
-              const isSelected = removeSelected.includes(code);
-              return (
-                <button key={code} type="button" onClick={() => toggleRemove(code)}
-                  style={{ width: '100%', display: 'flex', alignItems: 'center', gap: 10, padding: '8px 12px', background: isSelected ? '#FEF2F2' : '#fff', border: 'none', borderBottom: '1px solid #F1F5F9', cursor: 'pointer', fontFamily: 'inherit', textAlign: 'left' }}>
-                  <div style={{ width: 16, height: 16, borderRadius: 4, border: `2px solid ${isSelected ? '#DC2626' : '#E2E8F0'}`, background: isSelected ? '#DC2626' : '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
-                    {isSelected && <span style={{ color: '#fff', fontSize: 10, fontWeight: 800 }}>✓</span>}
+        <div style={{ padding: '16px 18px' }}>
+          {addMode === 'upload' && (
+            <>
+              <input ref={addFileRef} type="file" accept=".xlsx,.xls,.csv" style={{ display: 'none' }} onChange={handleAddFile} />
+              <UploadSheetButton onDownload={() => downloadEmployeeTemplate(config || {})} fileRef={addFileRef} />
+              <div style={{ fontSize: 11.5, color: '#94A3B8', marginTop: 8 }}>New employees are appended; duplicate codes are skipped automatically.</div>
+
+              {addPreview && (
+                <div style={{ marginTop: 14 }}>
+                  <div style={{ fontSize: 12, fontWeight: 600, color: '#374151', marginBottom: 8 }}>
+                    {addPreview.filter((r) => !r._duplicate).length} new · {addPreview.filter((r) => r._duplicate).length} duplicate{addPreview.filter((r) => r._duplicate).length !== 1 ? 's' : ''} (skipped)
                   </div>
-                  <div style={{ width: 26, height: 26, borderRadius: '50%', background: 'linear-gradient(135deg,#4F46E5,#7C3AED)', color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 9, fontWeight: 800, flexShrink: 0 }}>{getInitials(emp['Employee Name'] || code)}</div>
-                  <span style={{ fontSize: 12.5, fontWeight: 600, color: '#0D1117' }}>{emp['Employee Name'] || code}</span>
-                  <span style={{ fontSize: 12, color: '#94A3B8', fontFamily: 'monospace' }}>{code}</span>
-                  <span style={{ marginLeft: 'auto', fontSize: 11.5, color: '#64748B' }}>{emp['Group Name'] || emp.assignedGoalGroupName || ''}</span>
-                </button>
-              );
-            })}
-          </div>
-        )}
-        {removeSelected.length > 0 && (
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 4 }}>
-            <span style={{ fontSize: 12.5, color: '#374151' }}>{removeSelected.length} selected</span>
-            {!confirmRemove
-              ? <button type="button" style={btnD} onClick={() => setConfirmRemove(true)}>Remove Selected</button>
-              : (
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8, background: '#FEF2F2', border: '1px solid #FECACA', borderRadius: 8, padding: '8px 12px' }}>
-                  <span style={{ fontSize: 12.5, color: '#991B1B', fontWeight: 600 }}>Confirm removal of {removeSelected.length} employee{removeSelected.length !== 1 ? 's' : ''}?</span>
-                  <button type="button" style={btnD} onClick={applyRemove}>Yes, Remove</button>
-                  <button type="button" style={btnS} onClick={() => setConfirmRemove(false)}>Cancel</button>
+                  <div style={{ border: '1px solid #E9EDF2', borderRadius: 9, overflow: 'hidden', maxHeight: 220, overflowY: 'auto', marginBottom: 10 }}>
+                    <table style={{ width: '100%', fontSize: 12.5, borderCollapse: 'collapse' }}>
+                      <thead><tr style={{ background: '#F8FAFC' }}>
+                        {['Name', 'Code', 'Group', 'Status'].map((h) => <th key={h} style={{ padding: '7px 10px', textAlign: 'left', fontSize: 11, fontWeight: 700, color: '#94A3B8', textTransform: 'uppercase' }}>{h}</th>)}
+                      </tr></thead>
+                      <tbody>{addPreview.map((r, i) => (
+                        <tr key={i} style={{ borderTop: '1px solid #F1F5F9', opacity: r._duplicate ? 0.5 : 1 }}>
+                          <td style={{ padding: '6px 10px' }}>{r['Employee Name'] || '—'}</td>
+                          <td style={{ padding: '6px 10px', fontFamily: 'monospace', fontWeight: 700, color: '#4F46E5' }}>{r['Employee Code']}</td>
+                          <td style={{ padding: '6px 10px', color: '#64748B' }}>{r['Group Name'] || '—'}</td>
+                          <td style={{ padding: '6px 10px' }}>
+                            <span style={{ fontSize: 11, fontWeight: 600, color: r._duplicate ? '#92400E' : '#15803D', background: r._duplicate ? '#FFFBEB' : '#F0FDF4', borderRadius: 5, padding: '2px 7px' }}>
+                              {r._duplicate ? 'Duplicate' : '✓ New'}
+                            </span>
+                          </td>
+                        </tr>
+                      ))}</tbody>
+                    </table>
+                  </div>
+                  <div style={{ display: 'flex', gap: 8 }}>
+                    <button type="button" style={{ ...btnP, background: '#16A34A' }} onClick={applyAdd} disabled={!addPreview.some((r) => !r._duplicate)}>
+                      Add {addPreview.filter((r) => !r._duplicate).length} employee{addPreview.filter((r) => !r._duplicate).length !== 1 ? 's' : ''}
+                    </button>
+                    <button type="button" style={btnS} onClick={() => setAddPreview(null)}>Cancel</button>
+                  </div>
                 </div>
-              )
-            }
-            <button type="button" style={{ ...btnS, fontSize: 11.5 }} onClick={() => { setRemoveSelected([]); setConfirmRemove(false); }}>Clear</button>
+              )}
+            </>
+          )}
+
+          {addMode === 'manual' && (
+            <>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 12 }}>
+                {manualFields.map((f) => {
+                  const required = f.required;
+                  const value = manualForm[f.key] || '';
+                  if (f.type === 'group') {
+                    return (
+                      <div key={f.key}>
+                        <label style={{ fontSize: 11.5, fontWeight: 600, color: '#64748B', display: 'block', marginBottom: 5 }}>
+                          {f.key}{required && <span style={{ color: '#DC2626' }}> *</span>}
+                        </label>
+                        <select value={value} onChange={(e) => setGroupAndResetRouting(e.target.value)} style={inputBase}>
+                          <option value="">Select a group…</option>
+                          {meta.groupNames.map((g) => <option key={g} value={g}>{g}</option>)}
+                        </select>
+                      </div>
+                    );
+                  }
+                  if (f.type === 'segment') {
+                    return (
+                      <div key={f.key}>
+                        <label style={{ fontSize: 11.5, fontWeight: 600, color: '#64748B', display: 'block', marginBottom: 5 }}>
+                          {f.key}{required && <span style={{ color: '#DC2626' }}> *</span>}
+                          <span style={{ fontWeight: 500, color: '#94A3B8', marginLeft: 6 }}>· for {selectedGroup?.name}</span>
+                        </label>
+                        <select value={value} onChange={(e) => setManualForm((p) => ({ ...p, [f.key]: e.target.value }))} style={inputBase}>
+                          <option value="">Select…</option>
+                          {segmentValues.map((v) => <option key={v} value={v}>{v}</option>)}
+                        </select>
+                      </div>
+                    );
+                  }
+                  return (
+                    <div key={f.key}>
+                      <label style={{ fontSize: 11.5, fontWeight: 600, color: '#64748B', display: 'block', marginBottom: 5 }}>
+                        {f.key}{required && <span style={{ color: '#DC2626' }}> *</span>}
+                      </label>
+                      <input
+                        value={value}
+                        onChange={(e) => setManualForm((p) => ({ ...p, [f.key]: e.target.value }))}
+                        placeholder={`Enter ${f.key.toLowerCase()}…`}
+                        type={f.key.toLowerCase().includes('email') ? 'email' : 'text'}
+                        style={inputBase}
+                      />
+                    </div>
+                  );
+                })}
+              </div>
+
+              {/* Reporting Manager — autofills when the code is already in the org */}
+              <div style={{ marginTop: 14, padding: '12px 14px', background: '#FAFBFF', border: '1px solid #E2E8F0', borderRadius: 10 }}>
+                <div style={{ fontSize: 11, fontWeight: 700, color: '#475569', textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: 10 }}>Reporting manager</div>
+                <ManagerBlock
+                  code={l1Code}
+                  match={l1Match}
+                  onCodeChange={(v) => setManualForm((p) => ({ ...p, 'Reporting Manager Code': v }))}
+                  nameValue={manualForm['Reporting Manager Name'] || ''}
+                  onNameChange={(v) => setManualForm((p) => ({ ...p, 'Reporting Manager Name': v }))}
+                  emailValue={manualForm['Reporting Manager Email'] || ''}
+                  onEmailChange={(v) => setManualForm((p) => ({ ...p, 'Reporting Manager Email': v }))}
+                  needsEmail={meta.needsEmail}
+                  inputBase={inputBase}
+                  getStoredEmail={getStoredEmail}
+                />
+                {!l1Code && <div style={{ fontSize: 11.5, color: '#94A3B8', marginTop: 8 }}>Leave blank for the top-of-hierarchy roles.</div>}
+                {l1Code && !l1Match && (
+                  <div style={{ marginTop: 10 }}>
+                    <div style={{ fontSize: 11.5, color: '#475569', marginBottom: 8 }}>
+                      Code <code style={{ background: '#F1F5F9', padding: '1px 6px', borderRadius: 4, fontSize: 11 }}>{l1Code}</code> is new — fill in the name{meta.needsEmail ? ' and email' : ''} above.
+                    </div>
+                    <label style={{ display: 'inline-flex', alignItems: 'center', gap: 8, fontSize: 12.5, color: '#0F172A', cursor: 'pointer', userSelect: 'none' }}>
+                      <input type="checkbox" checked={l1NewMgrInPMS}
+                        onChange={(e) => { setL1NewMgrInPMS(e.target.checked); if (!e.target.checked) { setL1NewMgrGroup(''); setL1NewMgrSegment(''); } }}
+                        style={{ width: 15, height: 15, accentColor: '#4F46E5' }} />
+                      <span>Also add this manager as a PMS employee</span>
+                    </label>
+                    {l1NewMgrInPMS && (
+                      <div style={{ marginTop: 10, padding: '12px 14px', background: '#fff', border: '1px solid #E2E8F0', borderRadius: 9 }}>
+                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 12 }}>
+                          {meta.hasGoalGroups && (
+                            <div>
+                              <label style={{ fontSize: 11.5, fontWeight: 600, color: '#64748B', display: 'block', marginBottom: 5 }}>
+                                Group <span style={{ color: '#DC2626' }}>*</span>
+                              </label>
+                              <select value={l1NewMgrGroup} onChange={(e) => { setL1NewMgrGroup(e.target.value); setL1NewMgrSegment(''); }} style={inputBase}>
+                                <option value="">Select a group…</option>
+                                {meta.groupNames.map((g) => <option key={g} value={g}>{g}</option>)}
+                              </select>
+                            </div>
+                          )}
+                          {l1MgrSegmentAttr && l1MgrSegmentValues.length > 0 && (
+                            <div>
+                              <label style={{ fontSize: 11.5, fontWeight: 600, color: '#64748B', display: 'block', marginBottom: 5 }}>
+                                {l1MgrSegmentAttr} <span style={{ color: '#DC2626' }}>*</span>
+                                <span style={{ fontWeight: 500, color: '#94A3B8', marginLeft: 6 }}>· for {l1MgrGroupObj?.name}</span>
+                              </label>
+                              <select value={l1NewMgrSegment} onChange={(e) => setL1NewMgrSegment(e.target.value)} style={inputBase}>
+                                <option value="">Select…</option>
+                                {l1MgrSegmentValues.map((v) => <option key={v} value={v}>{v}</option>)}
+                              </select>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              {meta.hasL2 && (
+                <div style={{ marginTop: 12, padding: '12px 14px', background: '#FAFBFF', border: '1px solid #E2E8F0', borderRadius: 10 }}>
+                  <div style={{ fontSize: 11, fontWeight: 700, color: '#475569', textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: 10 }}>L2 manager <span style={{ fontWeight: 500, color: '#94A3B8', textTransform: 'none', letterSpacing: 0 }}>· optional</span></div>
+                  <ManagerBlock
+                    code={l2Code}
+                    match={l2Match}
+                    onCodeChange={(v) => setManualForm((p) => ({ ...p, 'L2 Manager Code': v }))}
+                    nameValue={manualForm['L2 Manager Name'] || ''}
+                    onNameChange={(v) => setManualForm((p) => ({ ...p, 'L2 Manager Name': v }))}
+                    needsEmail={false}
+                    inputBase={inputBase}
+                    getStoredEmail={getStoredEmail}
+                  />
+                </div>
+              )}
+
+              {manualError && (
+                <div style={{ marginTop: 12, padding: '8px 12px', background: '#FEF2F2', border: '1px solid #FECACA', borderRadius: 8, fontSize: 12.5, color: '#991B1B' }}>{manualError}</div>
+              )}
+              <div style={{ display: 'flex', gap: 8, marginTop: 14 }}>
+                <button type="button" style={{ ...btnP, background: '#16A34A' }} onClick={applyManualAdd}>Add employee</button>
+                <button type="button" style={btnS} onClick={() => { setManualForm({}); setManualError(''); }}>Clear</button>
+              </div>
+            </>
+          )}
+        </div>
+      </section>
+
+      {/* ── REMOVE ──────────────────────────────────────────────── */}
+      <section style={{ ...cardBase, flex: '2 1 480px', minWidth: 0 }}>
+        <header style={{ padding: '14px 18px', borderBottom: '1px solid #F1F5F9', display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 13.5, fontWeight: 700, color: '#0F172A' }}>Remove employees</div>
+            <div style={{ fontSize: 11.5, color: '#94A3B8' }}>{employees.length} in PMS · removal needs confirmation.</div>
           </div>
-        )}
-      </div>
+          {tabPills(removeMode, [{ k: 'pick', label: 'Pick & remove' }, { k: 'bulk', label: 'Bulk by code' }],
+            (k) => { setRemoveMode(k); setRemoveSelected([]); setRemoveSearch(''); setConfirmRemove(false); setBulkDelPreview(null); setConfirmBulkDel(false); })}
+        </header>
+
+        <div style={{ padding: '14px 18px' }}>
+          {removeMode === 'pick' && (
+            <>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10, flexWrap: 'wrap' }}>
+                <input
+                  value={removeSearch}
+                  onChange={(e) => setRemoveSearch(e.target.value)}
+                  placeholder="Filter by name, code, or group…"
+                  style={{ ...inputBase, flex: 1, minWidth: 220 }}
+                />
+                <button type="button" onClick={toggleSelectAllVisible} style={btnS}>
+                  {allVisibleSelected ? 'Unselect all' : `Select all${removeSearch ? ' visible' : ''}`}
+                </button>
+              </div>
+
+              <div style={{ border: '1px solid #E9EDF2', borderRadius: 10, overflow: 'hidden' }}>
+                <div style={{ maxHeight: 540, overflow: 'auto' }}>
+                  {removeResults.length === 0 ? (
+                    <div style={{ padding: '32px 14px', textAlign: 'center', color: '#94A3B8', fontSize: 13 }}>
+                      {employees.length === 0 ? 'No employees in PMS yet.' : `No matches for "${removeSearch}".`}
+                    </div>
+                  ) : (
+                    removeResults.map((emp) => {
+                      const code = String(emp['Employee Code'] || '').trim();
+                      const isSelected = removeSelected.includes(code);
+                      return (
+                        <button key={code} type="button" onClick={() => toggleRemove(code)}
+                          style={{ width: '100%', display: 'flex', alignItems: 'center', gap: 10, padding: '8px 12px', background: isSelected ? '#FEF2F2' : '#fff', border: 'none', borderBottom: '1px solid #F1F5F9', cursor: 'pointer', fontFamily: 'inherit', textAlign: 'left' }}>
+                          <div style={{ width: 16, height: 16, borderRadius: 4, border: `2px solid ${isSelected ? '#DC2626' : '#E2E8F0'}`, background: isSelected ? '#DC2626' : '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+                            {isSelected && <span style={{ color: '#fff', fontSize: 10, fontWeight: 800 }}>✓</span>}
+                          </div>
+                          <div style={{ width: 26, height: 26, borderRadius: '50%', background: 'linear-gradient(135deg,#4F46E5,#7C3AED)', color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 9, fontWeight: 800, flexShrink: 0 }}>{getInitials(emp['Employee Name'] || code)}</div>
+                          <span style={{ fontSize: 12.5, fontWeight: 600, color: '#0D1117', flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{emp['Employee Name'] || code}</span>
+                          <span style={{ fontSize: 12, color: '#94A3B8', fontFamily: 'monospace', flexShrink: 0 }}>{code}</span>
+                          <span style={{ fontSize: 11.5, color: '#64748B', flexShrink: 0, maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{emp['Group Name'] || emp.assignedGoalGroupName || ''}</span>
+                        </button>
+                      );
+                    })
+                  )}
+                </div>
+              </div>
+
+              {/* Sticky-style action footer */}
+              <div style={{ marginTop: 12, display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', justifyContent: 'space-between' }}>
+                <span style={{ fontSize: 12.5, color: removeSelected.length > 0 ? '#0F172A' : '#94A3B8', fontWeight: removeSelected.length > 0 ? 700 : 500 }}>
+                  {removeSelected.length} selected · showing {removeResults.length} of {employees.length}
+                </span>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                  {removeSelected.length > 0 && (
+                    <button type="button" style={{ ...btnS, fontSize: 11.5 }} onClick={() => { setRemoveSelected([]); setConfirmRemove(false); }}>Clear</button>
+                  )}
+                  {!confirmRemove ? (
+                    <button type="button" style={{ ...btnD, opacity: removeSelected.length === 0 ? 0.5 : 1, cursor: removeSelected.length === 0 ? 'not-allowed' : 'pointer' }} disabled={removeSelected.length === 0} onClick={() => setConfirmRemove(true)}>
+                      Remove {removeSelected.length || ''}
+                    </button>
+                  ) : (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, background: '#FEF2F2', border: '1px solid #FECACA', borderRadius: 8, padding: '6px 10px' }}>
+                      <span style={{ fontSize: 12.5, color: '#991B1B', fontWeight: 600 }}>Confirm removal of {removeSelected.length}?</span>
+                      <button type="button" style={btnD} onClick={applyRemove}>Yes, remove</button>
+                      <button type="button" style={btnS} onClick={() => setConfirmRemove(false)}>Cancel</button>
+                    </div>
+                  )}
+                </div>
+              </div>
+            </>
+          )}
+
+          {removeMode === 'bulk' && (
+            <>
+              <div style={{ background: '#F8FAFC', border: '1px solid #E9EDF2', borderRadius: 10, padding: '10px 14px', marginBottom: 12, fontSize: 12, color: '#64748B' }}>
+                Single column: <code style={{ background: '#E2E8F0', padding: '1px 6px', borderRadius: 4, fontSize: 11.5 }}>Employee Code</code>. Codes not in the org are skipped.
+              </div>
+              <input ref={delFileRef} type="file" accept=".xlsx,.xls,.csv" style={{ display: 'none' }} onChange={handleBulkDelFile} />
+              <UploadSheetButton onDownload={() => downloadCsvTemplate('employee_codes_to_remove.csv', ['Employee Code'], ['EMP001'])} fileRef={delFileRef} />
+
+              {bulkDelPreview && (
+                <div style={{ marginTop: 14 }}>
+                  <div style={{ fontSize: 12, fontWeight: 600, color: '#374151', marginBottom: 8 }}>
+                    {bulkDelPreview.filter((r) => r.found).length} match · {bulkDelPreview.filter((r) => !r.found).length} not found
+                  </div>
+                  <div style={{ border: '1px solid #E9EDF2', borderRadius: 9, overflow: 'hidden', maxHeight: 240, overflowY: 'auto', marginBottom: 10 }}>
+                    <table style={{ width: '100%', fontSize: 12.5, borderCollapse: 'collapse' }}>
+                      <thead><tr style={{ background: '#F8FAFC' }}>
+                        {['Code', 'Name', 'Status'].map((h) => <th key={h} style={{ padding: '7px 10px', textAlign: 'left', fontSize: 11, fontWeight: 700, color: '#94A3B8', textTransform: 'uppercase', position: 'sticky', top: 0, background: '#F8FAFC' }}>{h}</th>)}
+                      </tr></thead>
+                      <tbody>{bulkDelPreview.map((r, i) => (
+                        <tr key={i} style={{ borderTop: '1px solid #F1F5F9', opacity: r.found ? 1 : 0.5 }}>
+                          <td style={{ padding: '6px 10px', fontFamily: 'monospace', fontWeight: 700, color: '#4F46E5' }}>{r.code}</td>
+                          <td style={{ padding: '6px 10px' }}>{r.name || '—'}</td>
+                          <td style={{ padding: '6px 10px' }}>
+                            <span style={{ fontSize: 11, fontWeight: 600, color: r.found ? '#991B1B' : '#92400E', background: r.found ? '#FEF2F2' : '#FFFBEB', borderRadius: 5, padding: '2px 7px' }}>
+                              {r.found ? 'Will remove' : 'Not found'}
+                            </span>
+                          </td>
+                        </tr>
+                      ))}</tbody>
+                    </table>
+                  </div>
+                  {(() => {
+                    const matchCount = bulkDelPreview.filter((r) => r.found).length;
+                    return (
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                        {!confirmBulkDel
+                          ? <button type="button" style={btnD} onClick={() => setConfirmBulkDel(true)} disabled={matchCount === 0}>Remove {matchCount} employee{matchCount !== 1 ? 's' : ''}</button>
+                          : (
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 8, background: '#FEF2F2', border: '1px solid #FECACA', borderRadius: 8, padding: '6px 10px' }}>
+                              <span style={{ fontSize: 12.5, color: '#991B1B', fontWeight: 600 }}>Confirm removal of {matchCount}?</span>
+                              <button type="button" style={btnD} onClick={applyBulkDelete}>Yes, remove</button>
+                              <button type="button" style={btnS} onClick={() => setConfirmBulkDel(false)}>Cancel</button>
+                            </div>
+                          )
+                        }
+                        <button type="button" style={btnS} onClick={() => { setBulkDelPreview(null); setConfirmBulkDel(false); }}>Clear</button>
+                      </div>
+                    );
+                  })()}
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      </section>
     </div>
   );
 }
@@ -2356,7 +3588,6 @@ function ModuleTestCreds({ employees, org, orgKey }) {
   const [filterStage, setFilterStage] = useState('');
   const [filterManager, setFilterManager] = useState('');
   const [filtersOpen, setFiltersOpen] = useState(false);
-  const [passCopied, setPassCopied] = useState(false);
   const orgPalette = useMemo(() => resolveBrandPalette(org?.brandPalette), [org?.brandPalette]);
   const externalTint = orgPalette.primary;
   const externalTintDark = orgPalette.primaryDark || orgPalette.primary;
@@ -2364,10 +3595,18 @@ function ModuleTestCreds({ employees, org, orgKey }) {
   const externalTintSoft = `${externalTint}14`;
   const externalTintBorder = `${externalTint}33`;
 
-  const pass = org.temporaryPassword || 'Pass@1234';
-  function copyPass() { navigator.clipboard?.writeText(pass).catch(() => {}); setPassCopied(true); setTimeout(() => setPassCopied(false), 1500); }
-
   function openEmp(emp) {
+    void logAuditEvent({
+      orgKey,
+      actorRole: 'hr-admin',
+      actorName: org?.hrAdminName || 'HR Admin',
+      actionType: 'proxy-open',
+      targetType: 'employee',
+      targetCode: String(emp['Employee Code'] || '').trim(),
+      details: {
+        employeeName: emp['Employee Name'] || '',
+      },
+    });
     persistEmployeeSession({
       isLoggedIn: true,
       role: 'employee',
@@ -2493,14 +3732,9 @@ function ModuleTestCreds({ employees, org, orgKey }) {
             style={{ padding: '8px 14px', background: '#fff', color: '#475569', border: '1.5px solid #E2E8F0', borderRadius: 8, fontSize: 12.5, cursor: 'pointer', fontFamily: 'inherit' }}>Clear all</button>
         )}
         <span style={{ fontSize: 12, color: '#94A3B8' }}>{filtered.length} of {allRows.length}{externalManagers.length > 0 ? ` · ${externalManagers.length} external mgr${externalManagers.length !== 1 ? 's' : ''}` : ''}</span>
-        {/* Temp password — compact pill, pushed to the far right */}
-        <button type="button" onClick={copyPass} title="Shared temp password — click to copy"
-          style={{ marginLeft: 'auto', display: 'inline-flex', alignItems: 'center', gap: 6, padding: '6px 12px', background: passCopied ? '#F0FDF4' : '#FFFBEB', color: passCopied ? '#15803D' : '#92400E', border: `1.5px solid ${passCopied ? '#BBF7D0' : '#FDE68A'}`, borderRadius: 999, fontSize: 12, fontWeight: 700, cursor: 'pointer', fontFamily: 'monospace', transition: 'all 160ms ease', flexShrink: 0 }}>
-          {passCopied
-            ? <><span style={{ fontFamily: 'inherit' }}>✓</span> copied</>
-            : <><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}><circle cx="8" cy="15" r="4"/><path d="m10.85 12.15 4.65-4.65"/><path d="m18 5-3 3"/><path d="m15 8 4 4"/></svg>{pass}</>
-          }
-        </button>
+        <span style={{ marginLeft: 'auto', fontSize: 11.5, color: '#64748B', background: '#F8FAFC', border: '1px solid #E2E8F0', borderRadius: 999, padding: '6px 12px' }}>
+          Proxy mode uses the employee session directly. Reset individual passwords from Employee Status.
+        </span>
       </div>
 
       {/* Collapsible filters panel */}
@@ -3298,6 +4532,283 @@ function genTempPassword() {
   return 'HR@' + Math.random().toString(36).slice(2, 6).toUpperCase();
 }
 
+function ModuleEmailSettings({ org, orgKey }) {
+  const [settings, setSettings] = useState(() => getDefaultSmtpSettings());
+  const [testEmail, setTestEmail] = useState('');
+  const [loadState, setLoadState] = useState({ loading: true, error: '' });
+  const [saveState, setSaveState] = useState({ status: 'idle', message: '' });
+  const [verifyState, setVerifyState] = useState({ status: 'idle', message: '' });
+  const [testState, setTestState] = useState({ status: 'idle', message: '' });
+
+  useEffect(() => {
+    let cancelled = false;
+    async function run() {
+      if (!orgKey) {
+        if (!cancelled) {
+          setLoadState({ loading: false, error: 'Organization context is missing.' });
+        }
+        return;
+      }
+      setLoadState({ loading: true, error: '' });
+      const result = await loadOrgSmtpSettings(orgKey);
+      if (cancelled) return;
+      if (result?.ok) {
+        setSettings(result.settings || getDefaultSmtpSettings());
+        setLoadState({ loading: false, error: '' });
+      } else {
+        setSettings(getDefaultSmtpSettings());
+        setLoadState({ loading: false, error: result?.error || 'Could not load email settings.' });
+      }
+    }
+    run();
+    return () => { cancelled = true; };
+  }, [orgKey]);
+
+  function updateSetting(key, value) {
+    setSettings((prev) => ({ ...prev, [key]: value }));
+  }
+
+  async function handleSave() {
+    setSaveState({ status: 'saving', message: '' });
+    const result = await saveOrgSmtpSettings(orgKey, settings);
+    if (result?.ok) {
+      setSettings(result.settings || settings);
+      setSaveState({ status: 'saved', message: 'SMTP settings saved.' });
+      return;
+    }
+    setSaveState({ status: 'failed', message: result?.error || 'Could not save SMTP settings.' });
+  }
+
+  async function handleVerify() {
+    setVerifyState({ status: 'verifying', message: '' });
+    const result = await verifyOrgSmtpConnection(orgKey, settings);
+    if (result?.ok) {
+      setVerifyState({ status: 'verified', message: result?.message || 'SMTP connection verified.' });
+      return;
+    }
+    setVerifyState({ status: 'failed', message: result?.error || 'SMTP verification failed.' });
+  }
+
+  async function handleSendTest() {
+    if (!String(testEmail || '').trim()) {
+      setTestState({ status: 'failed', message: 'Enter a recipient email for the test message.' });
+      return;
+    }
+    setTestState({ status: 'sending', message: '' });
+    const result = await sendOrgSmtpTestEmail(orgKey, settings, testEmail);
+    if (result?.ok) {
+      setTestState({ status: 'sent', message: result?.message || 'Test email sent.' });
+      return;
+    }
+    setTestState({ status: 'failed', message: result?.error || 'Test email failed.' });
+  }
+
+  const S = {
+    card: { background: '#fff', border: '1px solid #E9EDF2', borderRadius: 14, padding: '22px 22px 20px' },
+    label: { display: 'block', fontSize: 11.5, fontWeight: 700, color: '#64748B', textTransform: 'uppercase', letterSpacing: '0.07em', marginBottom: 7 },
+    input: { width: '100%', padding: '11px 13px', border: '1.5px solid #E2E8F0', borderRadius: 10, fontSize: 14, color: '#0F172A', fontFamily: 'inherit', boxSizing: 'border-box', outline: 'none', background: '#fff' },
+    btnPrimary: { padding: '10px 16px', background: '#0F4C81', color: '#fff', border: 'none', borderRadius: 10, fontSize: 13, fontWeight: 600, cursor: 'pointer', fontFamily: 'inherit' },
+    btnSecondary: { padding: '10px 16px', background: '#fff', color: '#334155', border: '1.5px solid #D9E2EC', borderRadius: 10, fontSize: 13, fontWeight: 600, cursor: 'pointer', fontFamily: 'inherit' },
+  };
+
+  const noticeStyle = (tone) => ({
+    borderRadius: 10,
+    padding: '10px 12px',
+    fontSize: 12.5,
+    border: `1px solid ${tone === 'good' ? '#BBF7D0' : tone === 'bad' ? '#FECACA' : '#DBEAFE'}`,
+    background: tone === 'good' ? '#F0FDF4' : tone === 'bad' ? '#FEF2F2' : '#EFF6FF',
+    color: tone === 'good' ? '#166534' : tone === 'bad' ? '#B91C1C' : '#1D4ED8',
+    whiteSpace: 'pre-wrap',
+    wordBreak: 'break-word',
+    lineHeight: 1.55,
+  });
+
+  return (
+    <div style={{ maxWidth: 980 }}>
+      <div style={{ marginBottom: 22 }}>
+        <h2 style={{ fontSize: 20, fontWeight: 700, color: '#0F172A', margin: 0 }}>Email Settings</h2>
+        <p style={{ fontSize: 13, color: '#64748B', margin: '4px 0 0' }}>
+          By default, all emails for {org?.name || 'this organization'} go from the ZaroHR sender. Enable custom SMTP only if this organization wants mail to go from its own mailbox.
+        </p>
+      </div>
+
+      {loadState.error && <div style={{ ...noticeStyle('bad'), marginBottom: 16 }}>{loadState.error}</div>}
+
+      <div style={{ ...S.card, marginBottom: 16 }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16, flexWrap: 'wrap', marginBottom: 20 }}>
+          <div>
+            <div style={{ fontSize: 18, fontWeight: 700, color: '#0F172A' }}>Custom Email Sender</div>
+            <div style={{ fontSize: 13, color: '#64748B', marginTop: 3 }}>Pick how this organization sends outbound mail.</div>
+          </div>
+          <label style={{ display: 'flex', alignItems: 'center', gap: 10, cursor: 'pointer', userSelect: 'none' }}>
+            <span style={{ fontSize: 12, fontWeight: 700, color: settings.isEnabled ? '#0F4C81' : '#64748B', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+              {settings.isEnabled ? 'Custom sender enabled' : 'Using default ZaroHR sender'}
+            </span>
+            <span style={{ position: 'relative', width: 52, height: 30, background: settings.isEnabled ? '#0F4C81' : '#CBD5E1', borderRadius: 999, transition: 'background 160ms ease' }}>
+              <input
+                type="checkbox"
+                checked={settings.isEnabled}
+                onChange={(e) => updateSetting('isEnabled', e.target.checked)}
+                style={{ position: 'absolute', inset: 0, opacity: 0, cursor: 'pointer' }}
+              />
+              <span style={{ position: 'absolute', top: 3, left: settings.isEnabled ? 25 : 3, width: 24, height: 24, borderRadius: '50%', background: '#fff', transition: 'left 160ms ease' }} />
+            </span>
+          </label>
+        </div>
+
+        {/* Provider tabs */}
+        <div style={{ display: 'inline-flex', gap: 2, padding: 4, background: '#F1F5F9', borderRadius: 11, marginBottom: 18 }}>
+          {[
+            { k: 'smtp', label: 'SMTP' },
+            { k: 'microsoft', label: 'Microsoft 365' },
+            { k: 'google', label: 'Google Workspace' },
+          ].map((tab) => {
+            const active = (settings.provider || 'smtp') === tab.k;
+            return (
+              <button key={tab.k} type="button" onClick={() => updateSetting('provider', tab.k)}
+                style={{ padding: '8px 18px', borderRadius: 8, border: 'none', cursor: 'pointer', fontFamily: 'inherit', fontSize: 13, fontWeight: active ? 700 : 500, background: active ? '#fff' : 'transparent', color: active ? '#0F172A' : '#64748B', boxShadow: active ? '0 1px 4px rgba(15,23,42,.08)' : 'none' }}>
+                {tab.label}
+              </button>
+            );
+          })}
+        </div>
+
+        <div style={{ ...noticeStyle('info'), marginBottom: 18 }}>
+          {settings.provider === 'microsoft'
+            ? 'Sends through Microsoft Graph using a tenant-registered app with Mail.Send application permission. Falls back to the default ZaroHR sender if the toggle is off or credentials are incomplete.'
+            : settings.provider === 'google'
+            ? 'Sends through the Gmail API using an OAuth client with gmail.send scope. Falls back to the default ZaroHR sender if the toggle is off or credentials are incomplete.'
+            : 'Standard SMTP. Falls back to the default ZaroHR sender if the toggle is off or credentials are incomplete.'}
+        </div>
+
+        {/* SMTP fields */}
+        {settings.provider === 'smtp' && (
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(240px, 1fr))', gap: 16, marginBottom: 16 }}>
+            <div>
+              <label style={S.label}>Use TLS / STARTTLS</label>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '11px 13px', border: '1.5px solid #E2E8F0', borderRadius: 10, cursor: 'pointer' }}>
+                <input type="checkbox" checked={settings.useTls} onChange={(e) => updateSetting('useTls', e.target.checked)} style={{ width: 16, height: 16, accentColor: '#0F4C81' }} />
+                <span style={{ fontSize: 13, color: '#334155' }}>Secure the SMTP connection</span>
+              </label>
+            </div>
+            <div>
+              <label style={S.label}>SMTP Port</label>
+              <input style={S.input} value={settings.smtpPort} onChange={(e) => updateSetting('smtpPort', e.target.value)} placeholder="465" inputMode="numeric" />
+            </div>
+            <div>
+              <label style={S.label}>SMTP Host</label>
+              <input style={S.input} value={settings.smtpHost} onChange={(e) => updateSetting('smtpHost', e.target.value)} placeholder="smtp.hostinger.com" />
+            </div>
+            <div>
+              <label style={S.label}>SMTP Username</label>
+              <input style={S.input} value={settings.smtpUsername} onChange={(e) => updateSetting('smtpUsername', e.target.value)} placeholder="noreply@yourdomain.com" />
+            </div>
+            <div>
+              <label style={S.label}>SMTP Password / API Key</label>
+              <input style={S.input} type="password" value={settings.smtpPassword} onChange={(e) => updateSetting('smtpPassword', e.target.value)} placeholder={settings.hasPassword ? 'Saved password retained unless you replace it' : 'Your mailbox password'} />
+            </div>
+          </div>
+        )}
+
+        {/* Microsoft fields */}
+        {settings.provider === 'microsoft' && (
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(240px, 1fr))', gap: 16, marginBottom: 16 }}>
+            <div style={{ gridColumn: '1 / -1' }}>
+              <label style={S.label}>Tenant ID (Directory ID)</label>
+              <input style={S.input} value={settings.msTenantId} onChange={(e) => updateSetting('msTenantId', e.target.value)} placeholder="00000000-0000-0000-0000-000000000000" />
+            </div>
+            <div>
+              <label style={S.label}>Client ID (Application ID)</label>
+              <input style={S.input} value={settings.msClientId} onChange={(e) => updateSetting('msClientId', e.target.value)} placeholder="00000000-0000-0000-0000-000000000000" />
+            </div>
+            <div>
+              <label style={S.label}>Client Secret Value</label>
+              <input style={S.input} type="password" value={settings.msClientSecret} onChange={(e) => updateSetting('msClientSecret', e.target.value)} placeholder={settings.hasMsClientSecret ? 'Saved secret retained unless you replace it' : 'Paste the secret VALUE (not the secret ID)'} />
+            </div>
+            <div style={{ gridColumn: '1 / -1', fontSize: 12, color: '#64748B', lineHeight: 1.6 }}>
+              In Azure Entra → App registrations: register an app, add an API permission for Microsoft Graph → Application → <strong>Mail.Send</strong>, grant admin consent, then create a client secret. The Sender Email below must be a real mailbox in this tenant.
+            </div>
+          </div>
+        )}
+
+        {/* Google fields */}
+        {settings.provider === 'google' && (
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(240px, 1fr))', gap: 16, marginBottom: 16 }}>
+            <div>
+              <label style={S.label}>Client ID</label>
+              <input style={S.input} value={settings.googleClientId} onChange={(e) => updateSetting('googleClientId', e.target.value)} placeholder="xxxxxxxxxxxx.apps.googleusercontent.com" />
+            </div>
+            <div>
+              <label style={S.label}>Client Secret</label>
+              <input style={S.input} type="password" value={settings.googleClientSecret} onChange={(e) => updateSetting('googleClientSecret', e.target.value)} placeholder={settings.hasGoogleClientSecret ? 'Saved secret retained unless you replace it' : 'OAuth client secret'} />
+            </div>
+            <div style={{ gridColumn: '1 / -1' }}>
+              <label style={S.label}>Refresh Token</label>
+              <input style={S.input} type="password" value={settings.googleRefreshToken} onChange={(e) => updateSetting('googleRefreshToken', e.target.value)} placeholder={settings.hasGoogleRefreshToken ? 'Saved token retained unless you replace it' : 'Refresh token issued for the sender mailbox with gmail.send scope'} />
+            </div>
+            <div style={{ gridColumn: '1 / -1', fontSize: 12, color: '#64748B', lineHeight: 1.6 }}>
+              In Google Cloud Console: enable the Gmail API, create an OAuth 2.0 Client (Web), and complete a one-time consent for the sender mailbox with the <strong>https://www.googleapis.com/auth/gmail.send</strong> scope to obtain a refresh token. The Sender Email below must match the mailbox that consented.
+            </div>
+          </div>
+        )}
+
+        {/* Shared identity fields (apply to all providers) */}
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(240px, 1fr))', gap: 16, marginBottom: 16 }}>
+          <div>
+            <label style={S.label}>From Name</label>
+            <input style={S.input} value={settings.fromName} onChange={(e) => updateSetting('fromName', e.target.value)} placeholder="Your Org HR" />
+          </div>
+          <div>
+            <label style={S.label}>{settings.provider === 'smtp' ? 'From Email Address' : 'Sender Mailbox (From Email)'}</label>
+            <input style={S.input} value={settings.fromEmail} onChange={(e) => updateSetting('fromEmail', e.target.value)} placeholder="noreply@yourdomain.com" />
+          </div>
+          <div style={{ gridColumn: '1 / -1' }}>
+            <label style={S.label}>Email Footer Text</label>
+            <textarea style={{ ...S.input, minHeight: 88, resize: 'vertical' }} value={settings.footerText} onChange={(e) => updateSetting('footerText', e.target.value)} placeholder="© Your Org HR. All rights reserved." />
+          </div>
+        </div>
+
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+          <button type="button" onClick={handleSave} disabled={loadState.loading || saveState.status === 'saving'} style={{ ...S.btnPrimary, opacity: loadState.loading || saveState.status === 'saving' ? 0.7 : 1 }}>
+            {saveState.status === 'saving' ? 'Saving…' : 'Save settings'}
+          </button>
+          {saveState.message && (
+            <span style={{ fontSize: 12.5, color: saveState.status === 'failed' ? '#B91C1C' : '#166534' }}>
+              {saveState.message}
+            </span>
+          )}
+        </div>
+      </div>
+
+      <div style={S.card}>
+        <div style={{ fontSize: 18, fontWeight: 700, color: '#0F172A', marginBottom: 4 }}>Test This Configuration</div>
+        <div style={{ fontSize: 13, color: '#64748B', marginBottom: 18 }}>Verify the connection or send a one-off test email before relying on the organization sender.</div>
+
+        <div style={{ display: 'grid', gridTemplateColumns: 'minmax(260px, 1fr) auto auto', gap: 12, alignItems: 'end' }}>
+          <div>
+            <label style={S.label}>Recipient Email</label>
+            <input style={S.input} value={testEmail} onChange={(e) => setTestEmail(e.target.value)} placeholder="you@example.com" />
+          </div>
+          <button type="button" onClick={handleVerify} disabled={verifyState.status === 'verifying'} style={{ ...S.btnSecondary, whiteSpace: 'nowrap', opacity: verifyState.status === 'verifying' ? 0.7 : 1 }}>
+            {verifyState.status === 'verifying' ? 'Verifying…' : 'Verify connection'}
+          </button>
+          <button type="button" onClick={handleSendTest} disabled={testState.status === 'sending'} style={{ ...S.btnPrimary, whiteSpace: 'nowrap', opacity: testState.status === 'sending' ? 0.7 : 1 }}>
+            {testState.status === 'sending' ? 'Sending…' : 'Send test email'}
+          </button>
+        </div>
+
+        {(verifyState.message || testState.message || loadState.loading) && (
+          <div style={{ marginTop: 16, display: 'flex', flexDirection: 'column', gap: 8 }}>
+            {loadState.loading && <div style={noticeStyle('info')}>Loading SMTP settings…</div>}
+            {verifyState.message && <div style={noticeStyle(verifyState.status === 'failed' ? 'bad' : 'good')}>{verifyState.message}</div>}
+            {testState.message && <div style={noticeStyle(testState.status === 'failed' ? 'bad' : 'good')}>{testState.message}</div>}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function ModuleHRTeam({ org, orgKey, employees, groups, onOrgChange }) {
   const hrTeam = org?.hrTeam || [];
   const [panel, setPanel] = useState(null); // null | 'co-admin' | 'scoped-hr'
@@ -3313,6 +4824,7 @@ function ModuleHRTeam({ org, orgKey, employees, groups, onOrgChange }) {
   const [error, setError] = useState('');
   const [genPass, setGenPass] = useState('');
   const [scopeSearch, setScopeSearch] = useState('');
+  const [resetState, setResetState] = useState({ status: 'idle', message: '' });
 
   const empMatches = useMemo(() => {
     const q = formEmpSearch.trim().toLowerCase();
@@ -3343,7 +4855,7 @@ function ModuleHRTeam({ org, orgKey, employees, groups, onOrgChange }) {
 
   function openAdd(type) { resetForm(); setGenPass(genTempPassword()); setPanel(type); }
 
-  function handleSave() {
+  async function handleSave() {
     setError('');
     if (formIsInPMS && !formEmpCode) { setError('Please select a PMS employee.'); return; }
     if (!formIsInPMS && !formName.trim()) { setError('Name is required.'); return; }
@@ -3378,7 +4890,7 @@ function ModuleHRTeam({ org, orgKey, employees, groups, onOrgChange }) {
     if (!formIsInPMS) {
       const creds = readEmployeeCredentialsSync();
       creds[email] = {
-        password: genPass,
+        passwordHash: await hashPasswordValue(genPass),
         name,
         email,
         designation: type === 'co-admin' ? 'Co-Admin HR' : 'Scoped HR',
@@ -3403,6 +4915,51 @@ function ModuleHRTeam({ org, orgKey, employees, groups, onOrgChange }) {
       persistEmployeeCredentials(creds);
     }
     onOrgChange({ hrTeam: hrTeam.filter((x) => x.id !== id) });
+  }
+
+  async function resetMemberPassword(member) {
+    if (!member || member.isInPMS) {
+      setResetState({ status: 'failed', message: 'Password reset is available only for email-based HR team logins.' });
+      return;
+    }
+    const credentialKey = String(member.email || '').trim();
+    if (!credentialKey) {
+      setResetState({ status: 'failed', message: 'This HR team member does not have a saved login email.' });
+      return;
+    }
+    setResetState({ status: 'sending', message: `Resetting password for ${member.name || credentialKey}…` });
+    const result = await resetUserPasswordByAdmin({
+      orgKey,
+      credentialKey,
+      prefix: member.type === 'co-admin' ? 'CoAdmin' : 'ScopedHR',
+    });
+    if (!result?.ok) {
+      setResetState({ status: 'failed', message: result?.error || 'Failed to reset this password.' });
+      return;
+    }
+    onOrgChange({
+      hrTeam: hrTeam.map((entry) => (
+        entry.id === member.id
+          ? { ...entry, password: result.tempPassword, isTemp: true }
+          : entry
+      )),
+    });
+    void logAuditEvent({
+      orgKey,
+      actorRole: 'hr-admin',
+      actorName: org?.hrAdminName || 'HR Admin',
+      actionType: 'hr-team-password-reset',
+      targetType: member.type || 'hr-team',
+      targetCode: String(member.email || member.id || '').trim(),
+      details: {
+        memberName: member.name || '',
+      },
+    });
+    try { await navigator.clipboard?.writeText(result.tempPassword || ''); } catch (_) {}
+    setResetState({
+      status: 'sent',
+      message: `Temporary password reset for ${member.name || credentialKey}. The new password was copied to your clipboard.`,
+    });
   }
 
   const S = {
@@ -3447,7 +5004,18 @@ function ModuleHRTeam({ org, orgKey, employees, groups, onOrgChange }) {
             </div>
           )}
         </div>
-        <button type="button" onClick={() => removeMember(m.id)} style={{ background: 'none', border: '1.5px solid #FCA5A5', borderRadius: 7, padding: '4px 10px', fontSize: 11.5, color: '#DC2626', cursor: 'pointer', fontFamily: 'inherit', flexShrink: 0 }}>Remove</button>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6, alignItems: 'flex-end', flexShrink: 0 }}>
+          {!m.isInPMS && (
+            <button
+              type="button"
+              onClick={() => resetMemberPassword(m)}
+              style={{ background: '#EEF2FF', border: '1.5px solid #C7D2FE', borderRadius: 7, padding: '4px 10px', fontSize: 11.5, color: '#4338CA', cursor: 'pointer', fontFamily: 'inherit' }}
+            >
+              Reset password
+            </button>
+          )}
+          <button type="button" onClick={() => removeMember(m.id)} style={{ background: 'none', border: '1.5px solid #FCA5A5', borderRadius: 7, padding: '4px 10px', fontSize: 11.5, color: '#DC2626', cursor: 'pointer', fontFamily: 'inherit' }}>Remove</button>
+        </div>
       </div>
     );
   }
@@ -3461,6 +5029,21 @@ function ModuleHRTeam({ org, orgKey, employees, groups, onOrgChange }) {
         <h2 style={{ fontSize: 20, fontWeight: 700, color: '#0F172A', margin: 0 }}>HR Team</h2>
         <p style={{ fontSize: 13, color: '#64748B', margin: '4px 0 0' }}>Assign co-admins and scoped HR members for this organization.</p>
       </div>
+
+      {resetState.message && (
+        <div style={{
+          marginBottom: 16,
+          padding: '11px 14px',
+          borderRadius: 10,
+          border: `1px solid ${resetState.status === 'failed' ? '#FECACA' : resetState.status === 'sent' ? '#BBF7D0' : '#C7D2FE'}`,
+          background: resetState.status === 'failed' ? '#FEF2F2' : resetState.status === 'sent' ? '#F0FDF4' : '#EEF2FF',
+          color: resetState.status === 'failed' ? '#991B1B' : resetState.status === 'sent' ? '#166534' : '#3730A3',
+          fontSize: 12.5,
+          fontWeight: 600,
+        }}>
+          {resetState.message}
+        </div>
+      )}
 
       {/* Primary HR Admin */}
       <div style={{ background: '#F0FDF4', border: '1.5px solid #BBF7D0', borderRadius: 10, padding: '12px 16px', marginBottom: 24, display: 'flex', alignItems: 'center', gap: 12 }}>
@@ -3686,31 +5269,39 @@ export default function HRCycleDashboard() {
   // Runs whenever the employee list or org changes. Skips employees that already have credentials
   // (preserves any permanent passwords they've already set).
   useEffect(() => {
+    let cancelled = false;
     const tempPass = org?.temporaryPassword;
-    if (!tempPass || !liveEmployees.length) return;
-    const existing = readEmployeeCredentialsSync();
-    let changed = false;
-    liveEmployees.forEach((emp) => {
-      const code = String(emp['Employee Code'] || '').trim();
-      const email = String(resolveEmployeeEmail(emp) || '').trim().toLowerCase();
-      if (code && !existing[code]) {
-        existing[code] = {
-          password: tempPass,
-          name: emp['Employee Name'] || '',
-          email,
-          empCode: code,
-          designation: emp.Designation || emp.Role || '',
-          managerCode: emp['Reporting Manager Code'] || '',
-          orgKey: orgKey || '',
-          isTemp: true,
-        };
-        changed = true;
-      } else if (code && email && existing[code] && existing[code].email !== email) {
-        existing[code] = { ...existing[code], email };
-        changed = true;
+    if (!tempPass || !liveEmployees.length) return undefined;
+
+    (async () => {
+      const existing = readEmployeeCredentialsSync();
+      let changed = false;
+      for (const emp of liveEmployees) {
+        const code = String(emp['Employee Code'] || '').trim();
+        const email = String(resolveEmployeeEmail(emp) || '').trim().toLowerCase();
+        if (code && !existing[code]) {
+          existing[code] = {
+            passwordHash: await hashPasswordValue(tempPass),
+            name: emp['Employee Name'] || '',
+            email,
+            empCode: code,
+            designation: emp.Designation || emp.Role || '',
+            managerCode: emp['Reporting Manager Code'] || '',
+            orgKey: orgKey || '',
+            isTemp: true,
+          };
+          changed = true;
+        } else if (code && email && existing[code] && existing[code].email !== email) {
+          existing[code] = { ...existing[code], email };
+          changed = true;
+        }
       }
-    });
-    if (changed) persistEmployeeCredentials(existing);
+      if (!cancelled && changed) persistEmployeeCredentials(existing);
+    })();
+
+    return () => {
+      cancelled = true;
+    };
   }, [liveEmployees, org?.temporaryPassword, orgKey]);
 
   function handleEmpUpdate(updated) {
@@ -3720,6 +5311,13 @@ export default function HRCycleDashboard() {
       setConfig(nextConfig);
       saveWizardConfig(orgKey, nextConfig);
     }
+  }
+
+  function handleConfigPatch(patch) {
+    if (!config) return;
+    const nextConfig = { ...config, ...patch };
+    setConfig(nextConfig);
+    saveWizardConfig(orgKey, nextConfig);
   }
 
   // ── Truth-source bridge ────────────────────────────────────────────────────
@@ -3998,14 +5596,17 @@ export default function HRCycleDashboard() {
             <ModuleOverview employees={empsForModules} groups={groups} orgName={org.name} congratsDismissed={congratsDismissed} onDismiss={() => setCongratsDismissed(true)} showConfetti={showConfetti} />
           )}
           {activeModule === 'emp-status' && <ModuleEmpStatus employees={empsForModules} groups={groups} orgKey={orgKey} org={org} />}
-          {activeModule === 'comms'      && <ModuleComms     employees={empsForModules} groups={groups} org={org} />}
+          {activeModule === 'comms'      && <ModuleComms     employees={empsForModules} groups={groups} org={org} config={config} onUpdate={handleEmpUpdate} onConfigPatch={handleConfigPatch} orgKey={orgKey} />}
           {activeModule === 'stage'      && <ModuleStageControl  employees={empsForModules} onUpdate={handleEmpUpdate} orgKey={orgKey} />}
-          {activeModule === 'mgr-change' && <ModuleMgrChange     employees={empsForModules} onUpdate={handleEmpUpdate} />}
+          {activeModule === 'mgr-change' && <ModuleMgrChange     employees={empsForModules} config={config} onUpdate={handleEmpUpdate} />}
           {activeModule === 'grp-transfer' && <ModuleGrpTransfer employees={empsForModules} groups={groups} onUpdate={handleEmpUpdate} />}
           {activeModule === 'roster'     && <ModuleRoster employees={empsForModules} config={config} onUpdate={handleEmpUpdate} />}
           {activeModule === 'test-creds' && <ModuleTestCreds employees={empsForModules} org={org} orgKey={orgKey} />}
           {activeModule === 'hr-team' && !isScopedHR && (
             <ModuleHRTeam org={org} orgKey={orgKey} employees={liveEmployeesWithStage} groups={groups} onOrgChange={onHRTeamChange} />
+          )}
+          {activeModule === 'email-settings' && !isScopedHR && (
+            <ModuleEmailSettings org={org} orgKey={orgKey} />
           )}
           {activeModule === 'config' && !isScopedHR && (
             <ModuleConfig
