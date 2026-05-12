@@ -242,21 +242,12 @@ async function getMicrosoftAccessToken(payload: Payload, cryptoSecret: string) {
 async function verifyMicrosoft(payload: Payload, cryptoSecret: string) {
   const senderEmail = payload.from_email || ''
   if (!senderEmail) throw new Error('Sender email (from email) is required for Microsoft.')
-  const token = await getMicrosoftAccessToken(payload, cryptoSecret)
-  const probe = await fetch(
-    `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(senderEmail)}?$select=id,mail,userPrincipalName`,
-    { headers: { Authorization: `Bearer ${token}` } },
-  )
-  if (!probe.ok) {
-    const detail = await probe.text()
-    if (probe.status === 404) {
-      throw new Error(`Mailbox "${senderEmail}" was not found in this Microsoft tenant.`)
-    }
-    if (probe.status === 401 || probe.status === 403) {
-      throw new Error(`Microsoft denied access (${probe.status}). Ensure the app has Mail.Send application permission with admin consent. Detail: ${detail}`)
-    }
-    throw new Error(`Microsoft Graph probe failed (HTTP ${probe.status}): ${detail}`)
-  }
+  // We only need Mail.Send for actually sending. Probing /users/{email} would
+  // require User.Read.All, which is a separate (and unnecessary) permission —
+  // it caused valid Mail.Send-only configs to fail verification with 403. So
+  // we treat "we successfully obtained a token" as the verification signal.
+  // If the credentials are wrong, getMicrosoftAccessToken throws below.
+  await getMicrosoftAccessToken(payload, cryptoSecret)
 }
 
 async function sendMicrosoftTestEmail(
@@ -440,15 +431,25 @@ async function getServerSession(client: ReturnType<typeof createClient>, token: 
   return payload
 }
 
+async function deleteServerSession(client: ReturnType<typeof createClient>, token: string) {
+  await client
+    .from('app_state')
+    .delete()
+    .eq('state_key', `server_session:${token}`)
+    .eq('org_key', '')
+}
+
 async function requireAuthorizedSession(
   client: ReturnType<typeof createClient>,
   token: string,
   organizationKey: string,
+  action: string,
 ) {
   const payload = await getServerSession(client, token)
   if (!payload) return { ok: false, error: 'Server session is missing or expired.' }
   const expiresAt = String(payload.expiresAt || '')
   if (expiresAt && Date.now() > Date.parse(expiresAt)) {
+    await deleteServerSession(client, token)
     return { ok: false, error: 'Server session has expired.' }
   }
   const role = String(payload.role || '')
@@ -457,6 +458,12 @@ async function requireAuthorizedSession(
   }
   if (role !== 'super-admin' && String(payload.orgKey || '') !== organizationKey) {
     return { ok: false, error: 'This session is not allowed to manage another organization.' }
+  }
+  if (payload.isScopedHR === true) {
+    return { ok: false, error: 'Scoped HR sessions cannot manage provider settings.' }
+  }
+  if (action === 'save' && role !== 'super-admin' && payload.isScopedHR === true) {
+    return { ok: false, error: 'Only the primary HR admin, co-admins, or super admin can change email provider settings.' }
   }
   return { ok: true, payload }
 }
@@ -483,12 +490,14 @@ async function logAudit(
   client: ReturnType<typeof createClient>,
   orgKey: string,
   actionType: string,
+  actor: Record<string, unknown> | null,
   details: Record<string, unknown> = {},
 ) {
   await client.from('app_audit_logs').insert({
     org_key: orgKey,
-    actor_role: 'system-function',
-    actor_name: 'email-config',
+    actor_role: String(actor?.role || 'system-function'),
+    actor_code: String(actor?.empCode || actor?.hrTeamId || ''),
+    actor_name: String(actor?.userName || 'email-config'),
     action_type: actionType,
     target_type: 'email-smtp-settings',
     details,
@@ -527,10 +536,11 @@ Deno.serve(async (req: Request) => {
   }
 
   const adminClient = createClient(supabaseUrl, serviceRoleKey)
-  const sessionCheck = await requireAuthorizedSession(adminClient, serverSessionToken, organizationKey)
+  const sessionCheck = await requireAuthorizedSession(adminClient, serverSessionToken, organizationKey, action)
   if (!sessionCheck.ok) {
     return json(403, { ok: false, error: sessionCheck.error })
   }
+  const sessionPayload = sessionCheck.payload || null
   const org = await getOrganization(adminClient, organizationKey)
   if (!org?.id) return json(404, { ok: false, error: 'Organization not found.' })
 
@@ -548,7 +558,7 @@ Deno.serve(async (req: Request) => {
       .from('email_smtp_settings')
       .upsert(payload, { onConflict: 'organization_id' })
     if (error) return json(500, { ok: false, error: error.message })
-    await logAudit(adminClient, organizationKey, 'email-settings-save', {
+    await logAudit(adminClient, organizationKey, 'email-settings-save', sessionPayload, {
       provider: payload.provider,
       isEnabled: payload.is_enabled,
       fromEmail: payload.from_email,
@@ -570,7 +580,7 @@ Deno.serve(async (req: Request) => {
       } else if (payload.provider === 'google') {
         await verifyGoogle(payload, cryptoSecret)
       }
-      await logAudit(adminClient, organizationKey, 'email-settings-verify', {
+      await logAudit(adminClient, organizationKey, 'email-settings-verify', sessionPayload, {
         provider: payload.provider,
         fromEmail: payload.from_email,
       })
@@ -602,7 +612,7 @@ Deno.serve(async (req: Request) => {
         const out = await sendGoogleTestEmail(payload, cryptoSecret, recipientEmail, org.name || organizationKey)
         messageId = out.messageId
       }
-      await logAudit(adminClient, organizationKey, 'email-test-send', {
+      await logAudit(adminClient, organizationKey, 'email-test-send', sessionPayload, {
         provider: payload.provider,
         recipientEmail,
         messageId,

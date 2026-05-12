@@ -1,6 +1,7 @@
 import { useState, useEffect, Component, lazy, Suspense } from 'react';
 import { AppProvider, useApp } from './AppContext';
 import { readWizardStateSync, syncEmployeeCredentialsForOrg } from './backend/stateStore';
+import { logAuditEvent } from './backend/auditLog';
 import LoginPage from './pages/LoginPage';
 import DashboardPage from './pages/DashboardPage';
 import OrganizationsPage from './pages/OrganizationsPage';
@@ -133,7 +134,7 @@ function BootScreen() {
 }
 
 function Router() {
-  const { role, orgKey, orgs, authReady, setOrgs } = useApp();
+  const { role, orgKey, orgs, authReady, setOrgs, userName } = useApp();
   const [route, setRoute] = useState(getRoute);
 
   useEffect(() => {
@@ -168,7 +169,6 @@ function Router() {
   if (role === 'hr-admin') {
     const org = orgs.find((o) => o.key === orgKey);
     const orgName = org?.name || 'Assigned Organization';
-
     if (org?.launched) {
       return <HRCycleDashboard />;
     }
@@ -176,10 +176,31 @@ function Router() {
     function handleLaunched() {
       const updated = orgs.map((o) =>
         o.key === orgKey
-          ? { ...o, launched: true, currentPhase: 'goal-setting', setupPct: 100, status: 'Active', statusBadgeClass: 'badge-green', actionLabel: 'Manage', setupColor: '#16A34A' }
+          ? {
+              ...o,
+              launched: true,
+              setupStatus: 'launched',
+              setupReopened: false,
+              setupReopenedAt: null,
+              setupReopenedBy: null,
+              currentPhase: 'goal-setting',
+              setupPct: 100,
+              status: 'Active',
+              statusBadgeClass: 'badge-green',
+              actionLabel: 'Manage',
+              setupColor: '#16A34A',
+            }
           : o
       );
       setOrgs(updated);
+      void logAuditEvent({
+        orgKey: orgKey || '',
+        actorRole: 'hr-admin',
+        actorName: userName || 'HR Admin',
+        actionType: 'setup-launched',
+        targetType: 'organization',
+        targetCode: orgKey || '',
+      });
 
       const org = orgs.find((o) => o.key === orgKey);
       const tempPass = org?.temporaryPassword;

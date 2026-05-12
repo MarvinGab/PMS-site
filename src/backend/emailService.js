@@ -1,29 +1,66 @@
 import { shouldUseSupabase, supabaseEnv } from './config';
 import { readAuthSessionSync } from './stateStore';
 import {
-  renderAdminInviteEmailHtml,
-  renderAdminInviteEmailText,
   renderThemedEmailHtml,
   renderThemedEmailText,
   resolveTokens,
 } from './emailRenderer';
 
-function getWorkspaceLoginUrl(org) {
+function getWorkspaceLoginUrl(org, identifier = '') {
   const slug = String(org?.workspaceSlug || '').trim();
   const domain = String(org?.domain || '').trim().toLowerCase();
+  const loginIdentifier = String(identifier || '').trim().toLowerCase();
+  const loginParam = loginIdentifier ? `login=${encodeURIComponent(loginIdentifier)}` : '';
 
   if (typeof window !== 'undefined') {
     const { origin, hostname } = window.location;
     const isLocalhost = hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '0.0.0.0';
     if (isLocalhost) {
-      const workspaceParam = slug ? `?workspace=${encodeURIComponent(slug)}` : '';
-      return `${origin}/${workspaceParam}#login`;
+      const params = new URLSearchParams();
+      if (slug) params.set('workspace', slug);
+      if (loginIdentifier) params.set('login', loginIdentifier);
+      const query = params.toString();
+      return `${origin}/${query ? `?${query}` : ''}#login`;
     }
   }
 
-  if (domain) return `https://${domain}/#login`;
-  if (slug)   return `https://${slug}.zarohr.com/#login`;
-  return 'https://zarohr.com/#login';
+  const suffix = loginParam ? `?${loginParam}` : '';
+  if (domain) return `https://${domain}/${suffix}#login`;
+  if (slug)   return `https://${slug}.zarohr.com/${suffix}#login`;
+  return `https://zarohr.com/${suffix}#login`;
+}
+
+function isDefaultPlatformLogo(url) {
+  const value = String(url || '').toLowerCase();
+  return (
+    !value
+    || value.includes('defaults/zaro-logo')
+    || value.includes('final%20zaro')
+    || value.includes('final zaro')
+    || value.includes('/src/')
+    || value.includes('@vite')
+  );
+}
+
+function getOrgBrandedTheme(org, theme = {}) {
+  const base = theme && typeof theme === 'object' ? theme : {};
+  const orgLogo = String(org?.brandEmailLogo || org?.brandLogo || org?.brandLogoUrl || '').trim();
+  const themeLogo = String(base.logo || '').trim();
+  // Explicit theme choice always wins; only fall back to the org's brand
+  // logo when no theme logo is set AND the user has not explicitly cleared it.
+  const userCleared = base.logoCleared === true;
+  const logo = userCleared ? null : (themeLogo || orgLogo || null);
+  const palette = org?.brandPalette && typeof org.brandPalette === 'object' ? org.brandPalette : {};
+  const brand = base.brand || palette.primary || palette.brand || palette.accent || '#4F46E5';
+  return {
+    ...base,
+    brand,
+    brandName: base.brandName || org?.brandName || org?.name || 'Zaro HR',
+    logo,
+    logoDisplay: base.logoDisplay || (logo ? 'logo' : 'text'),
+    logoPosition: base.logoPosition || 'header-left',
+    logoSize: base.logoSize || 'medium',
+  };
 }
 
 async function invokeEmailFunction(body) {
@@ -77,8 +114,8 @@ export async function sendHrAdminInviteEmail(org, options = {}) {
     return { ok: false, error: 'Missing organization key or HR admin email.' };
   }
 
-  const loginUrl = getWorkspaceLoginUrl(org);
   const recipientEmail = String(org.hrAdminEmail || '').trim().toLowerCase();
+  const loginUrl = getWorkspaceLoginUrl(org, recipientEmail);
   const adminName = org.hrAdminName || 'HR Admin';
   const supportEmail = options.supportEmail || 'support@zarohr.com';
 
@@ -96,40 +133,47 @@ export async function sendHrAdminInviteEmail(org, options = {}) {
     },
   };
 
-  // If a theme + draft (subject/body) was passed in, render it client-side and
-  // ship it as an override so the same designed look reaches the inbox.
+  // WYSIWYG: render the SuperAdmin's edited subject + body through the same
+  // themed renderer used for every other Communications template, so what they
+  // see in the preview is exactly what lands in the inbox. The old hardcoded
+  // "What happens next / If you didn't expect" layout was overriding their
+  // edits — gone.
   if (options.theme && options.template) {
+    // SuperAdmin's preview header shows only the subject — no uppercase
+    // label band. Force-empty headerLabel here so saved local state from
+    // earlier sessions can't reintroduce it on send.
+    const themeWithSuppressedLabel = { ...options.theme, headerLabel: '' };
+    const theme = getOrgBrandedTheme(org, themeWithSuppressedLabel);
     const tokens = {
       organization_name: org.name || 'Your organization',
+      company: org.name || 'Your organization',
       admin_name: adminName,
       first_name: String(adminName || '').trim().split(/\s+/).filter(Boolean)[0] || 'there',
       workspace_domain: org.domain || '',
       recipient_email: recipientEmail,
       temporary_password: org.temporaryPassword || '',
+      password: org.temporaryPassword || '',
       login_url: loginUrl,
-      // Re-export with hr_admin_name so the existing tokens defined in the
-      // Communications composer keep working.
+      workspace_url: loginUrl,
+      support_email: supportEmail,
+      // Re-export under HR-side token names so existing composer drafts using
+      // {employee_name} / {hr_admin_name} continue to resolve.
       employee_name: adminName,
       hr_admin_name: adminName,
     };
     message.subjectOverride = resolveTokens(options.template.subject || '', tokens);
-    message.htmlOverride = renderAdminInviteEmailHtml({
-      companyName: org.name || 'Your organization',
-      firstName: tokens.first_name || adminName,
-      loginEmail: recipientEmail,
-      tempPassword: org.temporaryPassword || '',
-      workspaceUrl: loginUrl,
-      supportEmail,
-      theme: options.theme,
-      blocks: options.template.blocks || null,
+    message.htmlOverride = renderThemedEmailHtml({
+      theme,
+      subject: options.template.subject || '',
+      body: options.template.body || '',
+      orgName: org.name || '',
+      tokens,
+      loginUrl,
     });
-    message.textOverride = renderAdminInviteEmailText({
-      companyName: org.name || 'Your organization',
-      firstName: tokens.first_name || adminName,
-      loginEmail: recipientEmail,
-      tempPassword: org.temporaryPassword || '',
-      workspaceUrl: loginUrl,
-      supportEmail,
+    message.textOverride = renderThemedEmailText({
+      subject: options.template.subject || '',
+      body: options.template.body || '',
+      tokens,
     });
   }
 
@@ -140,9 +184,9 @@ export async function sendHrAdminInviteEmail(org, options = {}) {
 }
 
 export async function sendEmployeeInviteEmails({ org, employees = [], theme, template } = {}) {
-  const loginUrl = getWorkspaceLoginUrl(org);
   const temporaryPassword = String(org?.temporaryPassword || '');
   const useOverride = !!(theme && template);
+  const effectiveTheme = useOverride ? getOrgBrandedTheme(org, theme) : null;
 
   const messages = (Array.isArray(employees) ? employees : [])
     .map((employee) => {
@@ -158,6 +202,7 @@ export async function sendEmployeeInviteEmails({ org, employees = [], theme, tem
 
       if (!recipientEmail || !employeeCode) return null;
 
+      const loginUrl = getWorkspaceLoginUrl(org, recipientEmail);
       const employeeName = String(employee?.['Employee Name'] || '').trim() || employeeCode;
       const managerName = String(employee?.['Reporting Manager Name'] || '').trim();
 
@@ -188,7 +233,7 @@ export async function sendEmployeeInviteEmails({ org, employees = [], theme, tem
         };
         message.subjectOverride = resolveTokens(template.subject || '', tokens);
         message.htmlOverride = renderThemedEmailHtml({
-          theme,
+          theme: effectiveTheme,
           subject: template.subject || '',
           body: template.body || '',
           orgName: org?.name || '',
@@ -219,16 +264,38 @@ export async function sendEmployeeInviteEmails({ org, employees = [], theme, tem
   });
 }
 
-export async function sendManagerSummaryEmails({ org, employees = [], theme, template } = {}) {
+export async function sendManagerSummaryEmails({ org, employees = [], theme, template, recipientFilter = null } = {}) {
   if (!org?.key) return { ok: false, error: 'Organization key is missing.' };
+  const effectiveTheme = theme && template ? getOrgBrandedTheme(org, theme) : null;
 
+  const list = Array.isArray(employees) ? employees : [];
+
+  // Index roster by code so managers who are also uploaded employees use their
+  // OWN Email ID, not whatever was stamped on a reportee's row.
+  const rosterByCode = new Map();
+  list.forEach((emp) => {
+    const code = String(emp?.['Employee Code'] || '').trim().toLowerCase();
+    if (code) rosterByCode.set(code, emp);
+  });
+
+  // Dedupe by manager CODE so two managers with the same email don't collapse.
   const managers = new Map();
-  (Array.isArray(employees) ? employees : []).forEach((employee) => {
-    const managerEmail = String(employee?.['Reporting Manager Email'] || '').trim().toLowerCase();
-    if (!managerEmail) return;
+  list.forEach((employee) => {
+    const rawCode = String(employee?.['Reporting Manager Code'] || '').trim();
+    const code = rawCode.toLowerCase();
+    const stampedEmail = String(employee?.['Reporting Manager Email'] || '').trim().toLowerCase();
+    const managerEmp = code ? rosterByCode.get(code) : null;
+    const ownEmail = String(managerEmp?.['Email ID'] || managerEmp?.Email || '').trim().toLowerCase();
+    const email = ownEmail || stampedEmail;
+    if (!email) return; // Can't send without an address.
 
-    const entry = managers.get(managerEmail) || {
-      managerName: String(employee?.['Reporting Manager Name'] || '').trim() || managerEmail,
+    const key = code || `email:${email}`;
+    const entry = managers.get(key) || {
+      recipientEmail: email,
+      managerName:
+        String(managerEmp?.['Employee Name'] || '').trim()
+        || String(employee?.['Reporting Manager Name'] || '').trim()
+        || email,
       reportees: [],
     };
     entry.reportees.push({
@@ -236,12 +303,20 @@ export async function sendManagerSummaryEmails({ org, employees = [], theme, tem
       employeeName: String(employee?.['Employee Name'] || '').trim(),
       designation: String(employee?.Designation || employee?.Role || '').trim(),
     });
-    managers.set(managerEmail, entry);
+    managers.set(key, entry);
   });
 
-  const loginUrl = getWorkspaceLoginUrl(org);
   const useOverride = !!(theme && template);
-  const messages = [...managers.entries()].map(([recipientEmail, value]) => {
+  const filterSet = recipientFilter instanceof Set
+    ? recipientFilter
+    : Array.isArray(recipientFilter)
+    ? new Set(recipientFilter.map((e) => String(e || '').trim().toLowerCase()).filter(Boolean))
+    : null;
+  const messages = [...managers.values()]
+    .filter((value) => !filterSet || filterSet.has(value.recipientEmail))
+    .map((value) => {
+    const recipientEmail = value.recipientEmail;
+    const loginUrl = getWorkspaceLoginUrl(org, recipientEmail);
     const message = {
       type: 'manager-summary',
       recipientEmail,
@@ -268,15 +343,19 @@ export async function sendManagerSummaryEmails({ org, employees = [], theme, tem
         recipient_email: recipientEmail,
         employee_name: value.managerName,
       };
+      // Only append the formatted list as an extra block when the template
+      // body doesn't already include {reportee_list} — otherwise the list
+      // would render twice (once inline as bullets, once again as extras).
+      const bodyHasReporteeToken = /\{reportee_list\}/.test(template.body || '');
       message.subjectOverride = resolveTokens(template.subject || '', tokens);
       message.htmlOverride = renderThemedEmailHtml({
-        theme,
+        theme: effectiveTheme,
         subject: template.subject || '',
         body: template.body || '',
         orgName: org?.name || '',
         tokens,
         loginUrl,
-        extrasHtml: reporteeListHtml,
+        extrasHtml: bodyHasReporteeToken ? '' : reporteeListHtml,
       });
       message.textOverride = renderThemedEmailText({
         subject: template.subject || '',
@@ -314,8 +393,8 @@ export async function sendCustomBroadcast({ org, recipients = [], theme, templat
   if (!theme || !template) return { ok: false, error: 'Theme and template are required.' };
   if (!template.subject || !template.body) return { ok: false, error: 'Subject and body are required.' };
 
-  const loginUrl = getWorkspaceLoginUrl(org);
   const temporaryPassword = String(org?.temporaryPassword || '');
+  const effectiveTheme = getOrgBrandedTheme(org, theme);
 
   const messages = (Array.isArray(recipients) ? recipients : [])
     .map((rcpt) => {
@@ -323,6 +402,7 @@ export async function sendCustomBroadcast({ org, recipients = [], theme, templat
         rcpt?.['Email ID'] || rcpt?.Email || rcpt?.email || ''
       ).trim().toLowerCase();
       if (!recipientEmail) return null;
+      const loginUrl = getWorkspaceLoginUrl(org, recipientEmail);
       const employeeCode = String(rcpt?.['Employee Code'] || '').trim();
       const employeeName = String(rcpt?.['Employee Name'] || '').trim() || employeeCode || recipientEmail;
       const baseTokens = {
@@ -344,7 +424,7 @@ export async function sendCustomBroadcast({ org, recipients = [], theme, templat
         payload: { organizationName: org?.name || 'Your organization' },
         subjectOverride: resolveTokens(template.subject, tokens),
         htmlOverride: renderThemedEmailHtml({
-          theme,
+          theme: effectiveTheme,
           subject: template.subject,
           body: template.body,
           orgName: org?.name || '',

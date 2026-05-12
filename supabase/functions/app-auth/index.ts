@@ -1,3 +1,4 @@
+import nodemailer from 'npm:nodemailer@6.10.1'
 import { createClient } from 'npm:@supabase/supabase-js@2.57.4'
 
 const corsHeaders = {
@@ -12,6 +13,7 @@ const SUPER_ADMIN_EMAIL = 'admin@zarohr.com'
 const SUPER_ADMIN_PASSWORD = 'admin123'
 
 type OrgRow = {
+  id: string
   org_key: string
   name: string | null
   hr_admin_name: string | null
@@ -40,6 +42,12 @@ function fromBase64(value: string) {
   const bytes = new Uint8Array(binary.length)
   for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index)
   return bytes
+}
+
+function toBase64(bytes: Uint8Array) {
+  let binary = ''
+  bytes.forEach((byte) => { binary += String.fromCharCode(byte) })
+  return btoa(binary)
 }
 
 async function deriveBits(password: string, saltBytes: Uint8Array, iterations: number) {
@@ -75,10 +83,26 @@ async function verifyPasswordValue(password: string, storedHash: string) {
   return mismatch === 0
 }
 
+async function matchesSuperAdminCredentials(identifier: string, password: string) {
+  const envEmail = normalizeLower(Deno.env.get('APP_AUTH_SUPER_ADMIN_EMAIL') || '')
+  const envPassword = String(Deno.env.get('APP_AUTH_SUPER_ADMIN_PASSWORD') || '')
+  const envPasswordHash = String(Deno.env.get('APP_AUTH_SUPER_ADMIN_PASSWORD_HASH') || '')
+  const normalized = normalizeLower(identifier)
+
+  if (envEmail) {
+    if (normalized !== envEmail) return false
+    if (envPasswordHash) return await verifyPasswordValue(password, envPasswordHash)
+    if (envPassword) return password === envPassword
+    return false
+  }
+
+  return normalized === SUPER_ADMIN_EMAIL && password === SUPER_ADMIN_PASSWORD
+}
+
 async function getOrganizations(client: ReturnType<typeof createClient>) {
   const { data, error } = await client
     .from('organizations')
-    .select('org_key, name, hr_admin_name, hr_admin_email, setup_payload')
+    .select('id, org_key, name, hr_admin_name, hr_admin_email, setup_payload')
   if (error) throw error
   return (data || []) as OrgRow[]
 }
@@ -94,6 +118,14 @@ async function getCredentialBlob(client: ReturnType<typeof createClient>) {
   return (data?.payload && typeof data.payload === 'object') ? data.payload as Record<string, Record<string, unknown>> : {}
 }
 
+async function deleteServerSession(client: ReturnType<typeof createClient>, token: string) {
+  await client
+    .from('app_state')
+    .delete()
+    .eq('state_key', `server_session:${token}`)
+    .eq('org_key', '')
+}
+
 function getHrTeam(org: OrgRow) {
   const setupPayload = org.setup_payload && typeof org.setup_payload === 'object' ? org.setup_payload : null
   const orgData = setupPayload?.orgData
@@ -106,7 +138,7 @@ function getHrTeam(org: OrgRow) {
 async function resolveServerLogin(client: ReturnType<typeof createClient>, identifier: string, password: string) {
   const normalized = normalizeLower(identifier)
 
-  if (normalized === SUPER_ADMIN_EMAIL && password === SUPER_ADMIN_PASSWORD) {
+  if (await matchesSuperAdminCredentials(normalized, password)) {
     return { role: 'super-admin', userName: 'Super Admin' }
   }
 
@@ -120,12 +152,24 @@ async function resolveServerLogin(client: ReturnType<typeof createClient>, ident
       const primaryCredential = credentials?.[normalized]
       const primaryStoredSecret = String(primaryCredential?.passwordHash || primaryCredential?.password || '')
       if (primaryStoredSecret && await verifyPasswordValue(password, primaryStoredSecret)) {
-        return { role: 'hr-admin', orgKey: org.org_key, userName: org.hr_admin_name || 'HR Admin' }
+        return {
+          role: 'hr-admin',
+          orgKey: org.org_key,
+          userName: org.hr_admin_name || 'HR Admin',
+          isTemp: !!primaryCredential?.isTemp,
+          credentialKey: normalized,
+        }
       }
       const setupPayload = org.setup_payload && typeof org.setup_payload === 'object' ? org.setup_payload : null
       const tempPassword = String((setupPayload?.orgData as Record<string, unknown> | undefined)?.temporaryPassword || '')
       if (tempPassword && tempPassword === password) {
-        return { role: 'hr-admin', orgKey: org.org_key, userName: org.hr_admin_name || 'HR Admin' }
+        return {
+          role: 'hr-admin',
+          orgKey: org.org_key,
+          userName: org.hr_admin_name || 'HR Admin',
+          isTemp: true,
+          credentialKey: normalized,
+        }
       }
     }
 
@@ -144,6 +188,22 @@ async function resolveServerLogin(client: ReturnType<typeof createClient>, ident
           isScopedHR: member.type === 'scoped-hr',
           hrTeamId: String(member.id || ''),
           allowedModules: Array.isArray(member.allowedModules) ? member.allowedModules : null,
+          isTemp: !!credential?.isTemp,
+          credentialKey: email,
+        }
+      }
+      const tempPassword = String(member.password || '')
+      if (!credential && tempPassword && tempPassword === password) {
+        return {
+          role: 'hr-admin',
+          orgKey: org.org_key,
+          userName: String(member.name || ''),
+          isCoAdmin: member.type === 'co-admin',
+          isScopedHR: member.type === 'scoped-hr',
+          hrTeamId: String(member.id || ''),
+          allowedModules: Array.isArray(member.allowedModules) ? member.allowedModules : null,
+          isTemp: true,
+          credentialKey: email,
         }
       }
     }
@@ -209,11 +269,477 @@ async function issueSession(client: ReturnType<typeof createClient>, user: Recor
 }
 
 async function revokeSession(client: ReturnType<typeof createClient>, token: string) {
+  await deleteServerSession(client, token)
+}
+
+async function inspectSession(client: ReturnType<typeof createClient>, token: string) {
+  const { data, error } = await client
+    .from('app_state')
+    .select('payload')
+    .eq('state_key', `server_session:${token}`)
+    .eq('org_key', '')
+    .maybeSingle()
+  if (error) throw error
+  const payload = data?.payload && typeof data.payload === 'object' ? data.payload as Record<string, unknown> : null
+  if (!payload) return { ok: false, error: 'Server session is missing or expired.' }
+  const expiresAt = String(payload.expiresAt || '')
+  if (expiresAt && Date.now() > Date.parse(expiresAt)) {
+    await deleteServerSession(client, token)
+    return { ok: false, error: 'Server session has expired.' }
+  }
+  return { ok: true, payload }
+}
+
+async function hashPasswordValue(password: string) {
+  const iterations = 120000
+  const saltBytes = crypto.getRandomValues(new Uint8Array(16))
+  const digest = await deriveBits(password, saltBytes, iterations)
+  return `pbkdf2$${iterations}$${toBase64(saltBytes)}$${toBase64(digest)}`
+}
+
+// ─── Password reset (OTP) helpers ────────────────────────────────────────
+const RESET_CODE_TTL_MS = 1000 * 60 * 15
+const RESET_PREFIX = 'password_reset:'
+const RESET_REQUEST_COOLDOWN_MS = 1000 * 60
+
+function normalizeIdentifierForKey(value: string) {
+  return normalizeLower(value)
+}
+
+function generateSixDigitCode() {
+  // Crypto-secure random 6-digit number, padded.
+  const buf = crypto.getRandomValues(new Uint32Array(1))
+  const n = buf[0] % 1_000_000
+  return n.toString().padStart(6, '0')
+}
+
+function formatCodeWithHyphen(code: string) {
+  return `${code.slice(0, 3)}-${code.slice(3)}`
+}
+
+function constantTimeEqual(a: string, b: string) {
+  if (a.length !== b.length) return false
+  let mismatch = 0
+  for (let i = 0; i < a.length; i += 1) mismatch |= a.charCodeAt(i) ^ b.charCodeAt(i)
+  return mismatch === 0
+}
+
+type CredentialLookup = {
+  credentialKey: string
+  recipientEmail: string
+  displayName: string
+  kind: 'employee' | 'hr-admin'
+  orgKey: string
+  employeeCode?: string
+  missingEmail?: boolean
+}
+
+async function locateCredentialByIdentifier(
+  client: ReturnType<typeof createClient>,
+  identifier: string,
+  organizationKey: string,
+): Promise<CredentialLookup | null> {
+  const normalized = normalizeLower(identifier)
+  if (!normalized || !organizationKey) return null
+
+  const [orgs, credentials] = await Promise.all([
+    getOrganizations(client),
+    getCredentialBlob(client),
+  ])
+
+  const targetOrg = orgs.find((o) => o.org_key === organizationKey)
+  if (!targetOrg) return null
+
+  // 1) HR admin: identifier matches the org's hr_admin_email
+  if (normalizeLower(targetOrg.hr_admin_email) === normalized) {
+    return {
+      credentialKey: normalized,
+      recipientEmail: normalized,
+      displayName: targetOrg.hr_admin_name || 'HR Admin',
+      kind: 'hr-admin',
+      orgKey: targetOrg.org_key,
+    }
+  }
+  // 2) HR co-admin / scoped HR within this org
+  for (const member of getHrTeam(targetOrg)) {
+    if (member.isInPMS) continue
+    const email = normalizeLower(member.email)
+    if (email && email === normalized) {
+      return {
+        credentialKey: email,
+        recipientEmail: email,
+        displayName: String(member.name || 'HR'),
+        kind: 'hr-admin',
+        orgKey: targetOrg.org_key,
+      }
+    }
+  }
+
+  // 3) Employee in this org: identifier may be empCode OR email
+  const codeKey = normalizeCode(identifier)
+  const candidateByCode = credentials[codeKey]
+  if (candidateByCode && String(candidateByCode.orgKey || '') === targetOrg.org_key) {
+    const email = normalizeLower(candidateByCode.email)
+    return {
+      credentialKey: codeKey,
+      recipientEmail: email,
+      displayName: String(candidateByCode.name || codeKey),
+      kind: 'employee',
+      orgKey: targetOrg.org_key,
+      employeeCode: codeKey,
+      missingEmail: !email,
+    }
+  }
+  const found = Object.entries(credentials).find(([, value]) =>
+    normalizeLower(value?.email) === normalized
+    && String(value?.orgKey || '') === targetOrg.org_key,
+  )
+  if (found) {
+    const [key, c] = found
+    const email = normalizeLower(c?.email)
+    if (email) {
+      return {
+        credentialKey: key,
+        recipientEmail: email,
+        displayName: String(c?.name || key),
+        kind: 'employee',
+        orgKey: targetOrg.org_key,
+        employeeCode: normalizeCode(c?.empCode || key),
+      }
+    }
+  }
+
+  const { data: employeeRow, error: employeeErr } = await client
+    .from('employees')
+    .select('employee_code, employee_name, email')
+    .eq('organization_id', targetOrg.id)
+    .or(`employee_code.eq.${codeKey},email.eq.${normalized}`)
+    .maybeSingle()
+  if (employeeErr) throw employeeErr
+  if (employeeRow) {
+    const employeeCode = normalizeCode(employeeRow.employee_code)
+    const email = normalizeLower(employeeRow.email)
+    return {
+      credentialKey: employeeCode || normalized,
+      recipientEmail: email,
+      displayName: String(employeeRow.employee_name || employeeCode || normalized),
+      kind: 'employee',
+      orgKey: targetOrg.org_key,
+      employeeCode,
+      missingEmail: !email,
+    }
+  }
+
+  return null
+}
+
+async function suggestOrgsByQuery(
+  client: ReturnType<typeof createClient>,
+  query: string,
+) {
+  const trimmed = String(query || '').trim()
+  if (trimmed.length < 2) return []
+  const pattern = `%${trimmed.replace(/[%_]/g, (m) => `\\${m}`)}%`
+  const { data, error } = await client
+    .from('organizations')
+    .select('org_key, org_code, name')
+    .or(`name.ilike.${pattern},org_code.ilike.${pattern},org_key.ilike.${pattern}`)
+    .order('name', { ascending: true })
+    .limit(8)
+  if (error) throw error
+  return (data || []).map((row) => ({
+    key: String(row.org_key || ''),
+    code: String(row.org_code || ''),
+    name: String(row.name || ''),
+  }))
+}
+
+async function updateCredentialPassword(
+  client: ReturnType<typeof createClient>,
+  credentialKey: string,
+  newPasswordHash: string,
+  patch: Record<string, unknown> = {},
+) {
+  const credentials = await getCredentialBlob(client)
+  const existing = credentials[credentialKey] || {}
+  const next = {
+    ...credentials,
+    [credentialKey]: {
+      ...existing,
+      ...patch,
+      passwordHash: newPasswordHash,
+      isTemp: false,
+    },
+  }
+  // Strip any plaintext password if it was lingering
+  if (next[credentialKey] && 'password' in (next[credentialKey] as Record<string, unknown>)) {
+    delete (next[credentialKey] as Record<string, unknown>).password
+  }
+  const { error } = await client
+    .from('app_state')
+    .upsert(
+      { state_key: 'employee_credentials', org_key: '', payload: next },
+      { onConflict: 'state_key,org_key' },
+    )
+  if (error) throw error
+  return next[credentialKey] as Record<string, unknown>
+}
+
+async function locateCredentialForPasswordChange(
+  client: ReturnType<typeof createClient>,
+  { identifier, organizationKey, credentialKey }: { identifier: string; organizationKey: string; credentialKey: string },
+) {
+  const normalizedCredentialKey = normalizeLower(credentialKey)
+  const codeCredentialKey = normalizeCode(credentialKey)
+  const normalizedIdentifier = normalizeLower(identifier)
+  const codeIdentifier = normalizeCode(identifier)
+  const [orgs, credentials] = await Promise.all([
+    getOrganizations(client),
+    getCredentialBlob(client),
+  ])
+  const targetOrg = orgs.find((org) => org.org_key === organizationKey)
+  if (!targetOrg) return null
+
+  const primaryEmail = normalizeLower(targetOrg.hr_admin_email)
+  if (
+    primaryEmail
+    && (
+      normalizedCredentialKey === primaryEmail
+      || normalizedIdentifier === primaryEmail
+    )
+  ) {
+    return {
+      credentialKey: primaryEmail,
+      credential: credentials[primaryEmail] || null,
+      org: targetOrg,
+      kind: 'hr-admin',
+      patch: {
+        email: primaryEmail,
+        name: targetOrg.hr_admin_name || 'HR Admin',
+        orgKey: targetOrg.org_key,
+        isPrimaryHR: true,
+      },
+      fallbackTempPassword: String((targetOrg.setup_payload?.orgData as Record<string, unknown> | undefined)?.temporaryPassword || ''),
+    }
+  }
+
+  for (const member of getHrTeam(targetOrg)) {
+    if (member.isInPMS) continue
+    const email = normalizeLower(member.email)
+    if (!email) continue
+    if (normalizedCredentialKey === email || normalizedIdentifier === email) {
+      return {
+        credentialKey: email,
+        credential: credentials[email] || null,
+        org: targetOrg,
+        kind: 'hr-admin',
+        patch: {
+          email,
+          name: String(member.name || ''),
+          designation: member.type === 'co-admin' ? 'Co-Admin HR' : 'Scoped HR',
+          orgKey: targetOrg.org_key,
+          isHRTeam: true,
+          hrTeamType: member.type,
+        },
+        fallbackTempPassword: String(member.password || ''),
+      }
+    }
+  }
+
+  const directKeys = [codeCredentialKey, normalizedCredentialKey, codeIdentifier, normalizedIdentifier].filter(Boolean)
+  for (const key of directKeys) {
+    const credential = credentials[key]
+    if (credential && String(credential.orgKey || '') === targetOrg.org_key) {
+      return {
+        credentialKey: key,
+        credential,
+        org: targetOrg,
+        kind: 'employee',
+        patch: {
+          orgKey: targetOrg.org_key,
+          empCode: normalizeCode(credential.empCode || key),
+          email: normalizeLower(credential.email),
+          name: String(credential.name || ''),
+        },
+        fallbackTempPassword: '',
+      }
+    }
+  }
+
+  const found = Object.entries(credentials).find(([key, value]) => {
+    if (String(value?.orgKey || '') !== targetOrg.org_key) return false
+    return normalizeLower(value?.email) === normalizedIdentifier
+      || normalizeCode(value?.empCode || key) === codeIdentifier
+      || normalizeCode(value?.empCode || key) === codeCredentialKey
+  })
+  if (found) {
+    const [key, credential] = found
+    return {
+      credentialKey: key,
+      credential,
+      org: targetOrg,
+      kind: 'employee',
+      patch: {
+        orgKey: targetOrg.org_key,
+        empCode: normalizeCode(credential.empCode || key),
+        email: normalizeLower(credential.email),
+        name: String(credential.name || ''),
+      },
+      fallbackTempPassword: '',
+    }
+  }
+
+  return null
+}
+
+async function storeResetCode(
+  client: ReturnType<typeof createClient>,
+  identifierKey: string,
+  payload: Record<string, unknown>,
+) {
+  const { error } = await client
+    .from('app_state')
+    .upsert(
+      { state_key: `${RESET_PREFIX}${identifierKey}`, org_key: '', payload },
+      { onConflict: 'state_key,org_key' },
+    )
+  if (error) throw error
+}
+
+async function readResetCode(
+  client: ReturnType<typeof createClient>,
+  identifierKey: string,
+) {
+  const { data, error } = await client
+    .from('app_state')
+    .select('payload')
+    .eq('state_key', `${RESET_PREFIX}${identifierKey}`)
+    .eq('org_key', '')
+    .maybeSingle()
+  if (error) throw error
+  return data?.payload && typeof data.payload === 'object'
+    ? data.payload as Record<string, unknown>
+    : null
+}
+
+async function deleteResetCode(
+  client: ReturnType<typeof createClient>,
+  identifierKey: string,
+) {
   await client
     .from('app_state')
     .delete()
-    .eq('state_key', `server_session:${token}`)
+    .eq('state_key', `${RESET_PREFIX}${identifierKey}`)
     .eq('org_key', '')
+}
+
+async function revokeUserSessions(
+  client: ReturnType<typeof createClient>,
+  { orgKey, email, empCode }: { orgKey: string; email?: string; empCode?: string },
+) {
+  const { data, error } = await client
+    .from('app_state')
+    .select('state_key, payload')
+    .ilike('state_key', 'server_session:%')
+    .eq('org_key', '')
+  if (error) throw error
+  const normalizedEmail = normalizeLower(email)
+  const normalizedEmpCode = normalizeCode(empCode)
+  const stateKeys = (Array.isArray(data) ? data : [])
+    .filter((row) => {
+      const payload = row?.payload && typeof row.payload === 'object' ? row.payload as Record<string, unknown> : null
+      if (!payload) return false
+      if (String(payload.orgKey || '') !== orgKey) return false
+      if (normalizedEmpCode && normalizeCode(payload.empCode) === normalizedEmpCode) return true
+      if (normalizedEmail && normalizeLower(payload.email) === normalizedEmail) return true
+      return false
+    })
+    .map((row) => String(row.state_key || ''))
+    .filter(Boolean)
+  if (stateKeys.length === 0) return 0
+  const { error: deleteError } = await client
+    .from('app_state')
+    .delete()
+    .in('state_key', stateKeys)
+    .eq('org_key', '')
+  if (deleteError) throw deleteError
+  return stateKeys.length
+}
+
+async function logAudit(
+  client: ReturnType<typeof createClient>,
+  orgKey: string,
+  actionType: string,
+  details: Record<string, unknown> = {},
+) {
+  await client.from('app_audit_logs').insert({
+    org_key: orgKey,
+    actor_role: 'anonymous',
+    actor_name: 'login-reset-flow',
+    action_type: actionType,
+    target_type: 'password-reset',
+    details,
+  })
+}
+
+function buildResetEmailHtml(displayName: string, code: string) {
+  const formatted = formatCodeWithHyphen(code)
+  return `<!doctype html>
+<html><body style="margin:0;padding:0;background:#f8fafc;font-family:-apple-system,'Segoe UI',Roboto,Arial,sans-serif;color:#0f172a;">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f8fafc;padding:32px 0;">
+    <tr><td align="center">
+      <table role="presentation" width="560" cellpadding="0" cellspacing="0" style="background:#ffffff;border:1px solid #e5e7eb;border-radius:14px;">
+        <tr><td style="padding:28px 32px;">
+          <div style="font-size:12px;font-weight:700;letter-spacing:.06em;color:#4f46e5;text-transform:uppercase;margin-bottom:8px;">Zaro HR</div>
+          <h1 style="margin:0 0 8px;font-size:22px;font-weight:700;color:#0f172a;">Your password reset code</h1>
+          <p style="margin:0 0 22px;font-size:14px;line-height:1.6;color:#475569;">Hi ${displayName || 'there'}, use the code below to reset your password. This code expires in 15 minutes.</p>
+          <div style="margin:0 0 22px;padding:18px 22px;background:#eef2ff;border:1px solid #c7d2fe;border-radius:12px;text-align:center;">
+            <div style="font-family:'SFMono-Regular',Consolas,Menlo,monospace;font-size:34px;font-weight:700;letter-spacing:0.18em;color:#312e81;">${formatted}</div>
+          </div>
+          <p style="margin:0 0 6px;font-size:13px;color:#64748b;">If you didn't request a reset, you can safely ignore this email.</p>
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body></html>`
+}
+
+function buildResetEmailText(displayName: string, code: string) {
+  return [
+    `Hi ${displayName || 'there'},`,
+    '',
+    `Your Zaro HR password reset code is: ${formatCodeWithHyphen(code)}`,
+    'This code expires in 15 minutes.',
+    '',
+    "If you didn't request a reset, ignore this email.",
+  ].join('\n')
+}
+
+async function sendResetCodeEmail(recipientEmail: string, displayName: string, code: string) {
+  const smtpHost = Deno.env.get('SMTP_HOST') || ''
+  const smtpPort = Number(Deno.env.get('SMTP_PORT') || '465')
+  const smtpUser = Deno.env.get('SMTP_USER') || ''
+  const smtpPass = Deno.env.get('SMTP_PASS') || ''
+  const smtpFrom = Deno.env.get('SMTP_FROM') || smtpUser
+  const fromName = Deno.env.get('FROM_NAME') || 'Zaro HR'
+  if (!smtpHost || !smtpPort || !smtpUser || !smtpPass || !smtpFrom) {
+    throw new Error('Reset email cannot be sent: platform SMTP is not configured.')
+  }
+  const transporter = nodemailer.createTransport({
+    host: smtpHost,
+    port: smtpPort,
+    secure: smtpPort === 465,
+    requireTLS: smtpPort !== 465,
+    auth: { user: smtpUser, pass: smtpPass },
+  })
+  await transporter.sendMail({
+    from: `${fromName} <${smtpFrom}>`,
+    to: recipientEmail,
+    subject: 'Your Zaro HR password reset code',
+    html: buildResetEmailHtml(displayName, code),
+    text: buildResetEmailText(displayName, code),
+    replyTo: smtpFrom,
+  })
 }
 
 Deno.serve(async (req: Request) => {
@@ -251,6 +777,219 @@ Deno.serve(async (req: Request) => {
     if (!token) return json(200, { ok: true, skipped: true })
     await revokeSession(adminClient, token)
     return json(200, { ok: true })
+  }
+
+  if (action === 'change-password') {
+    const identifier = String(body.identifier || '').trim()
+    const organizationKey = String(body.organizationKey || '').trim()
+    const credentialKey = String(body.credentialKey || '').trim()
+    const currentPassword = String(body.currentPassword || '')
+    const newPassword = String(body.newPassword || '')
+    if (!organizationKey) {
+      return json(400, { ok: false, error: 'Company is required.' })
+    }
+    if (!identifier && !credentialKey) {
+      return json(400, { ok: false, error: 'User identifier is required.' })
+    }
+    if (!currentPassword) {
+      return json(400, { ok: false, error: 'Current password is required.' })
+    }
+    if (newPassword.length < 6) {
+      return json(400, { ok: false, error: 'New password must be at least 6 characters.' })
+    }
+    if (newPassword === currentPassword) {
+      return json(200, { ok: false, error: 'New password must differ from the temporary password.' })
+    }
+
+    const target = await locateCredentialForPasswordChange(adminClient, {
+      identifier,
+      organizationKey,
+      credentialKey,
+    })
+    if (!target) {
+      return json(200, { ok: false, error: 'Could not identify user to update.' })
+    }
+
+    const storedSecret = String(target.credential?.passwordHash || target.credential?.password || '')
+    let passwordOk = false
+    if (storedSecret) {
+      passwordOk = await verifyPasswordValue(currentPassword, storedSecret)
+    } else if (target.fallbackTempPassword) {
+      passwordOk = currentPassword === target.fallbackTempPassword
+    }
+    if (!passwordOk) {
+      return json(200, { ok: false, error: 'Current password is incorrect.' })
+    }
+
+    const newHash = await hashPasswordValue(newPassword)
+    const revokedSessions = await revokeUserSessions(adminClient, {
+      orgKey: organizationKey,
+      email: String(target.credential?.email || target.patch?.email || ''),
+      empCode: String(target.credential?.empCode || target.patch?.empCode || ''),
+    })
+    const updated = await updateCredentialPassword(adminClient, target.credentialKey, newHash, target.patch)
+    const nextUser = await resolveServerLogin(adminClient, identifier || credentialKey || target.credentialKey, newPassword)
+    const nextSession = nextUser ? await issueSession(adminClient, nextUser) : null
+    await logAudit(adminClient, organizationKey, 'password-change-completed', {
+      credentialKey: target.credentialKey,
+      kind: target.kind,
+      revokedSessions,
+    })
+    return json(200, {
+      ok: true,
+      credentialKey: target.credentialKey,
+      credential: updated,
+      user: nextUser || undefined,
+      serverSessionToken: nextSession?.token || undefined,
+      expiresAt: nextSession?.expiresAt || undefined,
+    })
+  }
+
+  if (action === 'inspect') {
+    const token = String(body.serverSessionToken || '').trim()
+    if (!token) return json(401, { ok: false, error: 'serverSessionToken is required.' })
+    const session = await inspectSession(adminClient, token)
+    if (!session.ok) return json(403, { ok: false, error: session.error })
+    return json(200, { ok: true, session: session.payload })
+  }
+
+  if (action === 'suggest-orgs') {
+    const query = String(body.query || '').trim()
+    if (query.length < 2) return json(200, { ok: true, results: [] })
+    try {
+      const results = await suggestOrgsByQuery(adminClient, query)
+      return json(200, { ok: true, results })
+    } catch (error) {
+      return json(200, { ok: false, error: error instanceof Error ? error.message : 'Lookup failed.' })
+    }
+  }
+
+  if (action === 'request-password-reset') {
+    const identifier = String(body.identifier || '').trim()
+    const organizationKey = String(body.organizationKey || '').trim()
+    if (!identifier) return json(400, { ok: false, error: 'Identifier is required.' })
+    if (!organizationKey) return json(400, { ok: false, error: 'Company is required.' })
+    const lookup = await locateCredentialByIdentifier(adminClient, identifier, organizationKey)
+    if (!lookup) {
+      return json(200, { ok: true, message: 'If an account exists, a code has been sent.' })
+    }
+    if (lookup.missingEmail || !lookup.recipientEmail) {
+      await logAudit(adminClient, organizationKey, 'password-reset-missing-email', {
+        identifier: normalizeIdentifierForKey(identifier),
+        kind: lookup.kind,
+        employeeCode: lookup.employeeCode || null,
+      })
+      return json(200, {
+        ok: false,
+        error: 'No email is configured for this account. Please contact your HR Admin to reset your password.',
+      })
+    }
+    const code = generateSixDigitCode()
+    const identifierKey = `${organizationKey}::${normalizeIdentifierForKey(identifier)}`
+    const existing = await readResetCode(adminClient, identifierKey)
+    const requestedAt = String(existing?.requestedAt || '')
+    if (requestedAt) {
+      const elapsed = Date.now() - Date.parse(requestedAt)
+      if (Number.isFinite(elapsed) && elapsed >= 0 && elapsed < RESET_REQUEST_COOLDOWN_MS) {
+        return json(200, {
+          ok: false,
+          error: 'A reset code was sent recently. Please wait a minute before trying again.',
+        })
+      }
+    }
+    const expiresAt = new Date(Date.now() + RESET_CODE_TTL_MS).toISOString()
+    await storeResetCode(adminClient, identifierKey, {
+      code,
+      credentialKey: lookup.credentialKey,
+      identifier: normalizeIdentifierForKey(identifier),
+      organizationKey,
+      recipientEmail: lookup.recipientEmail,
+      kind: lookup.kind,
+      employeeCode: lookup.employeeCode || null,
+      expiresAt,
+      requestedAt: new Date().toISOString(),
+      attempts: 0,
+    })
+    await logAudit(adminClient, organizationKey, 'password-reset-requested', {
+      identifier: normalizeIdentifierForKey(identifier),
+      kind: lookup.kind,
+      employeeCode: lookup.employeeCode || null,
+    })
+    try {
+      await sendResetCodeEmail(lookup.recipientEmail, lookup.displayName, code)
+    } catch (error) {
+      // Email failed — surface a real error so the user knows to retry / contact admin.
+      return json(200, {
+        ok: false,
+        error: error instanceof Error ? error.message : 'Could not send reset email.',
+      })
+    }
+    await logAudit(adminClient, organizationKey, 'password-reset-code-sent', {
+      identifier: normalizeIdentifierForKey(identifier),
+      recipientEmail: lookup.recipientEmail,
+      kind: lookup.kind,
+    })
+    return json(200, {
+      ok: true,
+      message: 'If an account exists, a code has been sent.',
+      maskedEmail: lookup.recipientEmail.replace(/^(.{2}).*(@.*)$/, '$1•••$2'),
+    })
+  }
+
+  if (action === 'confirm-password-reset') {
+    const identifier = String(body.identifier || '').trim()
+    const organizationKey = String(body.organizationKey || '').trim()
+    const code = String(body.code || '').replace(/[^0-9]/g, '')
+    const newPassword = String(body.newPassword || '')
+    if (!identifier || !code) {
+      return json(400, { ok: false, error: 'Identifier and code are required.' })
+    }
+    if (!organizationKey) {
+      return json(400, { ok: false, error: 'Company is required.' })
+    }
+    if (code.length !== 6) {
+      return json(400, { ok: false, error: 'Reset code must be 6 digits.' })
+    }
+    if (newPassword.length < 6) {
+      return json(400, { ok: false, error: 'New password must be at least 6 characters.' })
+    }
+    const identifierKey = `${organizationKey}::${normalizeIdentifierForKey(identifier)}`
+    const stored = await readResetCode(adminClient, identifierKey)
+    if (!stored) {
+      return json(200, { ok: false, error: 'Invalid or expired code. Request a new one.' })
+    }
+    const expiresAt = String(stored.expiresAt || '')
+    if (!expiresAt || Date.now() > Date.parse(expiresAt)) {
+      await deleteResetCode(adminClient, identifierKey)
+      return json(200, { ok: false, error: 'Code has expired. Request a new one.' })
+    }
+    const attempts = Number(stored.attempts || 0)
+    if (attempts >= 5) {
+      await deleteResetCode(adminClient, identifierKey)
+      return json(200, { ok: false, error: 'Too many failed attempts. Request a new code.' })
+    }
+    if (!constantTimeEqual(String(stored.code || ''), code)) {
+      await storeResetCode(adminClient, identifierKey, { ...stored, attempts: attempts + 1 })
+      return json(200, { ok: false, error: 'Code is incorrect.' })
+    }
+    const credentialKey = String(stored.credentialKey || '')
+    if (!credentialKey) {
+      return json(500, { ok: false, error: 'Reset record is corrupted. Request a new code.' })
+    }
+    const newHash = await hashPasswordValue(newPassword)
+    const updated = await updateCredentialPassword(adminClient, credentialKey, newHash)
+    const revokedSessions = await revokeUserSessions(adminClient, {
+      orgKey: organizationKey,
+      email: String(updated?.email || stored.recipientEmail || ''),
+      empCode: String(updated?.empCode || stored.employeeCode || ''),
+    })
+    await deleteResetCode(adminClient, identifierKey)
+    await logAudit(adminClient, organizationKey, 'password-reset-completed', {
+      identifier: normalizeIdentifierForKey(identifier),
+      credentialKey,
+      revokedSessions,
+    })
+    return json(200, { ok: true, message: 'Password updated. Sign in with the new password.' })
   }
 
   return json(400, { ok: false, error: 'Unsupported action.' })

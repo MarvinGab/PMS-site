@@ -1,12 +1,14 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import AdminShell from '../components/AdminShell';
 import OrgDetailModal from './OrgDetailModal';
 import DeleteOrgModal from './DeleteOrgModal';
 import { useApp } from '../AppContext';
+import { logAuditEvent } from '../backend/auditLog';
 import { getOrganizationEmployeeCount, getOrganizationSetupMeta } from '../orgUtils';
 import '../admin.css';
 
-function OrgRow({ org, activeMenu, onMenuToggle, onOpen, onEdit, onDelete }) {
+function OrgRow({ org, activeMenu, onMenuToggle, onOpen, onEdit, onDelete, onReopenSetup, onCloseSetup }) {
   const setup = getOrganizationSetupMeta(org);
   const employeeCount = getOrganizationEmployeeCount(org);
   const progressNote = setup.pct >= 100
@@ -16,6 +18,30 @@ function OrgRow({ org, activeMenu, onMenuToggle, onOpen, onEdit, onDelete }) {
       : setup.pct > 0
         ? 'Setup started'
         : 'No setup applied';
+  const buttonRef = useRef(null);
+  const [menuPos, setMenuPos] = useState(null);
+  const isOpen = activeMenu === org.key;
+
+  useLayoutEffect(() => {
+    if (!isOpen || !buttonRef.current) return;
+    const rect = buttonRef.current.getBoundingClientRect();
+    setMenuPos({ top: rect.bottom + 6, right: window.innerWidth - rect.right });
+  }, [isOpen]);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    function reposition() {
+      if (!buttonRef.current) return;
+      const rect = buttonRef.current.getBoundingClientRect();
+      setMenuPos({ top: rect.bottom + 6, right: window.innerWidth - rect.right });
+    }
+    window.addEventListener('scroll', reposition, true);
+    window.addEventListener('resize', reposition);
+    return () => {
+      window.removeEventListener('scroll', reposition, true);
+      window.removeEventListener('resize', reposition);
+    };
+  }, [isOpen]);
 
   return (
     <tr className="org-row-clickable" onClick={() => onOpen(org.key)}>
@@ -53,12 +79,19 @@ function OrgRow({ org, activeMenu, onMenuToggle, onOpen, onEdit, onDelete }) {
             <div className="org-owner-meta">{org.hrAdminEmail || 'No admin email yet'}</div>
           </div>
           <div className="org-action-wrap">
-            <button className="org-menu-btn" onClick={(event) => onMenuToggle(event, org.key)} aria-label="Organization actions">⋯</button>
-            {activeMenu === org.key ? (
-              <div className="org-menu">
+            <button ref={buttonRef} className="org-menu-btn" onClick={(event) => onMenuToggle(event, org.key)} aria-label="Organization actions">⋯</button>
+            {isOpen && menuPos ? createPortal(
+              <div className="org-menu" style={{ position: 'fixed', top: menuPos.top, right: menuPos.right }} onClick={(event) => event.stopPropagation()}>
                 <button className="org-menu-item" onClick={() => onEdit(org.key)}>Edit</button>
+                {org.launched && !org.setupReopened && (
+                  <button className="org-menu-item" onClick={() => onReopenSetup(org.key)}>Reopen setup</button>
+                )}
+                {org.setupReopened && (
+                  <button className="org-menu-item" onClick={() => onCloseSetup(org.key)}>Close setup access</button>
+                )}
                 <button className="org-menu-item danger" onClick={() => onDelete(org.key)}>Delete</button>
-              </div>
+              </div>,
+              document.body
             ) : null}
           </div>
         </div>
@@ -68,7 +101,7 @@ function OrgRow({ org, activeMenu, onMenuToggle, onOpen, onEdit, onDelete }) {
 }
 
 export default function OrganizationsPage() {
-  const { orgs } = useApp();
+  const { orgs, setOrgs, userName } = useApp();
   const [activeMenu, setActiveMenu] = useState(null);
   const [detailOrgKey, setDetailOrgKey] = useState(null);
   const [deleteOrgKey, setDeleteOrgKey] = useState(null);
@@ -96,6 +129,65 @@ export default function OrganizationsPage() {
   function handleDelete(key) {
     setActiveMenu(null);
     setDeleteOrgKey(key);
+  }
+
+  function handleReopenSetup(key) {
+    const now = new Date().toISOString();
+    const nextOrgs = orgs.map((org) => (
+      org.key === key
+        ? {
+            ...org,
+            setupReopened: true,
+            setupReopenedAt: now,
+            setupReopenedBy: userName || 'super-admin',
+            setupStatus: 'in_progress',
+            status: 'Setup Reopened',
+            actionLabel: 'Close Setup',
+            statusBadgeClass: 'badge-amber',
+            setupColor: '#D97706',
+          }
+        : org
+    ));
+    setActiveMenu(null);
+    setOrgs(nextOrgs);
+    void logAuditEvent({
+      orgKey: key,
+      actorRole: 'super-admin',
+      actorName: userName || 'Super Admin',
+      actionType: 'setup-reopened',
+      targetType: 'organization',
+      targetCode: key,
+    });
+  }
+
+  function handleCloseSetup(key) {
+    const nextOrgs = orgs.map((org) => (
+      org.key === key
+        ? {
+            ...org,
+            launched: true,
+            setupStatus: 'launched',
+            setupReopened: false,
+            setupReopenedAt: null,
+            setupReopenedBy: null,
+            setupPct: 100,
+            status: 'Active',
+            actionLabel: 'Manage',
+            statusBadgeClass: 'badge-green',
+            setupColor: '#16A34A',
+          }
+        : org
+    ));
+    setActiveMenu(null);
+    setOrgs(nextOrgs);
+    void logAuditEvent({
+      orgKey: key,
+      actorRole: 'super-admin',
+      actorName: userName || 'Super Admin',
+      actionType: 'setup-closed',
+      targetType: 'organization',
+      targetCode: key,
+    });
   }
 
   return (
@@ -133,45 +225,49 @@ export default function OrganizationsPage() {
             <button className="btn btn-primary btn-sm" onClick={() => { window.location.hash = '#create-org'; }}>+ Add Org</button>
           </div>
 
-          <table className="org-table">
-            <colgroup>
-              <col className="org-col-org" />
-              <col className="org-col-industry" />
-              <col className="org-col-employees" />
-              <col className="org-col-progress" />
-              <col className="org-col-admin" />
-            </colgroup>
-            <thead>
-              <tr>
-                <th>Organization</th>
-                <th>Industry</th>
-                <th>Employees</th>
-                <th>Setup Progress</th>
-                <th>Admin</th>
-              </tr>
-            </thead>
-            <tbody>
-              {orgs.length ? (
-                orgs.map((org) => (
-                  <OrgRow
-                    key={org.key}
-                    org={org}
-                    activeMenu={activeMenu}
-                    onMenuToggle={handleMenuToggle}
-                    onOpen={setDetailOrgKey}
-                    onEdit={handleEdit}
-                    onDelete={handleDelete}
-                  />
-                ))
-              ) : (
+          <div className="org-table-scroll">
+            <table className="org-table">
+              <colgroup>
+                <col className="org-col-org" />
+                <col className="org-col-industry" />
+                <col className="org-col-employees" />
+                <col className="org-col-progress" />
+                <col className="org-col-admin" />
+              </colgroup>
+              <thead>
                 <tr>
-                  <td className="org-empty-state" colSpan={5}>
-                    No organizations yet. Create one to start PMS setup.
-                  </td>
+                  <th>Organization</th>
+                  <th>Industry</th>
+                  <th>Employees</th>
+                  <th>Setup Progress</th>
+                  <th>Admin</th>
                 </tr>
-              )}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {orgs.length ? (
+                  orgs.map((org) => (
+                    <OrgRow
+                      key={org.key}
+                      org={org}
+                      activeMenu={activeMenu}
+                      onMenuToggle={handleMenuToggle}
+                      onOpen={setDetailOrgKey}
+                      onEdit={handleEdit}
+                      onDelete={handleDelete}
+                      onReopenSetup={handleReopenSetup}
+                      onCloseSetup={handleCloseSetup}
+                    />
+                  ))
+                ) : (
+                  <tr>
+                    <td className="org-empty-state" colSpan={5}>
+                      No organizations yet. Create one to start PMS setup.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
         </div>
       </div>
 

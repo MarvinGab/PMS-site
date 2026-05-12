@@ -29,3 +29,39 @@ export async function revokeServerSession(serverSessionToken) {
     serverSessionToken: String(serverSessionToken || '').trim(),
   });
 }
+
+export async function requestPasswordReset(identifier, organizationKey) {
+  return invokeAuthFunction({
+    action: 'request-password-reset',
+    identifier: String(identifier || '').trim(),
+    organizationKey: String(organizationKey || '').trim(),
+  });
+}
+
+export async function confirmPasswordReset(identifier, organizationKey, code, newPassword) {
+  return invokeAuthFunction({
+    action: 'confirm-password-reset',
+    identifier: String(identifier || '').trim(),
+    organizationKey: String(organizationKey || '').trim(),
+    code: String(code || ''),
+    newPassword: String(newPassword || ''),
+  });
+}
+
+export async function changePasswordOnServer({ identifier = '', organizationKey = '', credentialKey = '', currentPassword = '', newPassword = '' } = {}) {
+  return invokeAuthFunction({
+    action: 'change-password',
+    identifier: String(identifier || '').trim(),
+    organizationKey: String(organizationKey || '').trim(),
+    credentialKey: String(credentialKey || '').trim(),
+    currentPassword: String(currentPassword || ''),
+    newPassword: String(newPassword || ''),
+  });
+}
+
+export async function suggestOrganizations(query) {
+  return invokeAuthFunction({
+    action: 'suggest-orgs',
+    query: String(query || '').trim(),
+  });
+}

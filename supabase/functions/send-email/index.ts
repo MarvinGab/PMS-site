@@ -443,15 +443,25 @@ async function getServerSession(client: ReturnType<typeof createClient>, token: 
   return data?.payload && typeof data.payload === 'object' ? data.payload as Record<string, unknown> : null
 }
 
+async function deleteServerSession(client: ReturnType<typeof createClient>, token: string) {
+  await client
+    .from('app_state')
+    .delete()
+    .eq('state_key', `server_session:${token}`)
+    .eq('org_key', '')
+}
+
 async function requireAuthorizedSession(
   client: ReturnType<typeof createClient>,
   token: string,
   organizationKey: string,
+  messages: MessageRequest[],
 ) {
   const payload = await getServerSession(client, token)
   if (!payload) return { ok: false, error: 'Server session is missing or expired.' }
   const expiresAt = String(payload.expiresAt || '')
   if (expiresAt && Date.now() > Date.parse(expiresAt)) {
+    await deleteServerSession(client, token)
     return { ok: false, error: 'Server session has expired.' }
   }
   const role = String(payload.role || '')
@@ -460,6 +470,16 @@ async function requireAuthorizedSession(
   }
   if (role !== 'super-admin' && String(payload.orgKey || '') !== organizationKey) {
     return { ok: false, error: 'This session is not allowed to send mail for another organization.' }
+  }
+  if (payload.isScopedHR === true) {
+    const allowed = new Set(Array.isArray(payload.allowedModules) ? payload.allowedModules.map((item) => String(item || '').trim()) : [])
+    if (!allowed.has('comms')) {
+      return { ok: false, error: 'This scoped HR session is not allowed to use Communications.' }
+    }
+    const onlyEmployeeInvites = messages.every((message) => message.type === 'employee-invite' || message.type === 'manager-summary')
+    if (!onlyEmployeeInvites) {
+      return { ok: false, error: 'Scoped HR sessions can only send employee and manager communications.' }
+    }
   }
   return { ok: true, payload }
 }
@@ -825,6 +845,28 @@ async function isAllowedRecipient(
     return adminEmails.has(recipientEmail)
   }
 
+  if (message.type === 'manager-summary') {
+    // Recipient is a manager. emailService prefers the manager's own employee
+    // Email ID when they exist in the roster; falls back to the stamped
+    // manager_email on a reportee row. Accept either match.
+    const { data: empRows, error: empErr } = await client
+      .from('employees')
+      .select('employee_code')
+      .eq('organization_id', org.id)
+      .eq('email', recipientEmail)
+      .limit(1)
+    if (empErr) throw empErr
+    if (Array.isArray(empRows) && empRows.length > 0) return true
+    const { data: mgrRows, error: mgrErr } = await client
+      .from('employees')
+      .select('manager_email')
+      .eq('organization_id', org.id)
+      .eq('manager_email', recipientEmail)
+      .limit(1)
+    if (mgrErr) throw mgrErr
+    return Array.isArray(mgrRows) && mgrRows.length > 0
+  }
+
   const { data, error } = await client
     .from('employees')
     .select('manager_email')
@@ -855,6 +897,24 @@ async function logDelivery(
     error_message: details.errorMessage || null,
     payload: message.payload || {},
     sent_at: status === 'sent' ? new Date().toISOString() : null,
+  })
+}
+
+async function logAudit(
+  client: ReturnType<typeof createClient>,
+  orgKey: string,
+  actor: Record<string, unknown> | null,
+  actionType: string,
+  details: Record<string, unknown> = {},
+) {
+  await client.from('app_audit_logs').insert({
+    org_key: orgKey,
+    actor_role: String(actor?.role || 'system-function'),
+    actor_code: String(actor?.empCode || actor?.hrTeamId || ''),
+    actor_name: String(actor?.userName || 'send-email'),
+    action_type: actionType,
+    target_type: 'email-delivery',
+    details,
   })
 }
 
@@ -900,10 +960,11 @@ Deno.serve(async (req: Request) => {
   }
 
   const adminClient = createClient(supabaseUrl, serviceRoleKey)
-  const sessionCheck = await requireAuthorizedSession(adminClient, serverSessionToken, organizationKey)
+  const sessionCheck = await requireAuthorizedSession(adminClient, serverSessionToken, organizationKey, messages)
   if (!sessionCheck.ok) {
     return json(403, { ok: false, error: sessionCheck.error })
   }
+  const sessionPayload = sessionCheck.payload || null
   const org = await getOrganization(adminClient, organizationKey)
   if (!org?.id) return json(404, { ok: false, error: 'Organization not found.' })
   const orgAdminInviteTemplate = await getEmailTemplate(adminClient, 'global', 'org-admin-invite')
@@ -946,6 +1007,12 @@ Deno.serve(async (req: Request) => {
         errorMessage: 'Recipient is not recognized for this organization.',
         provider: mailer.provider,
       })
+      await logAudit(adminClient, organizationKey, sessionPayload, 'email-send-denied', {
+        provider: mailer.provider,
+        recipientEmail: normalizeEmail(message.recipientEmail),
+        messageType: message.type,
+        error: 'Recipient is not recognized for this organization.',
+      })
       results.push({
         recipientEmail: normalizeEmail(message.recipientEmail),
         type: message.type,
@@ -967,6 +1034,12 @@ Deno.serve(async (req: Request) => {
         providerMessageId: info.messageId,
         provider: mailer.provider,
       })
+      await logAudit(adminClient, organizationKey, sessionPayload, 'email-send', {
+        provider: mailer.provider,
+        recipientEmail: normalizeEmail(message.recipientEmail),
+        messageType: message.type,
+        messageId: info.messageId,
+      })
       results.push({
         recipientEmail: normalizeEmail(message.recipientEmail),
         type: message.type,
@@ -977,6 +1050,12 @@ Deno.serve(async (req: Request) => {
       await logDelivery(adminClient, org, message, content, 'failed', {
         errorMessage: error instanceof Error ? error.message : 'Email send failed.',
         provider: mailer.provider,
+      })
+      await logAudit(adminClient, organizationKey, sessionPayload, 'email-send-failed', {
+        provider: mailer.provider,
+        recipientEmail: normalizeEmail(message.recipientEmail),
+        messageType: message.type,
+        error: error instanceof Error ? error.message : 'Email send failed.',
       })
       results.push({
         recipientEmail: normalizeEmail(message.recipientEmail),

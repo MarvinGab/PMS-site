@@ -4,6 +4,22 @@
 
 const DEFAULT_BRAND = '#4F46E5';
 
+// Strip URLs that won't resolve in a recipient's inbox: data: / blob: bloat the
+// payload and Gmail proxies block them; localhost / Vite dev-server paths only
+// work on the sender's machine. Anything that survives this function is a real
+// public HTTPS URL safe to inline in outgoing email HTML.
+function sanitizeRemoteUrl(url) {
+  if (!url || typeof url !== 'string') return '';
+  if (url.startsWith('data:') || url.startsWith('blob:')) return '';
+  if (!/^https?:\/\//i.test(url)) return '';
+  try {
+    const host = new URL(url).hostname.toLowerCase();
+    if (host === 'localhost' || host === '127.0.0.1' || host === '0.0.0.0') return '';
+    if (host.endsWith('.local')) return '';
+  } catch (_) { return ''; }
+  return url;
+}
+
 function escapeHtml(value) {
   return String(value ?? '')
     .replace(/&/g, '&amp;')
@@ -107,7 +123,7 @@ export function renderAdminInviteEmailHtml({
   const buttonStyle = theme.buttonStyle || 'solid';
   const showFooter = theme.showFooter !== false;
   const showZaroBadge = theme.showZaroBadge !== false;
-  const logoSrc = theme.logo || '';
+  const logoSrc = sanitizeRemoteUrl(theme.logo || '');
   const brandName = String(theme.brandName || 'Zaro HR').trim() || 'Zaro HR';
   const brandNameParts = brandName.split(/\s+/);
   const lastBrandWord = brandNameParts.length > 1 ? brandNameParts.pop() : '';
@@ -295,8 +311,9 @@ function renderBlocksToHtml({ blocks, tokens, supportEmail = 'support@zarohr.com
     : 'background:#ffffff;';
   const fg = h.background === 'gradient' ? '#ffffff' : '#111827';
   const headerAlign = h.alignment === 'center' ? 'center' : h.alignment === 'right' ? 'right' : 'left';
-  const showLogo = !!h.logo && (h.display === 'logo' || h.display === 'both');
-  const showText = h.display === 'text' || h.display === 'both';
+  const headerLogo = sanitizeRemoteUrl(h.logo || '');
+  const showLogo = !!headerLogo && (h.display === 'logo' || h.display === 'both');
+  const showText = h.display === 'text' || h.display === 'both' || !headerLogo;
   const brandName = String(h.brandName || 'Zaro HR').trim() || 'Zaro HR';
   const parts = brandName.split(/\s+/).filter(Boolean);
   const lastWord = parts.length > 1 ? parts.pop() : '';
@@ -306,7 +323,7 @@ function renderBlocksToHtml({ blocks, tokens, supportEmail = 'support@zarohr.com
     ? `${escapeHtml(firstWords)} <span style="color:${accentForText};">${escapeHtml(lastWord)}</span>`
     : `<span style="color:${accentForText};">${escapeHtml(brandName)}</span>`;
   const logoImg = showLogo
-    ? `<img src="${escapeHtml(h.logo)}" alt="${escapeHtml(brandName)}" style="display:inline-block;height:36px;width:auto;max-width:200px;vertical-align:middle;border:0;" />`
+    ? `<img src="${escapeHtml(headerLogo)}" alt="${escapeHtml(brandName)}" style="display:inline-block;height:36px;width:auto;max-width:200px;vertical-align:middle;border:0;" />`
     : '';
   const textSpan = showText
     ? `<span style="display:inline-block;font-size:17px;line-height:1;font-weight:700;color:${fg};vertical-align:middle;">${brandHtml}</span>`
@@ -319,8 +336,9 @@ function renderBlocksToHtml({ blocks, tokens, supportEmail = 'support@zarohr.com
   // Body background — wraps greeting/body/credentials/button/signature so a user-
   // chosen color, gradient, or image paints the canvas behind everything.
   const bs = blocks.bodyStyle || {};
+  const bsImage = sanitizeRemoteUrl(bs.image || '');
   const bodyBg =
-    bs.background === 'image'    && bs.image    ? `background:#ffffff url(${bs.image}) center/cover no-repeat;`
+    bs.background === 'image'    && bsImage    ? `background:#ffffff url(${bsImage}) center/cover no-repeat;`
   : bs.background === 'gradient'                ? `background:linear-gradient(180deg, ${bs.color || '#ffffff'} 0%, ${bs.gradientTo || '#F1F5F9'} 100%);`
   : bs.background === 'color'                   ? `background:${bs.color || '#ffffff'};`
   :                                                'background:#ffffff;';
@@ -380,11 +398,12 @@ function renderBlocksToHtml({ blocks, tokens, supportEmail = 'support@zarohr.com
 
   // Signature
   const sig = blocks.signature || {};
+  const sigImage = sanitizeRemoteUrl(sig.image || '');
   const signatureHtml = sig.enabled
     ? `<tr><td style="padding:0 32px 22px;border-top:1px solid #e5e7eb;font-family:-apple-system,'Segoe UI',Roboto,Arial,sans-serif;">
         <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin-top:14px;">
           <tr>
-            ${sig.image ? `<td style="padding:0 12px 0 0;vertical-align:middle;"><img src="${escapeHtml(sig.image)}" alt="" style="width:44px;height:44px;border-radius:50%;border:0;display:block;object-fit:cover;" /></td>` : ''}
+            ${sigImage ? `<td style="padding:0 12px 0 0;vertical-align:middle;"><img src="${escapeHtml(sigImage)}" alt="" style="width:44px;height:44px;border-radius:50%;border:0;display:block;object-fit:cover;" /></td>` : ''}
             <td style="vertical-align:middle;">
               <div style="font-size:13px;font-weight:700;color:#111827;">${escapeHtml(sig.name || '')}</div>
               ${sig.title ? `<div style="font-size:12.5px;color:#6b7280;margin-top:2px;">${escapeHtml(sig.title)}</div>` : ''}
@@ -458,14 +477,41 @@ export function renderAdminInviteEmailText({
   ].filter(Boolean).join('\n');
 }
 
-function bodyToHtml(body) {
-  // Mirror the email-body rendering used in the React preview: paragraphs separated
-  // by blank lines, line breaks within paragraphs preserved.
-  return String(body || '')
-    .split(/\n{2,}/)
-    .map((para) => {
+function bodyToHtml(body, theme = {}) {
+  // Mirror the React preview's renderEmailBody: blank-line separated paragraphs,
+  // line breaks preserved, AND any paragraph that is purely "Key: value" lines
+  // becomes a credentials-style card (matching how the preview shows it).
+  const keyValRe = /^\s*([A-Za-z][A-Za-z\s]{0,30}?)\s*:\s*(.+?)\s*$/;
+  const accent = theme.brand || '#4F46E5';
+  const credBg = withAlpha(accent, 0.08);
+  const credBorder = withAlpha(accent, 0.25);
+  const paragraphs = String(body || '').split(/\n\s*\n/);
+  return paragraphs
+    .map((para, pi) => {
+      const lines = para.split('\n');
+      const isKvBlock = lines.length >= 2 && lines.every((l) => keyValRe.test(l));
+      if (isKvBlock) {
+        // Table layout — Gmail and Outlook strip `display:flex`, so the
+        // label and value would otherwise glue together with no spacing.
+        const rows = lines.map((l) => {
+          const m = l.match(keyValRe);
+          const k = escapeHtml(m[1].trim());
+          const v = escapeHtml(m[2].trim());
+          return `<tr>
+            <td style="padding:3px 0;font-size:13px;color:#64748B;font-weight:600;text-align:left;">${k}</td>
+            <td style="padding:3px 0;font-size:13px;color:${accent};font-weight:700;font-family:'Geist Mono','SF Mono',Menlo,monospace;text-align:right;">${v}</td>
+          </tr>`;
+        }).join('');
+        return `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;background:${credBg};border:1px solid ${credBorder};border-radius:10px;margin:6px 0 14px;">
+          <tr><td style="padding:12px 16px;">
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;">${rows}</table>
+          </td></tr>
+        </table>`;
+      }
+      const looksLikeSignature = pi === paragraphs.length - 1 && /regards|sincerely|thanks/i.test(lines[0] || '');
+      const color = looksLikeSignature ? '#64748B' : '#1E293B';
       const escaped = escapeHtml(para).replace(/\n/g, '<br />');
-      return `<p style="margin:0 0 14px;font-size:15px;line-height:1.7;color:#1E293B;">${escaped}</p>`;
+      return `<p style="margin:0 0 14px;font-size:15px;line-height:1.7;color:${color};white-space:pre-wrap;">${escaped}</p>`;
     })
     .join('');
 }
@@ -476,44 +522,79 @@ function buildCtaHtml(theme, brand, brandDark, loginUrl) {
   if (!loginUrl) return '';
   const align = theme.buttonAlign === 'center' ? 'center' : theme.buttonAlign === 'right' ? 'right' : 'left';
   const style = theme.buttonStyle || 'solid';
+  const shadow = `box-shadow:0 6px 14px ${withAlpha(brand, 0.32)};`;
   let inner = '';
   if (style === 'outline') {
     inner = `border:2px solid ${brand};color:${brand};background:#fff;border-radius:10px;padding:11px 22px;`;
   } else if (style === 'pill') {
-    inner = `background:linear-gradient(135deg,${brand} 0%,${brandDark} 100%);color:#fff;border-radius:999px;padding:11px 22px;`;
+    inner = `background:linear-gradient(135deg,${brand} 0%,${brandDark} 100%);color:#fff;border-radius:999px;padding:11px 22px;${shadow}`;
   } else if (style === 'ghost') {
     inner = `color:${brand};text-decoration:underline;padding:4px 0;`;
   } else {
-    inner = `background:linear-gradient(135deg,${brand} 0%,${brandDark} 100%);color:#fff;border-radius:10px;padding:11px 22px;`;
+    inner = `background:linear-gradient(135deg,${brand} 0%,${brandDark} 100%);color:#fff;border-radius:10px;padding:11px 22px;${shadow}`;
   }
+  // Prepend a Unicode arrow so the email button visually echoes the preview's
+  // "→" icon. Pure SVG icons don't survive Gmail/Outlook.
+  const labelWithArrow = style === 'ghost' ? escapeHtml(label) : `→&nbsp;${escapeHtml(label)}`;
   return `
-    <div style="margin:8px 0 24px;text-align:${align};">
-      <a href="${escapeHtml(loginUrl)}" style="display:inline-block;font-family:Arial,Helvetica,sans-serif;font-size:13.5px;font-weight:700;text-decoration:none;${inner}">${escapeHtml(label)}</a>
+    <div style="padding:0 26px 22px;text-align:${align};">
+      <a href="${escapeHtml(loginUrl)}" style="display:inline-block;font-family:Arial,Helvetica,sans-serif;font-size:13.5px;font-weight:700;text-decoration:none;${inner}">${labelWithArrow}</a>
     </div>
   `;
 }
 
 function buildHeaderHtml(theme, brand, brandDark, headlineText, headerLabelText) {
-  const showLabel = !!String(headerLabelText || '').trim();
   const showHeadline = !!String(headlineText || '').trim();
+  const labelText = String(headerLabelText || '').trim();
+  const showLabel = !!labelText;
   const logoPos = theme?.logoPosition || 'header-left';
   const logoSize = theme?.logoSize || 'medium';
   const logoH = logoSize === 'small' ? 26 : logoSize === 'large' ? 48 : 36;
-  const showLogo = !!theme?.logo && logoPos !== 'hide';
-  const justify = logoPos === 'header-center' ? 'center' : logoPos === 'header-right' ? 'right' : 'left';
-  if (!showLabel && !showHeadline && !showLogo) {
+  const safeLogo = sanitizeRemoteUrl(theme?.logo || '');
+  const showLogo = !!safeLogo && logoPos !== 'hide';
+  if (!showHeadline && !showLabel && !showLogo) {
     return `<div style="background:linear-gradient(135deg,${brand} 0%,${brandDark} 100%);height:24px;"></div>`;
   }
-  const logoHtml = showLogo
-    ? `<div style="text-align:${justify};margin-bottom:12px;">
-        <img src="${escapeHtml(theme.logo)}" alt="" style="display:inline-block;height:${logoH}px;width:auto;max-width:200px;border-radius:6px;background:rgba(255,255,255,0.95);padding:4px;" />
-      </div>`
+  const logoImg = showLogo
+    ? `<img src="${escapeHtml(safeLogo)}" alt="" style="display:inline-block;height:${logoH}px;width:auto;max-width:160px;border-radius:6px;background:rgba(255,255,255,0.95);padding:4px;" />`
     : '';
+  const labelHtml = showLabel
+    ? `<div style="font-size:11.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;opacity:.78;margin-bottom:6px;color:#ffffff;">${escapeHtml(labelText)}</div>`
+    : '';
+  const headlineHtml = showHeadline
+    ? `<div style="font-size:22px;line-height:1.3;font-weight:800;color:#ffffff;">${escapeHtml(headlineText)}</div>`
+    : '';
+  const textBlock = labelHtml + headlineHtml;
+  // Table layout so headline + logo sit on the same row in Gmail/Outlook —
+  // mirrors the preview's side-by-side composition. Logo position controls
+  // alignment cell (left → before headline+label, right → after, center → above).
+  let inner;
+  if (logoPos === 'header-center' && showLogo) {
+    inner = `
+      <div style="text-align:center;margin-bottom:10px;">${logoImg}</div>
+      ${textBlock}`;
+  } else if (logoPos === 'header-right' && showLogo) {
+    inner = `
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;">
+        <tr>
+          <td valign="middle" style="vertical-align:middle;">${textBlock}</td>
+          <td valign="middle" align="right" style="vertical-align:middle;text-align:right;width:1%;white-space:nowrap;">${logoImg}</td>
+        </tr>
+      </table>`;
+  } else if (logoPos === 'header-left' && showLogo) {
+    inner = `
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;">
+        <tr>
+          <td valign="middle" align="left" style="vertical-align:middle;text-align:left;width:1%;white-space:nowrap;padding-right:14px;">${logoImg}</td>
+          <td valign="middle" style="vertical-align:middle;">${textBlock}</td>
+        </tr>
+      </table>`;
+  } else {
+    inner = textBlock;
+  }
   return `
-    <div style="background:linear-gradient(135deg,${brand} 0%,${brandDark} 100%);padding:22px 24px;color:#ffffff;">
-      ${logoHtml}
-      ${showLabel ? `<div style="font-size:11.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;opacity:.78;margin-bottom:6px;">${escapeHtml(headerLabelText)}</div>` : ''}
-      ${showHeadline ? `<div style="font-size:22px;line-height:1.3;font-weight:800;">${escapeHtml(headlineText)}</div>` : ''}
+    <div style="background:linear-gradient(135deg,${brand} 0%,${brandDark} 100%);padding:22px 26px;color:#ffffff;">
+      ${inner}
     </div>
   `;
 }
@@ -550,7 +631,10 @@ export function renderThemedEmailHtml({
   const brand = theme.brand || DEFAULT_BRAND;
   const brandDark = darkenHex(brand, 0.22);
   const resolvedSubject = resolveTokens(subject, tokens);
-  const headerLabel = orgName || '';
+  // theme.headerLabel === null/undefined → fall back to orgName (matches HR
+  // preview); explicit string (including '') overrides — '' suppresses the
+  // label entirely (matches SuperAdmin's preview which doesn't render one).
+  const headerLabel = theme.headerLabel != null ? String(theme.headerLabel || '') : (orgName || '');
   const resolvedBody = resolveTokens(body, tokens);
 
   const headerHtml = buildHeaderHtml(theme, brand, brandDark, resolvedSubject, headerLabel);
@@ -569,7 +653,7 @@ export function renderThemedEmailHtml({
       <div style="max-width:640px;margin:0 auto;background:#ffffff;border:1px solid #E2E8F0;border-radius:14px;overflow:hidden;position:relative;box-shadow:0 10px 30px ${withAlpha('#0f172a', 0.06)};">
         ${headerHtml}
         <div style="padding:22px 26px 8px;font-size:13.5px;line-height:1.7;color:#1E293B;">
-          ${bodyToHtml(resolvedBody)}
+          ${bodyToHtml(resolvedBody, theme)}
           ${extrasHtml || ''}
         </div>
         ${ctaHtml}

@@ -43,6 +43,11 @@ export default function OrgDetailModal({ orgKey, onClose }) {
               <div className="org-detail-row">
                 <span>Status</span><span>{setup.status}</span>
               </div>
+              {org.setupReopened && (
+                <div className="org-detail-row">
+                  <span>Setup Access</span><span>Reopened</span>
+                </div>
+              )}
               <div className="org-detail-row">
                 <span>Employees</span>
                 <span>{employeeCount} of {org.seats || 0} seats</span>
@@ -104,6 +109,11 @@ export default function OrgDetailModal({ orgKey, onClose }) {
               <div className="org-detail-row">
                 <span>Progress Source</span><span>{setup.source === 'wizard' ? 'Saved PMS configuration' : 'Stored org metadata'}</span>
               </div>
+              {org.setupReopenedAt && (
+                <div className="org-detail-row">
+                  <span>Reopened At</span><span>{new Date(org.setupReopenedAt).toLocaleString()}</span>
+                </div>
+              )}
             </div>
           </div>
         </div>

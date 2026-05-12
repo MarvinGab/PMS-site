@@ -563,7 +563,11 @@ function canUseGroupLibrary(group) {
 }
 
 function isGroupLibraryEnabled(group) {
-  return !!group?.hasLibrary;
+  return !!(
+    group?.hasLibrary ||
+    group?.mode === 'library' ||
+    (Array.isArray(group?.modes) && group.modes.includes('library'))
+  );
 }
 
 function normalizeSimpleGoalGroup(group) {
@@ -771,6 +775,38 @@ function StepStatusBar({ applied, valid = true, appliedMessage, pendingMessage, 
           {buttonLabel}
         </button>
       ) : null}
+    </div>
+  );
+}
+
+function UploadValidationPanel({ title = 'Validation errors', errors = [], maxHeight = 220 }) {
+  if (!Array.isArray(errors) || errors.length === 0) return null;
+
+  const normalizeCode = (error) => String(error?.code || error?.field || 'UPLOAD').trim().toUpperCase().replace(/\s+/g, '_');
+  const rowLabel = (error) => {
+    if (typeof error?.row === 'number') return `Row ${error.row}`;
+    if (error?.row !== undefined && error?.row !== null && error.row !== '') return String(error.row);
+    if (error?.group) return 'GROUP';
+    return '--';
+  };
+
+  return (
+    <div style={{ background: '#FEF2F2', border: '1.5px solid #FECACA', borderRadius: 10, overflow: 'hidden' }}>
+      <div style={{ padding: '10px 16px', background: '#FEE2E2', display: 'flex', alignItems: 'center', gap: 8 }}>
+        <span style={{ fontSize: 14 }}>✕</span>
+        <span style={{ fontSize: 13, fontWeight: 600, color: '#DC2626' }}>
+          {errors.length} {title}{errors.length !== 1 ? 's' : ''} — fix and re-upload
+        </span>
+      </div>
+      <div style={{ maxHeight, overflowY: 'auto' }}>
+        {errors.map((err, i) => (
+          <div key={`${normalizeCode(err)}_${i}`} style={{ display: 'grid', gridTemplateColumns: '60px 120px 1fr', gap: 8, padding: '7px 16px', borderTop: '1px solid #FECACA', fontSize: 12, color: '#374151' }}>
+            <span style={{ color: '#9CA3AF', fontFamily: 'monospace' }}>{rowLabel(err)}</span>
+            <span style={{ color: '#6B7280', fontFamily: 'monospace', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{normalizeCode(err)}</span>
+            <span style={{ color: '#DC2626' }}>{err?.message || 'Upload row is invalid.'}</span>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
@@ -1113,36 +1149,49 @@ function StepFramework({ config, update }) {
   return (
     <div>
       <SectionHead title="Choose your performance framework" sub="Select the structure that defines how employee performance is measured. This shapes everything — what gets set, how it's weighted, and how ratings are computed." />
-      <Banner type="blue">
-        <span>ℹ️</span>
-        <span>Your industry and org structure determines the best fit. BSC is common in BFSI and manufacturing; KRA-KPI in IT/software; KRA-only suits leaner qualitative cycles.</span>
-      </Banner>
       <Card>
         <CardHead title="Framework model" badge="Choose one" />
         <CardBody>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: 12, marginBottom: 16 }}>
-            {FRAMEWORKS.map(fw => (
-              <button
-                type="button"
-                key={fw.id}
-                onClick={() => update('frameworkId', fw.id)}
-                style={{
-                  textAlign: 'left',
-                  width: '100%',
-                  border: `2px solid ${config.frameworkId === fw.id ? fw.color : '#E9EDF2'}`,
-                  borderRadius: 10, padding: '13px 14px', cursor: 'pointer',
-                  background: config.frameworkId === fw.id ? fw.color + '12' : '#fff',
-                  boxShadow: config.frameworkId === fw.id ? `0 0 0 1px ${fw.color}20` : 'none',
-                  transition: 'all .16s',
-                  appearance: 'none',
-                }}>
-                <div style={{ fontSize: 13, fontWeight: 600, color: '#0D1117', marginBottom: 4 }}>{fw.name}</div>
-                <div style={{ fontSize: 11.5, color: '#6B7280', lineHeight: 1.45, marginBottom: 8 }}>{fw.desc}</div>
-                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
-                  {fw.tags.map(t => <span key={t} style={{ fontSize: 9.5, padding: '1px 7px', borderRadius: 20, background: fw.color + '18', color: fw.color, fontWeight: 600 }}>{t}</span>)}
-                </div>
-              </button>
-            ))}
+            {FRAMEWORKS.map(fw => {
+              const locked = fw.id === 'kra' || fw.id === 'custom';
+              return (
+                <button
+                  type="button"
+                  key={fw.id}
+                  onClick={() => { if (!locked) update('frameworkId', fw.id); }}
+                  disabled={locked}
+                  aria-disabled={locked}
+                  title={locked ? 'Coming soon' : undefined}
+                  style={{
+                    textAlign: 'left',
+                    width: '100%',
+                    position: 'relative',
+                    border: `2px solid ${config.frameworkId === fw.id ? fw.color : '#E9EDF2'}`,
+                    borderRadius: 10, padding: '13px 14px',
+                    cursor: locked ? 'not-allowed' : 'pointer',
+                    background: locked ? '#F8FAFC' : (config.frameworkId === fw.id ? fw.color + '12' : '#fff'),
+                    boxShadow: config.frameworkId === fw.id ? `0 0 0 1px ${fw.color}20` : 'none',
+                    opacity: locked ? 0.62 : 1,
+                    transition: 'all .16s',
+                    appearance: 'none',
+                  }}>
+                  {locked && (
+                    <span style={{
+                      position: 'absolute', top: 10, right: 10,
+                      fontSize: 9.5, fontWeight: 700, letterSpacing: '.04em',
+                      padding: '2px 7px', borderRadius: 999,
+                      background: '#0F172A', color: '#fff', textTransform: 'uppercase',
+                    }}>Coming soon</span>
+                  )}
+                  <div style={{ fontSize: 13, fontWeight: 600, color: '#0D1117', marginBottom: 4 }}>{fw.name}</div>
+                  <div style={{ fontSize: 11.5, color: '#6B7280', lineHeight: 1.45, marginBottom: 8 }}>{fw.desc}</div>
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                    {fw.tags.map(t => <span key={t} style={{ fontSize: 9.5, padding: '1px 7px', borderRadius: 20, background: fw.color + '18', color: fw.color, fontWeight: 600 }}>{t}</span>)}
+                  </div>
+                </button>
+              );
+            })}
           </div>
           {/* Flow viz */}
           <FrameworkProcessGraphic
@@ -2292,7 +2341,7 @@ function AttributeSheetControls({ attrLabel, values, onImported }) {
   );
 }
 
-function GoalLibrarySheetControls({ config, downloadConfig = null, existingLibraries, onImported }) {
+function GoalLibrarySheetControls({ config, downloadConfig = null, existingLibraries, onImported, onUploadErrors = null }) {
   const fileRef = useRef(null);
   const wrapRef = useRef(null);
   const [phase, setPhase] = useState('idle');
@@ -2315,6 +2364,7 @@ function GoalLibrarySheetControls({ config, downloadConfig = null, existingLibra
   async function handleDownload() {
     setMessage('');
     setPhase('idle');
+    onUploadErrors?.([]);
     await downloadGoalLibraryBulkTemplate(downloadConfig || config);
   }
 
@@ -2323,10 +2373,18 @@ function GoalLibrarySheetControls({ config, downloadConfig = null, existingLibra
     if (!file) return;
     setPhase('parsing');
     setMessage('');
+    onUploadErrors?.([]);
     try {
       const result = await parseGoalLibraryBulkXlsx(file, config?.goalGroups || [], {
         requireGroupName: (config?.goalGroups || []).filter(g => g.hasLibrary).length > 1,
       });
+      const uploadErrors = validateBulkGoalLibraryUpload(config, result.libraries || []);
+      if (uploadErrors.length > 0) {
+        setPhase('error');
+        setMessage(`${uploadErrors.length} upload issue${uploadErrors.length === 1 ? '' : 's'} found.`);
+        onUploadErrors?.(uploadErrors);
+        return;
+      }
       // Normalize spaces around parentheses so "Name( X)" and "Name ( X)" match
       const normalizeLibName = s => String(s || '').trim().toLowerCase()
         .replace(/\s*\(\s*/g, ' (').replace(/\s*\)\s*/g, ')').replace(/\s+/g, ' ').trim();
@@ -2354,10 +2412,13 @@ function GoalLibrarySheetControls({ config, downloadConfig = null, existingLibra
         ? ` ${importSummary.unassignedImportCount} imported librar${importSummary.unassignedImportCount === 1 ? 'y was' : 'ies were'} not linked to a visible card automatically.${importSummary.unassignedImportNames?.length ? ` Unmatched: ${importSummary.unassignedImportNames.join(', ')}.` : ''} Check Group Name / Library Name in the sheet.`
         : '';
       setMessage(`${result.count} librar${result.count === 1 ? 'y' : 'ies'} imported.${warningText}${unmatchedText}`);
+      onUploadErrors?.([]);
       setOpen(false);
     } catch (err) {
+      const nextErrors = formatUploadErrorMessages(err).map((message) => ({ field: 'parse', message }));
       setPhase('error');
-      setMessage(err?.message || 'Could not import libraries from the uploaded sheet.');
+      setMessage(nextErrors.map(error => error.message).join(' '));
+      onUploadErrors?.(nextErrors);
     } finally {
       event.target.value = '';
     }
@@ -2469,6 +2530,100 @@ function flattenLibraryPerspectivesForValidation(perspectives = []) {
   );
 }
 
+function formatUploadErrorMessages(error) {
+  return String(error?.message || 'Could not import the uploaded sheet.')
+    .split(/\n+/)
+    .map(message => message.trim())
+    .filter(Boolean);
+}
+
+function getGroupGoalLibraryUploadConfig(config, group) {
+  return {
+    ...config,
+    goalGroups: [group],
+    goalKpiMode: group?.libraryType === 'kra-kpi' ? 'kra-kpi' : 'kra-only',
+    goalLibraryScope: 'common',
+    goalSegmentValues: [],
+  };
+}
+
+function validateBulkGoalLibraryUpload(config, importedLibraries = []) {
+  const groups = (config?.goalGroups || []).filter(isGroupLibraryEnabled);
+  const groupLookup = new Map(groups.map(group => [String(group.name || '').trim().toLowerCase(), group]));
+  const allSlots = groups.flatMap(group =>
+    getGroupLibraryAssignments(group).map(assignment => ({
+      group,
+      assignment,
+      groupKey: String(group.name || '').trim().toLowerCase(),
+      labelKey: String(assignment.label || '').trim().toLowerCase(),
+    }))
+  );
+  const slotLabels = allSlots.map(slot => slot.assignment.label).filter(Boolean);
+  const errors = [];
+
+  (importedLibraries || []).forEach((library) => {
+    const libraryName = String(library?.name || '').trim();
+    const libraryKey = libraryName.toLowerCase();
+    const groupName = String(library?.groupName || '').trim();
+    const groupKey = groupName.toLowerCase();
+    let targetGroup = groupKey ? groupLookup.get(groupKey) : null;
+
+    if (groupName && !targetGroup) {
+      errors.push({
+        field: 'group_name',
+        message: `Group Name "${groupName}" is not configured for Goal Libraries. Use one of: ${groups.map(g => g.name).filter(Boolean).join(', ') || 'none configured'}.`,
+      });
+      return;
+    }
+
+    let slotMatch = null;
+    if (targetGroup) {
+      slotMatch = allSlots.find(slot => slot.group.id === targetGroup.id && slot.labelKey === libraryKey);
+      if (!slotMatch) {
+        const validForGroup = getGroupLibraryAssignments(targetGroup).map(assignment => assignment.label).filter(Boolean);
+        errors.push({
+          field: 'library_name',
+          message: `Library Name "${libraryName || 'blank'}" is not valid for "${targetGroup.name}". Use one of: ${validForGroup.join(', ') || 'none configured'}.`,
+        });
+        return;
+      }
+    } else {
+      const plainMatches = allSlots.filter(slot => slot.labelKey === libraryKey);
+      if (plainMatches.length === 1) {
+        slotMatch = plainMatches[0];
+        targetGroup = slotMatch.group;
+      } else if (plainMatches.length > 1) {
+        errors.push({
+          field: 'group_name',
+          message: `Library Name "${libraryName}" exists in multiple groups. Add the exact Group Name column value to the sheet.`,
+        });
+        return;
+      } else {
+        errors.push({
+          field: 'library_name',
+          message: `Library Name "${libraryName || 'blank'}" is not configured. Use one of: ${slotLabels.join(', ') || 'none configured'}.`,
+        });
+        return;
+      }
+    }
+
+    const validationConfig = getGroupGoalLibraryUploadConfig(config, targetGroup || slotMatch?.group);
+    validateGoalLibraryData(
+      { byAttr: false, data: flattenLibraryPerspectivesForValidation(library.perspectives || []) },
+      validationConfig
+    )
+      .filter(error => error.field === 'perspective' || error.field === 'kra_weight' || error.field === 'kpi_weight')
+      .forEach(error => {
+        errors.push({
+          ...error,
+          message: `${targetGroup?.name || 'Goal Library'} / ${libraryName || 'Untitled'}: ${error.message}`,
+        });
+      });
+  });
+
+  return errors;
+}
+
 function PrefillSheetControls({ config, selectedGroup, onImported, phase, setPhase, errors, setErrors }) {
   const fileRef = useRef(null);
   const wrapRef = useRef(null);
@@ -2522,8 +2677,37 @@ function PrefillSheetControls({ config, selectedGroup, onImported, phase, setPha
       const result = await parseGoalLibraryBulkXlsx(file, [parserGroup], {
         requireGroupName: (config?.goalGroups || []).filter(g => g.prefillType).length > 1,
       });
+      const expectedCardNames = getGroupPrefillAssignments(selectedGroup).map(assignment => String(assignment.label || '').trim()).filter(Boolean);
+      const expectedCardNamesLower = expectedCardNames.map(name => name.toLowerCase());
+      const expectedGroupName = String(selectedGroup.name || '').trim();
+      const uploadMappingErrors = [];
+      const importedLibraries = result.libraries || [];
+
+      importedLibraries.forEach((library) => {
+        const libraryName = String(library?.name || '').trim();
+        const libraryGroupName = String(library?.groupName || '').trim();
+        if (libraryGroupName && expectedGroupName && libraryGroupName.toLowerCase() !== expectedGroupName.toLowerCase()) {
+          uploadMappingErrors.push({
+            field: 'group_name',
+            message: `Group Name "${libraryGroupName}" does not match the selected group "${expectedGroupName}".`,
+          });
+        }
+        if (!libraryName || !expectedCardNamesLower.includes(libraryName.toLowerCase())) {
+          uploadMappingErrors.push({
+            field: 'card_name',
+            message: `Card Name "${libraryName || 'blank'}" is not configured for ${expectedGroupName || 'this group'}. Use one of: ${expectedCardNames.join(', ') || 'none configured'}.`,
+          });
+        }
+      });
+
+      if (uploadMappingErrors.length > 0) {
+        setErrors(uploadMappingErrors);
+        setPhase('error');
+        return;
+      }
+
       const validationConfig = getGroupPrefillUploadConfig(config, selectedGroup);
-      const validationErrors = (result.libraries || []).flatMap((library) => (
+      const validationErrors = importedLibraries.flatMap((library) => (
         validateGoalLibraryData(
           { byAttr: false, data: flattenLibraryPerspectivesForValidation(library.perspectives || []) },
           validationConfig
@@ -2539,12 +2723,12 @@ function PrefillSheetControls({ config, selectedGroup, onImported, phase, setPha
         return;
       }
 
-      onImported(result.libraries || []);
+      onImported(importedLibraries);
       setPhase('done');
       setMessage(`${result.count || 0} pre-fill card${(result.count || 0) === 1 ? '' : 's'} imported.`);
       setOpen(false);
     } catch (error) {
-      const nextErrors = [{ field: 'parse', message: error.message }];
+      const nextErrors = formatUploadErrorMessages(error).map((message) => ({ field: 'parse', message }));
       setErrors(nextErrors);
       setPhase('error');
       setMessage(error.message || 'Could not import pre-fill data from the uploaded sheet.');
@@ -4139,15 +4323,6 @@ function StepPrefillData({ config, update }) {
                     errors={errors}
                     setErrors={setErrors}
                   />
-                  {phase === 'error' && errors.length > 0 && (
-                    <div style={{ padding: '12px 14px', background: '#FEF2F2', borderRadius: 16, border: '1px solid #FECACA' }}>
-                      {errors.map((error, index) => (
-                        <div key={`${error.field}_${index}`} style={{ fontSize: 12, color: '#DC2626', lineHeight: 1.5 }}>
-                          {error.message}
-                        </div>
-                      ))}
-                    </div>
-                  )}
                 </>
               )}
             </div>
@@ -4155,11 +4330,17 @@ function StepPrefillData({ config, update }) {
         </div>
       </div>
 
+      <UploadValidationPanel
+        title="validation error"
+        errors={phase === 'error' ? errors : []}
+      />
+
       <StepStatusBar
         applied={isApplied}
         valid={isValid}
         appliedMessage="Pre-fill data confirmed — proceed to Goal Libraries."
         pendingMessage={groupsNeedingPrefill.length > 0 && !isValid ? 'Upload pre-fill data for every pre-fill-enabled group.' : 'Click confirm to proceed.'}
+        invalidMessage={phase === 'error' && errors.length > 0 ? 'Fix the upload errors shown above, then re-upload the sheet.' : 'Upload pre-fill data for every pre-fill-enabled group.'}
         buttonLabel="Confirm Pre-fill Data"
         onApply={() => update('prefillDataAppliedSnapshot', `confirmed_${Date.now()}`)}
       />
@@ -4666,6 +4847,7 @@ function StepGoalLibraries({ config, update }) {
   const [showAllGroups, setShowAllGroups] = useState(false);
   const [selectedGroupId, setSelectedGroupId] = useState(groupsNeedingLib[0]?.id || '');
   const [editingSlot, setEditingSlot] = useState(null);
+  const [uploadErrors, setUploadErrors] = useState([]);
 
   const groupsWithAssignments = groupsNeedingLib.map(group => ({
     ...group,
@@ -4728,6 +4910,7 @@ function StepGoalLibraries({ config, update }) {
       update('goalGroups', setGroupLibraryAssignments(groups, editingSlot.group.id, nextAssignments));
     }
     update('goalLibrariesAppliedSnapshot', null);
+    setUploadErrors([]);
     setShowAddModal(false);
     setEditingLibraryId(null);
     setEditingSlot(null);
@@ -4743,6 +4926,7 @@ function StepGoalLibraries({ config, update }) {
       ),
     })));
     update('goalLibrariesAppliedSnapshot', null);
+    setUploadErrors([]);
   }
 
   function openSlotEditor(group, assignment, libraryId = null) {
@@ -4974,11 +5158,14 @@ function StepGoalLibraries({ config, update }) {
                 downloadConfig={templateScopeConfig}
                 existingLibraries={libraries}
                 onImported={handleImportedLibraries}
+                onUploadErrors={setUploadErrors}
               />
             </div>
           </div>
         </div>
       </div>
+
+      <UploadValidationPanel title="validation error" errors={uploadErrors} />
 
       <StepStatusBar
         applied={isApplied}
@@ -4987,11 +5174,22 @@ function StepGoalLibraries({ config, update }) {
         pendingMessage={
           groupsWithAssignments.length === 0
             ? 'Click confirm to proceed.'
+            : uploadErrors.length > 0
+              ? 'Fix the goal library upload errors shown above, then re-upload.'
             : !allSlotsAssigned
               ? 'Open each card and configure a library for every attribute value.'
               : mismatchedLibraries.length > 0
                 ? `Fix perspective mismatch on ${mismatchedLibraries.length === 1 ? 'library' : 'libraries'}: ${mismatchedLibraries.map(l => l.name || 'Untitled').join(', ')}. Open the library and use "Sync to configured perspectives".`
                 : 'Click confirm to proceed.'
+        }
+        invalidMessage={
+          uploadErrors.length > 0
+            ? 'Fix the goal library upload errors shown above, then re-upload.'
+            : !allSlotsAssigned
+              ? 'Open each card and configure a library for every attribute value.'
+              : mismatchedLibraries.length > 0
+                ? `Fix perspective mismatch on ${mismatchedLibraries.length === 1 ? 'library' : 'libraries'}: ${mismatchedLibraries.map(l => l.name || 'Untitled').join(', ')}.`
+                : 'Fix the KRA library issues above before confirming.'
         }
         buttonLabel="Confirm Libraries"
         onApply={() => update('goalLibrariesAppliedSnapshot', `confirmed_${Date.now()}`)}
@@ -5477,20 +5675,6 @@ function StepSummary({ config, onLaunched }) {
           {warnings.map((w, i) => <div key={i} style={{ fontSize: 12.5, color: '#78350F', marginBottom: 3 }}>· {w}</div>)}
         </div>
       )}
-      {/* Launch */}
-      <div style={{ background: 'linear-gradient(135deg,#1E293B,#0F172A)', borderRadius: 14, padding: '28px 32px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-        <div>
-          <div style={{ fontSize: 16, fontWeight: 800, color: '#fff', marginBottom: 4 }}>Ready to go live?</div>
-          <div style={{ fontSize: 13, color: '#94A3B8' }}>This will activate the appraisal cycle for all employees.</div>
-        </div>
-        <button
-          type="button"
-          onClick={onLaunched}
-          style={{ padding: '12px 28px', background: '#16A34A', color: '#fff', border: 'none', borderRadius: 10, fontSize: 14, fontWeight: 700, cursor: 'pointer', fontFamily: 'inherit', boxShadow: '0 4px 14px rgba(22,163,74,.4)' }}
-        >
-          🚀 Launch Cycle
-        </button>
-      </div>
     </div>
   );
 }
@@ -6691,7 +6875,7 @@ function GroupDataUploadPanel({ group, config, update }) {
         else setLibraryImportOpen(false);
       }
     } catch (err) {
-      setImportErrors(prev => ({ ...prev, [type]: [{ field: 'parse', message: err.message }] }));
+      setImportErrors(prev => ({ ...prev, [type]: formatUploadErrorMessages(err).map((message) => ({ field: 'parse', message })) }));
       setImportPhase(prev => ({ ...prev, [type]: 'error' }));
     }
   }
@@ -6874,7 +7058,7 @@ function StepKRALibrary({ config, update }) {
         setImportOpen(false);
       }
     } catch (err) {
-      setImportErrors([{ group: null, kraName: null, field: 'parse', message: err.message }]);
+      setImportErrors(formatUploadErrorMessages(err).map((message) => ({ group: null, kraName: null, field: 'parse', message })));
       setImportPhase('error');
     }
   }
@@ -7202,10 +7386,12 @@ function StepEmployeeUpload({ config, update, orgKey }) {
       const workspaceOrg = readOrganizationsSync().find((item) => item.key === orgKey) || null;
       const uploadedEmployees = Array.isArray(persistedResult?.employees) ? persistedResult.employees : [];
 
-      if (workspaceOrg?.temporaryPassword && uploadedEmployees.length > 0) {
+      if (uploadedEmployees.length > 0) {
+        // Each employee now gets a unique 6-digit OTP at credential creation
+        // time, generated inside syncEmployeeCredentialsForOrg. The org-wide
+        // password no longer gates this step.
         await syncEmployeeCredentialsForOrg({
           orgKey: orgKey || '',
-          tempPassword: workspaceOrg.temporaryPassword,
           employees: uploadedEmployees,
         });
       }
@@ -7386,23 +7572,7 @@ function StepEmployeeUpload({ config, update, orgKey }) {
 
               {/* Validation errors panel */}
               {uploadState.status === 'invalid' && uploadState.errors?.length > 0 && (
-                <div style={{ background: '#FEF2F2', border: '1.5px solid #FECACA', borderRadius: 10, overflow: 'hidden' }}>
-                  <div style={{ padding: '10px 16px', background: '#FEE2E2', display: 'flex', alignItems: 'center', gap: 8 }}>
-                    <span style={{ fontSize: 14 }}>✕</span>
-                    <span style={{ fontSize: 13, fontWeight: 600, color: '#DC2626' }}>
-                      {uploadState.errors.length} validation error{uploadState.errors.length !== 1 ? 's' : ''} — fix and re-upload
-                    </span>
-                  </div>
-                  <div style={{ maxHeight: 220, overflowY: 'auto' }}>
-                    {uploadState.errors.map((err, i) => (
-                      <div key={i} style={{ display: 'grid', gridTemplateColumns: '60px 120px 1fr', gap: 8, padding: '7px 16px', borderTop: '1px solid #FECACA', fontSize: 12, color: '#374151' }}>
-                        <span style={{ color: '#9CA3AF', fontFamily: 'monospace' }}>{getIssueRowLabel(err)}</span>
-                        <span style={{ color: '#6B7280', fontFamily: 'monospace', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{err.code}</span>
-                        <span style={{ color: '#DC2626' }}>{err.message}</span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
+                <UploadValidationPanel title="validation error" errors={uploadState.errors} />
               )}
 
               {/* Warnings panel (shown when upload succeeded but there are soft issues) */}
@@ -8430,15 +8600,6 @@ function StepPrefillDataFlat({ config, update }) {
               {selectedGroup && (
                 <>
                   <PrefillSheetControls config={config} selectedGroup={selectedGroup} onImported={importPrefillLibraries} phase={phase} setPhase={setPhase} errors={errors} setErrors={setErrors} />
-                  {phase === 'error' && errors.length > 0 && (
-                    <div style={{ padding: '12px 14px', background: '#FEF2F2', borderRadius: 16, border: '1px solid #FECACA' }}>
-                      {errors.map((error, index) => (
-                        <div key={`${error.field}_${index}`} style={{ fontSize: 12, color: '#DC2626', lineHeight: 1.5 }}>
-                          {error.message}
-                        </div>
-                      ))}
-                    </div>
-                  )}
                 </>
               )}
             </div>
@@ -8446,11 +8607,17 @@ function StepPrefillDataFlat({ config, update }) {
         </div>
       </div>
 
+      <UploadValidationPanel
+        title="validation error"
+        errors={phase === 'error' ? errors : []}
+      />
+
       <StepStatusBar
         applied={isApplied}
         valid={isValid}
         appliedMessage="Pre-fill data confirmed — proceed to Goal Libraries."
         pendingMessage={groupsNeedingPrefill.length > 0 && !isValid ? 'Upload pre-fill data for every pre-fill-enabled group.' : 'Click confirm to proceed.'}
+        invalidMessage={phase === 'error' && errors.length > 0 ? 'Fix the upload errors shown above, then re-upload the sheet.' : 'Upload pre-fill data for every pre-fill-enabled group.'}
         buttonLabel="Confirm Pre-fill Data"
         onApply={() => update('prefillDataAppliedSnapshot', `confirmed_${Date.now()}`)}
       />
@@ -8468,6 +8635,7 @@ function StepGoalLibrariesFlat({ config, update }) {
   const [showAllGroups, setShowAllGroups] = useState(false);
   const [selectedGroupId, setSelectedGroupId] = useState(groupsNeedingLib[0]?.id || '');
   const [editingSlot, setEditingSlot] = useState(null);
+  const [uploadErrors, setUploadErrors] = useState([]);
 
   const groupsWithAssignments = groupsNeedingLib.map(group => ({
     ...group,
@@ -8513,6 +8681,7 @@ function StepGoalLibrariesFlat({ config, update }) {
       update('goalGroups', setGroupLibraryAssignments(groups, editingSlot.group.id, nextAssignments));
     }
     update('goalLibrariesAppliedSnapshot', null);
+    setUploadErrors([]);
     setShowAddModal(false);
     setEditingLibraryId(null);
     setEditingSlot(null);
@@ -8528,6 +8697,7 @@ function StepGoalLibrariesFlat({ config, update }) {
       ),
     })));
     update('goalLibrariesAppliedSnapshot', null);
+    setUploadErrors([]);
   }
 
   function openSlotEditor(group, assignment, libraryId = null) {
@@ -8692,11 +8862,13 @@ function StepGoalLibrariesFlat({ config, update }) {
             </div>
 
             <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
-              <GoalLibrarySheetControls config={config} downloadConfig={templateScopeConfig} existingLibraries={libraries} onImported={handleImportedLibraries} />
+              <GoalLibrarySheetControls config={config} downloadConfig={templateScopeConfig} existingLibraries={libraries} onImported={handleImportedLibraries} onUploadErrors={setUploadErrors} />
             </div>
           </div>
         </div>
       </div>
+
+      <UploadValidationPanel title="validation error" errors={uploadErrors} />
 
       <StepStatusBar
         applied={isApplied}
@@ -8705,9 +8877,18 @@ function StepGoalLibrariesFlat({ config, update }) {
         pendingMessage={
           groupsWithAssignments.length === 0
             ? 'Click confirm to proceed.'
+            : uploadErrors.length > 0
+              ? 'Fix the goal library upload errors shown above, then re-upload.'
             : !allSlotsAssigned
               ? 'Open each card and configure a library for every attribute value.'
               : 'Click confirm to proceed.'
+        }
+        invalidMessage={
+          uploadErrors.length > 0
+            ? 'Fix the goal library upload errors shown above, then re-upload.'
+            : !allSlotsAssigned
+              ? 'Open each card and configure a library for every attribute value.'
+              : 'Fix the KRA library issues above before confirming.'
         }
         buttonLabel="Confirm Libraries"
         onApply={() => update('goalLibrariesAppliedSnapshot', `confirmed_${Date.now()}`)}
@@ -9425,8 +9606,11 @@ export default function PMSWizard({ onLaunched, orgKeyOverride, orgNameOverride 
           {stepComponents[safeStep]}
         </div>
 
-        {/* PAIR PENDING STRIP — current step is complete but its adjacent sibling isn't */}
-        {canProceed && pendingSiblingStep && (
+        {/* PAIR PENDING STRIP — only useful when the pending sibling is BEHIND the
+            user (they jumped ahead and the earlier step still needs completion).
+            When the sibling is the natural next step, the Next button already
+            takes them there, so this strip would just be noise. */}
+        {canProceed && pendingSiblingStep && pendingSiblingIndex < safeStep && (
           <div style={{ padding: '9px 32px', background: '#EFF6FF', borderTop: '1.5px solid #BFDBFE', display: 'flex', alignItems: 'center', gap: 10 }}>
             <span style={{ fontSize: 12.5, color: '#1E40AF', fontWeight: 500, flex: 1 }}>
               ↺ <strong>{pendingSiblingStep.label}</strong> still needs to be completed — Next will take you there before advancing to {navSteps[Math.max(pendingSiblingIndex, safeStep) + 1]?.label || 'the next step'}.
@@ -9457,9 +9641,13 @@ export default function PMSWizard({ onLaunched, orgKeyOverride, orgNameOverride 
                 ← Back
               </button>
             )}
-            <button onClick={next} disabled={!canProceed} style={{ padding: '9px 22px', background: !canProceed ? '#CBD5E1' : safeStep === totalSteps - 1 ? '#16A34A' : '#2563EB', color: '#fff', border: 'none', borderRadius: 9, fontSize: 13.5, fontWeight: 600, cursor: !canProceed ? 'not-allowed' : 'pointer', fontFamily: 'inherit' }}>
+            <button
+              onClick={safeStep === totalSteps - 1 ? onLaunched : next}
+              disabled={safeStep === totalSteps - 1 ? false : !canProceed}
+              style={{ padding: '9px 22px', background: safeStep === totalSteps - 1 ? '#16A34A' : (!canProceed ? '#CBD5E1' : '#2563EB'), color: '#fff', border: 'none', borderRadius: 9, fontSize: 13.5, fontWeight: 600, cursor: (safeStep === totalSteps - 1 || canProceed) ? 'pointer' : 'not-allowed', fontFamily: 'inherit', boxShadow: safeStep === totalSteps - 1 ? '0 4px 14px rgba(22,163,74,.4)' : 'none' }}
+            >
               {safeStep === totalSteps - 1
-                ? '🚀 Launch'
+                ? '🚀 Launch Cycle'
                 : (() => {
                     const targetIdx = canProceed ? getNextTargetIndex() : safeStep + 1;
                     return `Next: ${navSteps[targetIdx]?.label || ''} →`;
@@ -9760,7 +9948,7 @@ const ORG_GROUP_PALETTE = [
   { dot: '#7C3AED', bg: '#F5F3FF', border: '#DDD6FE', text: '#5B21B6', avatarFrom: '#7C3AED', avatarTo: '#A855F7' },
 ];
 
-export function OrgChartPanel({ employees, groups }) {
+function LegacyOrgChartPanel({ employees, groups }) {
   const [expandedOrgNodeIds, setExpandedOrgNodeIds] = useState({});
   const [organogramSearch, setOrganogramSearch]     = useState('');
   const [orgViewMode, setOrgViewMode]               = useState('tree');
@@ -9969,7 +10157,6 @@ export function OrgChartPanel({ employees, groups }) {
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 14 }}>
           <span style={{ fontSize: 11.5, fontWeight: 700, color: '#334155', background: '#FFFFFF', border: '1px solid #E2E8F0', borderRadius: 999, padding: '5px 10px' }}>Root</span>
           <span style={{ fontSize: 11.5, fontWeight: 700, color: '#6D28D9', background: '#F5F3FF', border: '1px solid #DDD6FE', borderRadius: 999, padding: '5px 10px' }}>Cross-group manager</span>
-          <span style={{ fontSize: 11.5, fontWeight: 700, color: '#C2410C', background: '#FFF7ED', border: '1px solid #FED7AA', borderRadius: 999, padding: '5px 10px' }}>External manager</span>
         </div>
       )}
 
@@ -10061,4 +10248,617 @@ export function OrgChartPanel({ employees, groups }) {
       {orgContent(true)}
     </div>
   ) : orgContent(false);
+}
+
+function orgMapCode(emp) {
+  return String(emp?.['Employee Code'] || '').trim();
+}
+
+function orgMapName(emp) {
+  return String(emp?.['Employee Name'] || emp?.['Employee Code'] || 'Employee').trim();
+}
+
+function orgMapGroup(emp) {
+  return String(emp?.assignedGoalGroupName || emp?.['Group Name'] || '').trim();
+}
+
+function orgMapField(emp, keys) {
+  const source = emp || {};
+  for (const key of keys) {
+    const direct = source[key];
+    if (direct !== undefined && direct !== null && String(direct).trim()) return String(direct).trim();
+    const normalized = normalizeEmployeeFieldKey(key);
+    const found = Object.keys(source).find((item) => normalizeEmployeeFieldKey(item) === normalized);
+    if (found && source[found] !== undefined && source[found] !== null && String(source[found]).trim()) {
+      return String(source[found]).trim();
+    }
+  }
+  return '';
+}
+
+function orgMapNumber(emp, keys) {
+  const raw = orgMapField(emp, keys).replace('%', '');
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function orgMapStageMeta(emp) {
+  const raw = getEmpStage(emp);
+  const explicit = orgMapField(emp, ['Review Stage', 'Review Cycle Stage', 'Cycle Stage', 'PMS Stage', 'Stage']).toLowerCase();
+  if (explicit.includes('calibr')) return { key: 'calibration', label: 'Calibration', color: '#9333EA', bg: '#FAF5FF', border: '#E9D5FF' };
+  if (explicit.includes('closed') || explicit.includes('complete')) return { key: 'closed', label: 'Closed', color: '#15803D', bg: '#F0FDF4', border: '#BBF7D0' };
+  if (explicit.includes('manager')) return { key: 'manager-review', label: 'Manager Review', color: '#7C3AED', bg: '#F5F3FF', border: '#DDD6FE' };
+  if (explicit.includes('self')) return { key: 'self-review', label: 'Self-Review', color: '#0891B2', bg: '#ECFEFF', border: '#A5F3FC' };
+  if (raw === 'self-evaluation') return { key: 'self-review', label: 'Self-Review', color: '#0891B2', bg: '#ECFEFF', border: '#A5F3FC' };
+  if (raw === 'mgr-evaluation') return { key: 'manager-review', label: 'Manager Review', color: '#7C3AED', bg: '#F5F3FF', border: '#DDD6FE' };
+  if (raw === 'completed') return { key: 'closed', label: 'Closed', color: '#15803D', bg: '#F0FDF4', border: '#BBF7D0' };
+  return { key: 'not-started', label: 'Not Started', color: '#D97706', bg: '#FFFBEB', border: '#FDE68A' };
+}
+
+function orgMapGoalPct(emp) {
+  const explicit = orgMapNumber(emp, ['Goal Completion %', 'Goal Completion', 'Goal %', 'Goals %', 'Completion %', 'Progress %']);
+  if (explicit !== null) return Math.max(0, Math.min(100, Math.round(explicit)));
+  const stage = getEmpStage(emp);
+  if (stage === 'completed') return 100;
+  if (stage === 'mgr-evaluation') return 75;
+  if (stage === 'self-evaluation') return 55;
+  if (stage === 'pending-approval') return 35;
+  return 0;
+}
+
+function orgMapDateValue(emp, keys) {
+  const raw = orgMapField(emp, keys);
+  if (!raw) return null;
+  const parsed = new Date(raw);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+function orgMapDateLabel(date) {
+  if (!date) return 'Not logged';
+  return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+}
+
+function orgMapRating(emp) {
+  return orgMapNumber(emp, ['Rating', 'Final Rating', 'Manager Rating', 'Performance Rating']);
+}
+
+function orgMapFlags(emp) {
+  const stage = getEmpStage(emp);
+  const goalPct = orgMapGoalPct(emp);
+  const joinDate = orgMapDateValue(emp, ['Joining Date', 'Date of Joining', 'Join Date', 'Start Date']);
+  const daysSinceJoin = joinDate ? Math.floor((Date.now() - joinDate.getTime()) / 86400000) : null;
+  const pip = /^(yes|y|true|1|pip|on pip)$/i.test(orgMapField(emp, ['PIP', 'On PIP', 'Performance Improvement Plan']));
+  const goalsOverdue = /overdue/i.test(orgMapField(emp, ['Goal Status', 'Goals Status'])) || (goalPct < 100 && (stage === 'goal-creation' || stage === 'pending-approval'));
+  const reviewOverdue = /overdue/i.test(orgMapField(emp, ['Review Status', 'Review Overdue'])) || stage === 'self-evaluation' || stage === 'mgr-evaluation';
+  return {
+    noGoals: goalPct === 0,
+    goalsOverdue,
+    reviewOverdue,
+    newHire: daysSinceJoin !== null && daysSinceJoin >= 0 && daysSinceJoin <= 90,
+    pip,
+    attention: goalsOverdue || reviewOverdue || pip,
+  };
+}
+
+function orgMapNodeStats(node) {
+  const reports = [];
+  function collect(current) {
+    (current?.reports || []).forEach((child) => {
+      reports.push(child.employee);
+      collect(child);
+    });
+  }
+  collect(node);
+  const ratings = reports.map(orgMapRating).filter((value) => value !== null);
+  const avg = ratings.length ? (ratings.reduce((sum, value) => sum + value, 0) / ratings.length).toFixed(1) : '—';
+  return {
+    reports: reports.length,
+    goalsPending: reports.filter((emp) => orgMapGoalPct(emp) < 100).length,
+    reviewOverdue: reports.filter((emp) => orgMapFlags(emp).reviewOverdue).length,
+    avg,
+  };
+}
+
+function orgMapCardMeta(emp, group) {
+  const role = orgMapField(emp, ['Designation', 'Role', 'Job Title', 'Title']);
+  const level = orgMapField(emp, ['Level', 'Grade', 'Band']);
+  const configuredAttr = String(group?.segmentAttr || group?.groupAttr || '').trim();
+  const configuredValue = configuredAttr ? orgMapField(emp, [configuredAttr]) : '';
+  const fallbackAttr = configuredAttr ? '' : ['Department', 'Function', 'Business Unit', 'Grade', 'Band', 'Location'].find((key) => orgMapField(emp, [key]));
+  const attrLabel = configuredAttr || fallbackAttr || '';
+  const attrValue = configuredValue || (fallbackAttr ? orgMapField(emp, [fallbackAttr]) : '');
+  return {
+    roleLine: [role, level].filter(Boolean).join(' · '),
+    attrLabel,
+    attrValue,
+  };
+}
+
+function buildOrgMapGroups(employees, groups) {
+  const allEmployees = Array.isArray(employees) ? employees : [];
+  const byCode = new Map();
+  allEmployees.forEach((emp) => {
+    const code = orgMapCode(emp).toLowerCase();
+    if (code) byCode.set(code, emp);
+  });
+
+  const knownNames = new Set((groups || []).map((g) => String(g?.name || '').trim().toLowerCase()).filter(Boolean));
+  const baseGroups = (groups || []).map((group, gi) => {
+    const name = String(group?.name || `Group ${gi + 1}`).trim();
+    const lower = name.toLowerCase();
+    return {
+      ...group,
+      id: group?.id || lower || String(gi),
+      name,
+      pal: ORG_GROUP_PALETTE[gi % ORG_GROUP_PALETTE.length],
+      members: allEmployees.filter((emp) => orgMapGroup(emp).toLowerCase() === lower),
+    };
+  });
+  const unassigned = allEmployees.filter((emp) => {
+    const g = orgMapGroup(emp).toLowerCase();
+    return !knownNames.has(g);
+  });
+  if (unassigned.length) {
+    baseGroups.push({
+      id: '__unassigned__',
+      name: 'Unassigned',
+      pal: { dot: '#64748B', bg: '#F8FAFC', border: '#E2E8F0', text: '#475569', avatarFrom: '#64748B', avatarTo: '#94A3B8' },
+      members: unassigned,
+    });
+  }
+
+  function buildCoverage(group) {
+    const memberByCode = new Map(group.members.map((emp) => [orgMapCode(emp).toLowerCase(), emp]));
+    const reportsByManager = new Map();
+    const externalManagers = new Map();
+    const crossGroupManagers = new Map();
+    let noManagerCount = 0;
+
+    group.members.forEach((emp) => {
+      const managerCodeRaw = String(emp['Reporting Manager Code'] || '').trim();
+      const managerCode = managerCodeRaw.toLowerCase();
+      if (!managerCode) {
+        noManagerCount += 1;
+        return;
+      }
+      const list = reportsByManager.get(managerCode) || [];
+      list.push(emp);
+      reportsByManager.set(managerCode, list);
+
+      if (!memberByCode.has(managerCode)) {
+        const managerEmp = byCode.get(managerCode);
+        const managerName = String(emp['Reporting Manager Name'] || '').trim();
+        if (managerEmp) {
+          crossGroupManagers.set(managerCode, managerEmp);
+        } else {
+          externalManagers.set(managerCode, {
+            'Employee Code': managerCodeRaw,
+            'Employee Name': managerName || managerCodeRaw,
+            _externalManager: true,
+          });
+        }
+      }
+    });
+
+    function buildNode(emp, trail = new Set()) {
+      const code = orgMapCode(emp).toLowerCase();
+      if (!code || trail.has(code)) return { employee: emp, reports: [], reportCount: 0 };
+      const nextTrail = new Set(trail);
+      nextTrail.add(code);
+      const reports = (reportsByManager.get(code) || [])
+        .slice()
+        .sort((a, b) => orgMapName(a).localeCompare(orgMapName(b)))
+        .map((child) => buildNode(child, nextTrail));
+      return { employee: emp, reports, reportCount: reports.length };
+    }
+
+    const roots = group.members
+      .filter((emp) => {
+        const managerCode = String(emp['Reporting Manager Code'] || '').trim().toLowerCase();
+        return !managerCode;
+      })
+      .sort((a, b) => orgMapName(a).localeCompare(orgMapName(b)))
+      .map((emp) => buildNode(emp));
+
+    externalManagers.forEach((managerEmp, managerCode) => {
+      const reports = (reportsByManager.get(managerCode) || [])
+        .slice()
+        .sort((a, b) => orgMapName(a).localeCompare(orgMapName(b)))
+        .map((emp) => buildNode(emp, new Set([managerCode])));
+      roots.push({ employee: managerEmp, reports, reportCount: reports.length, externalRoot: true });
+    });
+
+    crossGroupManagers.forEach((managerEmp, managerCode) => {
+      const reports = (reportsByManager.get(managerCode) || [])
+        .slice()
+        .sort((a, b) => orgMapName(a).localeCompare(orgMapName(b)))
+        .map((emp) => buildNode(emp, new Set([managerCode])));
+      roots.push({ employee: { ...managerEmp, _crossGroupManager: true }, reports, reportCount: reports.length, crossGroupRoot: true });
+    });
+
+    roots.sort((a, b) => {
+      if (a.externalRoot !== b.externalRoot) return a.externalRoot ? 1 : -1;
+      if (a.crossGroupRoot !== b.crossGroupRoot) return a.crossGroupRoot ? 1 : -1;
+      return orgMapName(a.employee).localeCompare(orgMapName(b.employee));
+    });
+
+    return {
+      ...group,
+      roots,
+      noManagerCount,
+      externalManagerCount: externalManagers.size,
+      crossGroupCount: crossGroupManagers.size,
+    };
+  }
+
+  return baseGroups.map(buildCoverage).filter((group) => group.members.length > 0);
+}
+
+function OrgMapCard({ node, selectedCode, onSelect, compact = false, viewMode = 'org', group = null }) {
+  const emp = node.employee || {};
+  const code = orgMapCode(emp);
+  const name = orgMapName(emp);
+  const selected = code && code.toLowerCase() === selectedCode;
+  // RM-not-in-PMS is intentionally NOT typecast as external — it can be a late
+  // entry or a phased rollout. Card renders as a normal employee card.
+  const isExternal = false;
+  const isCross = !!emp._crossGroupManager || !!node.crossGroupRoot;
+  const stage = orgMapStageMeta(emp);
+  const goalPct = orgMapGoalPct(emp);
+  const flags = orgMapFlags(emp);
+  const meta = orgMapCardMeta(emp, group);
+  const stats = node.reportCount > 0 ? orgMapNodeStats(node) : null;
+  const avatarBg = isExternal ? 'linear-gradient(135deg,#F97316,#C2410C)' : isCross ? 'linear-gradient(135deg,#7C3AED,#4F46E5)' : 'linear-gradient(135deg,#334155,#475569)';
+  const heatmapBg = viewMode === 'heatmap' && !isExternal && !isCross
+    ? `linear-gradient(180deg, ${stage.bg}, #FFFFFF)`
+    : isExternal ? 'linear-gradient(180deg,#FFF7ED,#FFFFFF)' : 'rgba(255,255,255,.9)';
+
+  return (
+    <button type="button" onClick={() => onSelect(emp)}
+      style={{
+        width: '100%', border: `1px solid ${selected ? '#2563EB' : isExternal ? '#FDBA74' : isCross ? '#DDD6FE' : 'rgba(226,232,240,.78)'}`,
+        borderRadius: compact ? 14 : 20, background: selected ? '#EFF6FF' : heatmapBg,
+        padding: compact ? '10px 11px' : '13px 14px', textAlign: 'left', cursor: 'pointer',
+        fontFamily: 'inherit', boxShadow: selected ? '0 18px 38px rgba(37,99,235,.16)' : '0 16px 36px rgba(15,23,42,.06)', position: 'relative',
+      }}>
+      {flags.attention && !isExternal && !isCross && (
+        <span title="Needs attention: overdue goals, overdue review, or PIP flag" style={{ position: 'absolute', top: 10, right: 10, width: 8, height: 8, borderRadius: '50%', background: '#DC2626', boxShadow: '0 0 0 3px #FEE2E2' }} />
+      )}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
+        <div style={{ width: compact ? 30 : 38, height: compact ? 30 : 38, borderRadius: 10, background: avatarBg, color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: compact ? 10 : 12, fontWeight: 800, flexShrink: 0 }}>
+          {getInitials(name)}
+        </div>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontSize: compact ? 12.2 : 13.2, fontWeight: 800, color: '#0F172A', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{name}</div>
+          <div style={{ fontSize: 11.2, color: '#64748B', marginTop: 2, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+            {code ? `Code ${code}` : 'No code'}
+          </div>
+        </div>
+      </div>
+      <div style={{ marginTop: 9, paddingLeft: compact ? 40 : 48 }}>
+        {meta.attrValue && (
+          <div style={{ fontSize: 11.2, color: '#475569', fontWeight: 700, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+            {meta.attrValue}
+          </div>
+        )}
+        {!isExternal && !isCross && (
+          <div style={{ marginTop: meta.roleLine || (meta.attrLabel && meta.attrValue) ? 8 : 0 }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, fontSize: 10.8, color: '#64748B', fontWeight: 750 }}>
+              <span>Goals</span>
+              <span>{goalPct}%</span>
+            </div>
+            <div style={{ marginTop: 4, height: 5, borderRadius: 999, background: '#E2E8F0', overflow: 'hidden' }}>
+              <div style={{ width: `${goalPct}%`, height: '100%', borderRadius: 999, background: goalPct >= 100 ? '#16A34A' : goalPct > 50 ? '#4F46E5' : '#D97706' }} />
+            </div>
+          </div>
+        )}
+      </div>
+      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 9, paddingLeft: compact ? 40 : 48 }}>
+        {isCross && <span style={{ fontSize: 10.5, fontWeight: 800, color: '#6D28D9', background: '#F5F3FF', border: '1px solid #DDD6FE', borderRadius: 999, padding: '2px 8px' }}>Cross-group</span>}
+        {!isCross && (
+          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 10.5, fontWeight: 800, color: stage.color, background: stage.bg, border: `1px solid ${stage.border}`, borderRadius: 999, padding: '2px 8px', whiteSpace: 'nowrap' }}>
+            <span style={{ width: 5, height: 5, borderRadius: '50%', background: stage.color }} />
+            {stage.label}
+          </span>
+        )}
+      </div>
+      {stats && (
+        <div style={{ marginTop: 9, paddingLeft: compact ? 40 : 48, fontSize: 10.8, color: '#475569', fontWeight: 750, lineHeight: 1.35 }}>
+          {stats.reports} {stats.reports === 1 ? 'report' : 'reports'} · {stats.goalsPending} {stats.goalsPending === 1 ? 'goal pending' : 'goals pending'} · avg {stats.avg}
+        </div>
+      )}
+    </button>
+  );
+}
+
+function OrgMapExpandButton({ open, count, onClick, compact = false }) {
+  const label = open
+    ? 'Hide reports'
+    : `Show ${count} report${count === 1 ? '' : 's'}`;
+  return (
+    <button type="button" onClick={onClick} aria-expanded={open}
+      style={{
+        alignSelf: 'flex-start',
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: 7,
+        border: '1px solid #CBD5E1',
+        background: open ? '#F8FAFC' : '#FFFFFF',
+        color: '#334155',
+        borderRadius: 999,
+        padding: compact ? '5px 9px' : '6px 11px',
+        fontSize: compact ? 11 : 11.5,
+        fontWeight: 800,
+        cursor: 'pointer',
+        fontFamily: 'inherit',
+        boxShadow: open ? 'none' : '0 8px 18px rgba(15,23,42,.06)',
+      }}>
+      <span style={{
+        width: compact ? 17 : 19,
+        height: compact ? 17 : 19,
+        borderRadius: '50%',
+        background: open ? '#E2E8F0' : '#EEF2FF',
+        color: open ? '#475569' : '#4F46E5',
+        display: 'inline-flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        fontSize: 12,
+        lineHeight: 1,
+        transform: open ? 'rotate(90deg)' : 'rotate(0deg)',
+        transition: 'transform 160ms ease',
+      }}>›</span>
+      {label}
+    </button>
+  );
+}
+
+function OrgMapBranch({ node, selectedCode, onSelect, defaultOpen = false, viewMode = 'org', group = null }) {
+  const [open, setOpen] = useState(defaultOpen);
+  const children = node.reports || [];
+  const visibleChildren = open ? children : children.slice(0, 4);
+  const hiddenCount = Math.max(0, children.length - visibleChildren.length);
+
+  return (
+    <div style={{ minWidth: 255, maxWidth: 310, display: 'flex', flexDirection: 'column', gap: 10 }}>
+      <OrgMapCard node={node} selectedCode={selectedCode} onSelect={onSelect} viewMode={viewMode} group={group} />
+      {children.length > 0 && (
+        <div style={{ borderLeft: '1px solid rgba(148,163,184,.38)', marginLeft: 18, paddingLeft: 14, display: 'flex', flexDirection: 'column', gap: 9 }}>
+          {visibleChildren.map((child) => (
+            <OrgMapNestedNode key={orgMapCode(child.employee) || orgMapName(child.employee)} node={child} selectedCode={selectedCode} onSelect={onSelect} viewMode={viewMode} group={group} />
+          ))}
+          {children.length > 4 && (
+            <OrgMapExpandButton open={open} count={hiddenCount || children.length} onClick={() => setOpen((value) => !value)} />
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function OrgMapNestedNode({ node, selectedCode, onSelect, viewMode = 'org', group = null }) {
+  const hasChildren = node.reportCount > 0;
+  const [open, setOpen] = useState(false);
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 7 }}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 7 }}>
+        <OrgMapCard node={node} selectedCode={selectedCode} onSelect={onSelect} compact viewMode={viewMode} group={group} />
+        {hasChildren && (
+          <div style={{ marginLeft: 40, marginTop: -1 }}>
+            <OrgMapExpandButton open={open} count={node.reportCount} onClick={() => setOpen((v) => !v)} compact />
+          </div>
+        )}
+      </div>
+      {hasChildren && open && (
+        <div style={{ borderLeft: '1px solid rgba(148,163,184,.35)', marginLeft: 16, paddingLeft: 12, display: 'flex', flexDirection: 'column', gap: 7 }}>
+          {(node.reports || []).map((child) => (
+            <OrgMapNestedNode key={orgMapCode(child.employee) || orgMapName(child.employee)} node={child} selectedCode={selectedCode} onSelect={onSelect} viewMode={viewMode} group={group} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+export function OrgChartPanel({ employees, groups }) {
+  const orgGroups = useMemo(() => buildOrgMapGroups(employees, groups), [employees, groups]);
+  const [activeGroupId, setActiveGroupId] = useState('');
+  const [search, setSearch] = useState('');
+  const [selectedEmp, setSelectedEmp] = useState(null);
+  const [viewMode, setViewMode] = useState('org');
+  const [activeFilters, setActiveFilters] = useState([]);
+
+  useEffect(() => {
+    if (!orgGroups.length) return;
+    setActiveGroupId((current) => orgGroups.some((group) => group.id === current) ? current : orgGroups[0].id);
+  }, [orgGroups]);
+
+  const activeGroup = orgGroups.find((group) => group.id === activeGroupId) || orgGroups[0] || null;
+  const selectedCode = orgMapCode(selectedEmp).toLowerCase();
+  const query = search.trim().toLowerCase();
+  const filterSet = new Set(activeFilters);
+
+  function toggleFilter(key) {
+    setActiveFilters((current) => current.includes(key) ? current.filter((item) => item !== key) : [...current, key]);
+  }
+
+  function clearFilters() {
+    setSearch('');
+    setActiveFilters([]);
+  }
+
+  function nodeMatches(node) {
+    const emp = node.employee || {};
+    const flags = orgMapFlags(emp);
+    const stage = orgMapStageMeta(emp);
+    const isCross = !!emp._crossGroupManager || !!node.crossGroupRoot;
+    const isRoot = !String(emp['Reporting Manager Code'] || '').trim() && !isCross;
+    const meta = orgMapCardMeta(emp, activeGroup);
+    const text = `${orgMapName(emp)} ${orgMapCode(emp)} ${orgMapGroup(emp)} ${meta.roleLine} ${meta.attrLabel} ${meta.attrValue}`.toLowerCase();
+    if (query && !text.includes(query)) return false;
+    if (filterSet.has('cross') && !isCross) return false;
+    if (filterSet.has('root') && !isRoot) return false;
+    if (filterSet.has('no-goals') && !flags.noGoals) return false;
+    if (filterSet.has('goals-overdue') && !flags.goalsOverdue) return false;
+    if (filterSet.has('stage-not-started') && stage.key !== 'not-started') return false;
+    if (filterSet.has('stage-self-review') && stage.key !== 'self-review') return false;
+    if (filterSet.has('stage-manager-review') && stage.key !== 'manager-review') return false;
+    if (filterSet.has('stage-calibration') && stage.key !== 'calibration') return false;
+    if (filterSet.has('stage-closed') && stage.key !== 'closed') return false;
+    return true;
+  }
+
+  function nodeVisible(node) {
+    return nodeMatches(node) || (node.reports || []).some(nodeVisible);
+  }
+
+  const visibleRoots = useMemo(() => {
+    if (!activeGroup) return [];
+    return (query || activeFilters.length) ? activeGroup.roots.filter(nodeVisible) : activeGroup.roots;
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeGroup, query, activeFilters]);
+
+  const issueTotals = useMemo(() => orgGroups.reduce((acc, group) => ({
+    external: acc.external + group.externalManagerCount,
+    cross: acc.cross + group.crossGroupCount,
+    roots: acc.roots + group.noManagerCount,
+  }), { external: 0, cross: 0, roots: 0 }), [orgGroups]);
+
+  if (!orgGroups.length) {
+    return (
+      <div style={{ height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#64748B', fontSize: 13 }}>
+        No employees uploaded yet.
+      </div>
+    );
+  }
+
+  const signals = [
+    { key: 'cross', label: 'Cross-group managers', value: issueTotals.cross, color: '#6D28D9', bg: '#F5F3FF', border: '#DDD6FE', title: 'Manager exists in PMS, but sits in a different goal group from the employee.' },
+    { key: 'root', label: 'Root employees', value: issueTotals.roots, color: '#1D4ED8', bg: '#EFF6FF', border: '#BFDBFE', title: 'Employee has no reporting manager code in the uploaded roster.' },
+  ];
+  const filterChips = [
+    { key: 'no-goals', label: 'No goals set', title: 'Employees with 0% goal completion or still at the start of goal setup.' },
+    { key: 'goals-overdue', label: 'Goals overdue', title: 'Employees whose goals appear incomplete or overdue.' },
+  ];
+  const selectedMeta = orgMapCardMeta(selectedEmp, activeGroup);
+  const selectedDetailRows = [
+    ['Manager', selectedEmp?.['Reporting Manager Name'] || selectedEmp?.['Reporting Manager Code'] || 'No manager'],
+    selectedMeta.roleLine ? ['Role', selectedMeta.roleLine] : null,
+    selectedMeta.attrLabel && selectedMeta.attrValue ? [selectedMeta.attrLabel, selectedMeta.attrValue] : null,
+    ['Email', selectedEmp?.['Email ID'] || selectedEmp?.Email || 'Not set'],
+  ].filter(Boolean);
+
+  return (
+    <div style={{ height: '100%', position: 'relative', display: 'flex', flexDirection: 'column', background: '#F8FAFC', fontFamily: "'Geist','Inter','Segoe UI',Arial,sans-serif", overflow: 'hidden' }}>
+      <div style={{ flexShrink: 0, padding: '14px 24px 12px', background: 'rgba(255,255,255,.88)', borderBottom: '1px solid #E2E8F0' }}>
+        <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0,1fr) auto 320px', gap: 16, alignItems: 'center' }}>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center', overflowX: 'auto', paddingBottom: 2 }}>
+            {orgGroups.map((group) => {
+              const active = group.id === activeGroup?.id;
+              return (
+                <button key={group.id} type="button" title="Show employees assigned to this PMS goal group." onClick={() => { setActiveGroupId(group.id); setSelectedEmp(null); }}
+                  style={{
+                    flex: '0 0 auto', display: 'flex', alignItems: 'center', gap: 8, border: `1px solid ${active ? group.pal.dot : '#E2E8F0'}`,
+                    background: active ? group.pal.bg : '#fff', color: active ? group.pal.text : '#334155', borderRadius: 999,
+                    padding: '8px 12px', cursor: 'pointer', fontFamily: 'inherit', boxShadow: active ? '0 10px 24px rgba(79,70,229,.08)' : 'none',
+                  }}>
+                  <span style={{ width: 8, height: 8, borderRadius: '50%', background: group.pal.dot }} />
+                  <span style={{ fontSize: 12.5, fontWeight: 850 }}>{group.name}</span>
+                  <span style={{ fontSize: 11.5, fontWeight: 850, opacity: .75 }}>{group.members.length}</span>
+                </button>
+              );
+            })}
+          </div>
+          <div style={{ display: 'inline-flex', background: '#F1F5F9', border: '1px solid #E2E8F0', borderRadius: 999, padding: 3 }}>
+            {[
+              { key: 'org', label: 'Org' },
+              { key: 'heatmap', label: 'Heatmap' },
+            ].map((item) => (
+              <button key={item.key} type="button" onClick={() => setViewMode(item.key)}
+                style={{ border: 'none', background: viewMode === item.key ? '#fff' : 'transparent', color: viewMode === item.key ? '#0F172A' : '#64748B', borderRadius: 999, padding: '6px 11px', fontSize: 12, fontWeight: 850, cursor: 'pointer', fontFamily: 'inherit', boxShadow: viewMode === item.key ? '0 1px 4px rgba(15,23,42,.10)' : 'none' }}>
+                {item.label}
+              </button>
+            ))}
+          </div>
+          <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search this group..."
+            style={{ width: '100%', border: '1.5px solid #E2E8F0', borderRadius: 12, padding: '10px 12px', fontSize: 13, fontFamily: 'inherit', outline: 'none', color: '#0F172A', background: '#fff' }} />
+        </div>
+        <div style={{ marginTop: 10, display: 'flex', justifyContent: 'space-between', gap: 14, alignItems: 'center' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 9, minWidth: 0 }}>
+            <span style={{ width: 10, height: 10, borderRadius: '50%', background: activeGroup?.pal.dot || '#64748B' }} />
+            <h2 style={{ margin: 0, fontSize: 18, color: '#0F172A', letterSpacing: '-.02em', whiteSpace: 'nowrap' }}>{activeGroup?.name || 'Organogram'}</h2>
+            <span style={{ fontSize: 12.5, color: '#64748B', whiteSpace: 'nowrap' }}>
+              {activeGroup?.members.length || 0} members · {activeGroup?.roots.length || 0} manager lanes
+            </span>
+          </div>
+          <div style={{ display: 'flex', gap: 8, overflowX: 'auto' }}>
+            {signals.map((item) => (
+              <button key={item.label} type="button" title={item.title} onClick={() => toggleFilter(item.key)}
+                style={{ flex: '0 0 auto', display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 999, border: `1px solid ${filterSet.has(item.key) ? item.color : item.border}`, background: filterSet.has(item.key) ? item.color : item.bg, color: filterSet.has(item.key) ? '#fff' : item.color, fontSize: 11.5, fontWeight: 850, cursor: 'pointer', fontFamily: 'inherit' }}>
+                {item.label}
+                <strong>{item.value}</strong>
+              </button>
+            ))}
+          </div>
+        </div>
+        <div style={{ marginTop: 10, display: 'flex', alignItems: 'center', gap: 8, overflowX: 'auto' }}>
+          {filterChips.map((item) => {
+            const active = filterSet.has(item.key);
+            return (
+              <button key={item.key} type="button" title={item.title} onClick={() => toggleFilter(item.key)}
+                style={{ flex: '0 0 auto', border: `1px solid ${active ? '#0F172A' : '#E2E8F0'}`, background: active ? '#0F172A' : '#fff', color: active ? '#fff' : '#475569', borderRadius: 999, padding: '6px 10px', fontSize: 11.5, fontWeight: 800, cursor: 'pointer', fontFamily: 'inherit' }}>
+                {item.label}
+              </button>
+            );
+          })}
+          {(activeFilters.length > 0 || search) && (
+            <button type="button" onClick={clearFilters}
+              style={{ flex: '0 0 auto', border: 'none', background: 'transparent', color: '#64748B', fontSize: 11.5, fontWeight: 800, cursor: 'pointer', fontFamily: 'inherit', padding: '6px 4px' }}>
+              Clear
+            </button>
+          )}
+        </div>
+      </div>
+
+      <div style={{ flex: 1, overflow: 'auto', padding: '28px 30px 44px', background: 'radial-gradient(circle at 18% 12%, rgba(79,70,229,.055), transparent 30%), radial-gradient(circle at 78% 18%, rgba(14,165,233,.05), transparent 28%), linear-gradient(180deg,#F8FAFC,#F9FBFF)' }}>
+        {visibleRoots.length === 0 ? (
+          <div style={{ padding: 22, border: '1px dashed #CBD5E1', borderRadius: 14, color: '#64748B', background: '#fff', fontSize: 13 }}>No matching employees in this group.</div>
+        ) : (
+          <div style={{ display: 'flex', alignItems: 'flex-start', gap: 18, minWidth: 'max-content', paddingBottom: 24 }}>
+            {visibleRoots.map((root) => (
+              <OrgMapBranch key={`${activeGroup?.id}:${orgMapCode(root.employee) || orgMapName(root.employee)}`} node={root} selectedCode={selectedCode} onSelect={setSelectedEmp} defaultOpen={visibleRoots.length <= 3} viewMode={viewMode} group={activeGroup} />
+            ))}
+          </div>
+        )}
+      </div>
+
+      {selectedEmp && (
+        <aside style={{ position: 'absolute', right: 24, bottom: 20, width: 360, maxWidth: 'calc(100vw - 48px)', border: '1px solid rgba(226,232,240,.95)', background: 'rgba(255,255,255,.96)', borderRadius: 16, padding: 14, boxShadow: '0 20px 50px rgba(15,23,42,.14)', zIndex: 5, backdropFilter: 'blur(12px)' }}>
+          <div style={{ display: 'flex', gap: 11, alignItems: 'flex-start' }}>
+            <div style={{ width: 40, height: 40, borderRadius: 13, background: 'linear-gradient(135deg,#2563EB,#4F46E5)', color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 900, flexShrink: 0 }}>{getInitials(orgMapName(selectedEmp))}</div>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, alignItems: 'flex-start' }}>
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ fontSize: 14.5, fontWeight: 900, color: '#0F172A', lineHeight: 1.2, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{orgMapName(selectedEmp)}</div>
+                  <div style={{ marginTop: 3, fontSize: 12, color: '#64748B' }}>{orgMapCode(selectedEmp) || 'No employee code'} · {orgMapGroup(selectedEmp) || 'Unassigned'}</div>
+                </div>
+                <button type="button" onClick={() => setSelectedEmp(null)}
+                  style={{ width: 28, height: 28, borderRadius: 10, border: '1px solid #E2E8F0', background: '#fff', color: '#64748B', cursor: 'pointer', fontFamily: 'inherit', flexShrink: 0 }}
+                  aria-label="Close details">
+                  ✕
+                </button>
+              </div>
+              <div style={{ marginTop: 11, display: 'grid', gap: 7 }}>
+                {selectedDetailRows.map(([label, value]) => (
+                  <div key={label} style={{ display: 'grid', gridTemplateColumns: '68px minmax(0,1fr)', gap: 8, alignItems: 'baseline' }}>
+                    <div style={{ fontSize: 10.5, fontWeight: 850, color: '#94A3B8', textTransform: 'uppercase', letterSpacing: '.04em' }}>{label}</div>
+                    <div style={{ fontSize: 12.2, fontWeight: 750, color: '#0F172A', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{value}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        </aside>
+      )}
+    </div>
+  );
 }

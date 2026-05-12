@@ -61,6 +61,8 @@ async function resolveHrUser(orgs, credentials, identifier, password) {
             role: 'hr-admin',
             userName: org.hrAdminName || match.record?.name || 'HR Admin',
             orgKey: org.key,
+            isTemp: !!match.record?.isTemp,
+            credentialKey: primaryEmail,
           };
         }
       } else if (String(org.temporaryPassword || '') === password) {
@@ -80,6 +82,8 @@ async function resolveHrUser(orgs, credentials, identifier, password) {
           role: 'hr-admin',
           userName: org.hrAdminName || 'HR Admin',
           orgKey: org.key,
+          isTemp: true,
+          credentialKey: primaryEmail,
         };
       }
     }
@@ -117,6 +121,7 @@ async function resolveHrUser(orgs, credentials, identifier, password) {
         loginAllowed = true;
       }
       if (!loginAllowed) continue;
+      const matchedCredential = credentials?.[credentialKey] || null;
       return {
         role: 'hr-admin',
         userName: member.name,
@@ -125,6 +130,8 @@ async function resolveHrUser(orgs, credentials, identifier, password) {
         isScopedHR: member.type === 'scoped-hr',
         hrTeamId: member.id,
         allowedModules: member.allowedModules || null,
+        isTemp: !existingCredential || !!matchedCredential?.isTemp,
+        credentialKey,
       };
     }
   }
@@ -210,36 +217,59 @@ export async function resolveLoginUser(identifier, password, superAdmin) {
   return resolveEmployeeUser(orgs, creds, identifier, password, scopedOrgKey);
 }
 
-export async function changeEmployeePassword(empCode, currentPassword, newPassword) {
+export async function changeEmployeePassword(lookup, currentPassword, newPassword) {
   const credentials = await hydrateEmployeeCredentials();
   const next = { ...(credentials || readEmployeeCredentialsSync() || {}) };
-  const code = normalizeCode(empCode);
-  const existing = next[code];
 
-  if (!existing) {
-    return { ok: false, error: 'Current password is incorrect.' };
+  // Accept either an empCode (legacy) or a credential key (email for HR
+  // admins). Try both shapes so HR admins on their first login can also
+  // change their temporary password through this path.
+  const code = normalizeCode(lookup);
+  const emailKey = normalizeLower(lookup);
+  let entryKey = next[code] ? code : (next[emailKey] ? emailKey : null);
+  if (!entryKey) {
+    entryKey = Object.keys(next).find((key) => normalizeLower(next[key]?.email) === emailKey) || null;
   }
-  const passwordOk = existing.passwordHash
-    ? await verifyPasswordValue(currentPassword, existing.passwordHash)
-    : String(existing.password || '') === currentPassword;
-  if (!passwordOk) {
-    return { ok: false, error: 'Current password is incorrect.' };
-  }
+  const existing = entryKey ? next[entryKey] : null;
+
   if (String(newPassword || '').length < 6) {
     return { ok: false, error: 'New password must be at least 6 characters.' };
   }
-  if (String(newPassword) === String(currentPassword)) {
+  if (currentPassword && String(newPassword) === String(currentPassword)) {
     return { ok: false, error: 'New password must differ from the temporary password.' };
   }
 
-  next[code] = {
-    ...existing,
+  if (existing) {
+    const passwordOk = existing.passwordHash
+      ? await verifyPasswordValue(currentPassword, existing.passwordHash)
+      : String(existing.password || '') === currentPassword;
+    if (!passwordOk) {
+      return { ok: false, error: 'Current password is incorrect.' };
+    }
+    next[entryKey] = {
+      ...existing,
+      passwordHash: await hashPasswordValue(newPassword),
+      isTemp: false,
+    };
+    delete next[entryKey].password;
+    persistEmployeeCredentials(next);
+    return { ok: true, credentials: next[entryKey] };
+  }
+
+  // No credential record yet (server-auth verified the temp password but
+  // didn't persist anything client-side). Trust that the user reached this
+  // screen via a successful login and write a fresh credential.
+  const freshKey = emailKey || code || String(lookup || '').toLowerCase();
+  if (!freshKey) {
+    return { ok: false, error: 'Could not identify user to update.' };
+  }
+  next[freshKey] = {
+    email: emailKey || '',
     passwordHash: await hashPasswordValue(newPassword),
     isTemp: false,
   };
-  delete next[code].password;
   persistEmployeeCredentials(next);
-  return { ok: true, credentials: next[code] };
+  return { ok: true, credentials: next[freshKey] };
 }
 
 export async function resetUserPasswordByAdmin({ orgKey = '', credentialKey = '', prefix = 'Pass' } = {}) {

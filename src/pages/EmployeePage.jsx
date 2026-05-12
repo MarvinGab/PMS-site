@@ -14,6 +14,8 @@ import {
   persistMessages,
   hydrateWizardState,
   hydrateAppData,
+  hydrateOrganizations,
+  readOrgBrandCacheSync,
 } from '../backend/stateStore';
 
 const EMP_SESSION_KEY = 'zarohr_emp_session';
@@ -1439,7 +1441,19 @@ function BackToAdminButton({ onClick }) {
 export default function EmployeePage() {
   const session = useMemo(loadSession, []);
   const [config, setConfig] = useState(() => loadConfig());
-  const [appData, setAppData] = useState(() => readAppDataSync());
+  const [appData, setAppData] = useState(() => {
+    const data = readAppDataSync() || {};
+    const cachedBrand = readOrgBrandCacheSync(session?.orgKey);
+    if (!cachedBrand?.key) return data;
+    const existing = Array.isArray(data.organizationsData) ? data.organizationsData : [];
+    const hasOrg = existing.some((item) => item.key === cachedBrand.key);
+    return {
+      ...data,
+      organizationsData: hasOrg
+        ? existing.map((item) => (item.key === cachedBrand.key ? { ...cachedBrand, ...item } : item))
+        : [cachedBrand, ...existing],
+    };
+  });
   const currentPhase = useMemo(() => {
     const org = (appData?.organizationsData || []).find((item) => item.key === (session?.orgKey || ''));
     const stored = org?.currentPhase || 'goal-setting';
@@ -1448,13 +1462,15 @@ export default function EmployeePage() {
   }, [appData, session]);
   const orgBrand = useMemo(() => {
     const org = (appData?.organizationsData || []).find((item) => item.key === (session?.orgKey || ''));
+    const cachedBrand = readOrgBrandCacheSync(session?.orgKey);
+    const source = org || cachedBrand || {};
     return {
-      brandLogo: org?.brandLogo || null,
-      brandName: org?.brandName || org?.name || '',
-      brandPalette: org?.brandPalette || null,
-      brandHero: org?.brandHero || null,
-      brandCards: org?.brandCards || 'default',
-      brandFill: org?.brandFill || 'gradient',
+      brandLogo: source?.brandLogo || null,
+      brandName: source?.brandName || source?.name || '',
+      brandPalette: source?.brandPalette || null,
+      brandHero: source?.brandHero || null,
+      brandCards: source?.brandCards || 'default',
+      brandFill: source?.brandFill || 'gradient',
     };
   }, [appData, session]);
   const brandPalette = useMemo(() => resolveBrandPalette(orgBrand.brandPalette), [orgBrand.brandPalette]);
@@ -1541,6 +1557,11 @@ export default function EmployeePage() {
     let cancelled = false;
     hydrateAppData().then((data) => {
       if (!cancelled && data) setAppData(data);
+    });
+    hydrateOrganizations().then((organizations) => {
+      if (!cancelled && Array.isArray(organizations)) {
+        setAppData((prev) => ({ ...(prev || {}), organizationsData: organizations }));
+      }
     });
     hydrateWizardState(session.orgKey).then((state) => {
       if (!cancelled && state?.config) setConfig(state.config);
@@ -1673,6 +1694,21 @@ export default function EmployeePage() {
       if (e.key === key) {
         setMessagesData(loadMessages(session.orgKey));
       }
+    }
+    window.addEventListener('storage', onStorage);
+    return () => window.removeEventListener('storage', onStorage);
+  }, [session?.orgKey]);
+
+  // Live roster: HR-side actions like Group Transfer / Manager Change rewrite
+  // the wizard state. Re-read the config so the employee's view (group,
+  // library, manager, etc.) reflects the new assignment without a refresh.
+  useEffect(() => {
+    if (!session?.orgKey) return;
+    const wizKey = `${WIZARD_STATE_KEY}:${session.orgKey}`;
+    function onStorage(e) {
+      if (e.key !== wizKey) return;
+      const next = readWizardStateSync(session.orgKey);
+      if (next?.config) setConfig(next.config);
     }
     window.addEventListener('storage', onStorage);
     return () => window.removeEventListener('storage', onStorage);

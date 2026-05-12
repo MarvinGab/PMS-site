@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect } from 'react';
 import zaroLogo from '../../images/final zaro logo.png';
+import { uploadBrandAsset, uploadEmailLogoAsset, ensureDefaultZaroLogoUrl } from '../backend/brandAssetStorage';
 
 // EmailDesigner — WYSIWYG email designer with click-to-select blocks and a
 // contextual inspector panel. Click any element in the canvas to edit it; text
@@ -542,8 +543,18 @@ function AlignSeg({ value, onChange }) {
 function HeaderInspector({ header, patch }) {
   async function uploadLogo(file) {
     if (!file || !file.type?.startsWith('image/')) return;
-    const dataUrl = await new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = rej; r.readAsDataURL(file); });
-    patch({ logo: dataUrl, display: 'logo' });
+    try {
+      const url = await uploadEmailLogoAsset(file, { orgKey: 'designer' });
+      patch({ logo: url, display: 'logo' });
+    } catch (err) {
+      console.error('[EmailDesigner] header logo upload failed', err);
+    }
+  }
+  async function useZaroLogo() {
+    try {
+      const url = await ensureDefaultZaroLogoUrl(zaroLogo);
+      patch({ logo: url });
+    } catch (_) { patch({ logo: zaroLogo }); }
   }
   return (
     <div style={{ background: '#fff', border: '1px solid #E5E7EB', borderRadius: 12, padding: 14, position: 'sticky', top: 16, display: 'flex', flexDirection: 'column', gap: 12 }}>
@@ -564,7 +575,7 @@ function HeaderInspector({ header, patch }) {
       <div>
         <label style={fieldLabel}>Logo</label>
         <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-          <button type="button" onClick={() => patch({ logo: zaroLogo })} style={seg(header.logo === zaroLogo)}>Use Zaro logo</button>
+          <button type="button" onClick={useZaroLogo} style={seg(false)}>Use Zaro logo</button>
           <label style={{ ...seg(false), display: 'inline-block' }}>Upload<input type="file" accept="image/*" style={{ display: 'none' }} onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ''; uploadLogo(f); }} /></label>
           {header.logo && <button type="button" onClick={() => patch({ logo: null, display: 'text' })} style={{ ...seg(false), color: '#B91C1C' }}>Remove</button>}
         </div>
@@ -593,8 +604,12 @@ function HeaderInspector({ header, patch }) {
 function BodyStyleInspector({ bodyStyle, patch }) {
   async function uploadImage(file) {
     if (!file || !file.type?.startsWith('image/')) return;
-    const dataUrl = await new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = rej; r.readAsDataURL(file); });
-    patch({ image: dataUrl, background: 'image' });
+    try {
+      const url = await uploadBrandAsset(file, { folder: 'email-body-bg', orgKey: 'designer', resize: { maxDim: 1600, quality: 0.88 } });
+      patch({ image: url, background: 'image' });
+    } catch (err) {
+      console.error('[EmailDesigner] body background upload failed', err);
+    }
   }
   return (
     <div style={{ background: '#fff', border: '1px solid #E5E7EB', borderRadius: 12, padding: 14, position: 'sticky', top: 16, display: 'flex', flexDirection: 'column', gap: 12 }}>
@@ -722,8 +737,12 @@ function ButtonInspector({ button, patch }) {
 function SignatureInspector({ signature, patch }) {
   async function uploadImage(file) {
     if (!file || !file.type?.startsWith('image/')) return;
-    const dataUrl = await new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = rej; r.readAsDataURL(file); });
-    patch({ image: dataUrl });
+    try {
+      const url = await uploadBrandAsset(file, { folder: 'email-signature', orgKey: 'designer', resize: { maxDim: 256, quality: 0.9 } });
+      patch({ image: url });
+    } catch (err) {
+      console.error('[EmailDesigner] signature image upload failed', err);
+    }
   }
   return (
     <div style={{ background: '#fff', border: '1px solid #E5E7EB', borderRadius: 12, padding: 14, position: 'sticky', top: 16, display: 'flex', flexDirection: 'column', gap: 12 }}>

@@ -834,12 +834,15 @@ export function parseGoalLibraryBulkXlsx(file, goalGroups = [], options = {}) {
         const readCell = (row, index) => (index >= 0 ? String(row[index] || '').trim() : '');
         const parseWeight = (raw) => {
           const text = String(raw || '').trim();
-          if (!text) return null;
+          if (!text) return { value: null, error: null };
           const numeric = Number(text);
-          return Number.isFinite(numeric) && numeric >= 0 ? numeric : null;
+          if (!Number.isFinite(numeric)) return { value: null, error: `"${text}" is not a number` };
+          if (numeric < 0) return { value: null, error: `"${text}" cannot be negative` };
+          return { value: numeric, error: null };
         };
 
         const groupNameErrors = [];
+        const rowValidationErrors = [];
         for (const [rowIdx, row] of allRows.slice(1).entries()) {
           const firstCell = readCell(row, 0);
           if (!row.some(cell => String(cell || '').trim())) continue;
@@ -873,8 +876,18 @@ export function parseGoalLibraryBulkXlsx(file, goalGroups = [], options = {}) {
 
           validRowCount += 1;
 
-          const kraWeight = parseWeight(readCell(row, idxKraWeight));
-          const kpiWeight = parseWeight(readCell(row, idxKpiWeight));
+          const kraWeightInfo = parseWeight(readCell(row, idxKraWeight));
+          const kpiWeightInfo = parseWeight(readCell(row, idxKpiWeight));
+          if (kraWeightInfo.error) {
+            rowValidationErrors.push(`Row ${rowIdx + 2}: KRA Weight % ${kraWeightInfo.error}`);
+            continue;
+          }
+          if (kpiWeightInfo.error) {
+            rowValidationErrors.push(`Row ${rowIdx + 2}: KPI Weight % ${kpiWeightInfo.error}`);
+            continue;
+          }
+          const kraWeight = kraWeightInfo.value;
+          const kpiWeight = kpiWeightInfo.value;
 
           // Composite key prevents collision when two groups share the same designation/library name.
           // Falls back to plain libraryName for templates generated before Group Name column was added.
@@ -989,6 +1002,10 @@ export function parseGoalLibraryBulkXlsx(file, goalGroups = [], options = {}) {
           reject(new Error(groupNameErrors.join('\n')));
           return;
         }
+        if (rowValidationErrors.length > 0) {
+          reject(new Error(rowValidationErrors.join('\n')));
+          return;
+        }
 
         if (!validRowCount || libraries.length === 0) {
           reject(new Error('No valid library rows found in the uploaded sheet'));
@@ -1096,10 +1113,13 @@ export function parseGoalLibraryXlsx(file, config) {
         const idxKpiName = col('kpi name');
         const idxKpiWt   = col('kpi weight %');
         const hasKpis    = idxKpiName !== -1;
+        const isFlatFramework = config.frameworkId === 'kra-kpi' || config.frameworkId === 'kra';
 
         if (idxKraName === -1) { reject(new Error('Missing "KRA Name" column')); return; }
+        if (!isFlatFramework && idxPersp === -1) { reject(new Error('Missing "Perspective" column. BSC goal libraries must use the downloaded template and include a Perspective for every KRA.')); return; }
 
         const grouped = {};
+        let validKraRows = 0;
         for (const row of dataRows) {
           const get = i => (i >= 0 ? String(row[i] || '').trim() : '');
           const attrVal  = isByAttr ? get(idxAttr) : '__common__';
@@ -1107,6 +1127,7 @@ export function parseGoalLibraryXlsx(file, config) {
           const kraName  = get(idxKraName);
           const kraWt    = get(idxKraWt);
           if (!kraName) continue;
+          validKraRows += 1;
 
           if (!grouped[attrVal]) grouped[attrVal] = {};
           const kraKey = `${perspName}||${kraName}`;
@@ -1119,6 +1140,7 @@ export function parseGoalLibraryXlsx(file, config) {
             if (kpiName) grouped[attrVal][kraKey].kpis.push({ id: Date.now() + Math.random(), name: kpiName, weight: kpiWt });
           }
         }
+        if (!validKraRows) { reject(new Error('No valid KRA rows found in the uploaded sheet. Fill at least one KRA Name row and delete the red example rows before uploading.')); return; }
 
         const toArray = obj => Object.values(obj).map((k, i) => ({ ...k, id: Date.now() + i }));
         if (isByAttr) {
@@ -1374,6 +1396,14 @@ function getEmployeeLibraryAssignments(group) {
       libraryId: match?.libraryId ?? fallbackLibraryId,
     };
   });
+}
+
+function isEmployeeGroupLibraryEnabled(group) {
+  return !!(
+    group?.hasLibrary ||
+    group?.mode === 'library' ||
+    (Array.isArray(group?.modes) && group.modes.includes('library'))
+  );
 }
 
 export function getEmployeeRoutingColumns(config = {}) {
@@ -1665,6 +1695,7 @@ export function validateEmployeeData(employees, config) {
     const empCode = (emp['Employee Code'] || '').trim();
     if (!empCode) return;
     const empName = (emp['Employee Name'] || '').trim();
+    const empEmail = (emp['Email ID'] || '').trim();
     const nv = validateEmployeeName(empName);
     const key = empCode.toLowerCase();
     if (codeToEmployee.has(key)) return; // keep the first occurrence
@@ -1672,12 +1703,15 @@ export function validateEmployeeData(employees, config) {
       row: rowNum,
       name: empName,
       normalizedName: nv.valid ? nv.normalized : normalizeEmployeeNameForCompare(empName),
+      email: empEmail,
+      normalizedEmail: empEmail.toLowerCase(),
     });
   });
   employees.forEach((emp, idx) => {
     const row = idx + 2; // 1-based, +1 for header row
     const code = (emp['Employee Code'] || '').trim();
     const name = (emp['Employee Name'] || '').trim();
+    const email = (emp['Email ID'] || '').trim();
     const nameValidation = validateEmployeeName(name);
 
     // Employee Code
@@ -1687,16 +1721,27 @@ export function validateEmployeeData(employees, config) {
       const normalizedCode = code.toLowerCase();
       const firstSeen = seenCodes.get(normalizedCode);
       if (firstSeen) {
-        if (
+        const nameMismatch =
           nameValidation.valid &&
           firstSeen.normalizedName &&
-          nameValidation.normalized !== firstSeen.normalizedName
-        ) {
+          nameValidation.normalized !== firstSeen.normalizedName;
+        const emailMismatch =
+          email &&
+          firstSeen.email &&
+          email.toLowerCase() !== firstSeen.email.toLowerCase();
+        if (nameMismatch) {
           errors.push({
             row,
             code,
             field: 'emp_code',
             message: `Employee Code "${code}" is reused with a different name. Row ${firstSeen.row} has "${firstSeen.name}", but this row has "${name}".`,
+          });
+        } else if (emailMismatch) {
+          errors.push({
+            row,
+            code,
+            field: 'email',
+            message: `Employee Code "${code}" is reused with a different Email ID. Row ${firstSeen.row} has "${firstSeen.email}", but this row has "${email}".`,
           });
         } else {
           errors.push({ row, code, field: 'emp_code', message: `Duplicate Employee Code "${code}"` });
@@ -1706,6 +1751,7 @@ export function validateEmployeeData(employees, config) {
           row,
           name,
           normalizedName: nameValidation.valid ? nameValidation.normalized : normalizeEmployeeNameForCompare(name),
+          email,
         });
       }
       if (regex && !regex.test(code)) {
@@ -1732,12 +1778,27 @@ export function validateEmployeeData(employees, config) {
       } else if (!validGroupNames.has(groupName.toLowerCase())) {
         errors.push({ row, code: code || '—', field: 'group_name',
           message: `"${groupName}" is not a configured group name. Use the exact names from the Reference sheet.` });
-      } else {
+    } else {
         matchedGroup = goalGroups.find(group => String(group.name || '').trim().toLowerCase() === groupName.toLowerCase()) || null;
       }
     }
 
-    if (hasGoalGroups && matchedGroup?.hasLibrary) {
+    if (hasGoalGroups && routingColumns.length > 0) {
+      routingColumns.forEach(column => {
+        const attrVal = getEmployeeRowValue(emp, column.label);
+        const validValues = column.values || [];
+        const validValueSet = new Set(validValues.map(value => String(value || '').trim().toLowerCase()).filter(Boolean));
+        if (!attrVal) {
+          errors.push({ row, code: code || '—', field: normalizeEmployeeFieldKey(column.label),
+            message: `"${column.label}" is required. Use one of the configured values from the Reference sheet.` });
+        } else if (validValueSet.size > 0 && !validValueSet.has(attrVal.toLowerCase())) {
+          errors.push({ row, code: code || '—', field: normalizeEmployeeFieldKey(column.label),
+            message: `"${attrVal}" is not a valid ${column.label}. Use one of: ${validValues.join(', ')}.` });
+        }
+      });
+    }
+
+    if (hasGoalGroups && isEmployeeGroupLibraryEnabled(matchedGroup)) {
       const routeAttr = String(matchedGroup.segmentAttr || '').trim();
       const routeValues = getNormalizedGroupSegmentValues(matchedGroup);
       const routeValue = routeAttr ? getEmployeeRowValue(emp, routeAttr) : '';
@@ -1798,15 +1859,21 @@ export function validateEmployeeData(employees, config) {
     if (l1Code && allCodes.has(l1Code.toLowerCase())) {
       const l1Key = l1Code.toLowerCase();
       const l1Name = getEmployeeRowValue(emp, 'Reporting Manager Name');
-      if (l1Name) {
-        const empRecord = codeToEmployee.get(l1Key);
-        if (empRecord && empRecord.normalizedName && normalizeEmployeeNameForCompare(l1Name) !== empRecord.normalizedName) {
-          errors.push({
-            row, code: code || '—', field: 'l1_manager',
-            category: 'manager_name_mismatch',
-            message: `Reporting Manager Name "${l1Name}" doesn't match Employee Name "${empRecord.name}" for code "${l1Code}" (row ${empRecord.row}).`,
-          });
-        }
+      const l1Email = getEmployeeRowValue(emp, 'Reporting Manager Email');
+      const empRecord = codeToEmployee.get(l1Key);
+      if (empRecord && l1Name && empRecord.normalizedName && normalizeEmployeeNameForCompare(l1Name) !== empRecord.normalizedName) {
+        errors.push({
+          row, code: code || '—', field: 'l1_manager',
+          category: 'manager_name_mismatch',
+          message: `Reporting Manager Name "${l1Name}" doesn't match Employee Name "${empRecord.name}" for code "${l1Code}" (row ${empRecord.row}).`,
+        });
+      }
+      if (empRecord && l1Email && empRecord.normalizedEmail && l1Email.toLowerCase() !== empRecord.normalizedEmail) {
+        errors.push({
+          row, code: code || '—', field: 'l1_manager',
+          category: 'manager_email_mismatch',
+          message: `Reporting Manager Email "${l1Email}" doesn't match Email ID "${empRecord.email}" for code "${l1Code}" (row ${empRecord.row}).`,
+        });
       }
     }
 
@@ -1816,19 +1883,74 @@ export function validateEmployeeData(employees, config) {
       if (l2Code && allCodes.has(l2Code.toLowerCase())) {
         const l2Key = l2Code.toLowerCase();
         const l2Name = getEmployeeRowValue(emp, 'L2 Manager Name');
-        if (l2Name) {
-          const empRecord = codeToEmployee.get(l2Key);
-          if (empRecord && empRecord.normalizedName && normalizeEmployeeNameForCompare(l2Name) !== empRecord.normalizedName) {
-            errors.push({
-              row, code: code || '—', field: 'l2_manager',
-              category: 'manager_name_mismatch',
-              message: `L2 Manager Name "${l2Name}" doesn't match Employee Name "${empRecord.name}" for code "${l2Code}" (row ${empRecord.row}).`,
-            });
-          }
+        const l2Email = getEmployeeRowValue(emp, 'L2 Manager Email');
+        const empRecord = codeToEmployee.get(l2Key);
+        if (empRecord && l2Name && empRecord.normalizedName && normalizeEmployeeNameForCompare(l2Name) !== empRecord.normalizedName) {
+          errors.push({
+            row, code: code || '—', field: 'l2_manager',
+            category: 'manager_name_mismatch',
+            message: `L2 Manager Name "${l2Name}" doesn't match Employee Name "${empRecord.name}" for code "${l2Code}" (row ${empRecord.row}).`,
+          });
+        }
+        if (empRecord && l2Email && empRecord.normalizedEmail && l2Email.toLowerCase() !== empRecord.normalizedEmail) {
+          errors.push({
+            row, code: code || '—', field: 'l2_manager',
+            category: 'manager_email_mismatch',
+            message: `L2 Manager Email "${l2Email}" doesn't match Email ID "${empRecord.email}" for code "${l2Code}" (row ${empRecord.row}).`,
+          });
         }
       }
     }
   });
+
+  // Rule C: Managers referenced only as RM (not present as Employee Code) must
+  // carry a consistent Name + Email across every row they appear in.
+  const mgrOnlyByCode = new Map();
+  const recordMgrReference = (label, codeField, nameField, emailField) => {
+    employees.forEach((emp, idx) => {
+      const row = idx + 2;
+      const rmCode = getEmployeeRowValue(emp, codeField);
+      if (!rmCode) return;
+      const rmKey = rmCode.toLowerCase();
+      if (allCodes.has(rmKey)) return; // covered by Rule B
+      const rmName = getEmployeeRowValue(emp, nameField);
+      const rmEmail = getEmployeeRowValue(emp, emailField);
+      const normalizedName = rmName ? normalizeEmployeeNameForCompare(rmName) : '';
+      const normalizedEmail = rmEmail ? rmEmail.toLowerCase() : '';
+      const existing = mgrOnlyByCode.get(rmKey);
+      if (!existing) {
+        mgrOnlyByCode.set(rmKey, {
+          firstRow: row,
+          name: rmName,
+          normalizedName,
+          email: rmEmail,
+          normalizedEmail,
+          field: label,
+        });
+        return;
+      }
+      const nameClash = rmName && existing.normalizedName && normalizedName !== existing.normalizedName;
+      const emailClash = rmEmail && existing.normalizedEmail && normalizedEmail !== existing.normalizedEmail;
+      if (nameClash) {
+        errors.push({
+          row, code: rmCode, field: label,
+          category: 'manager_name_mismatch',
+          message: `${nameField} "${rmName}" doesn't match row ${existing.firstRow} which has "${existing.name}" for code "${rmCode}".`,
+        });
+      }
+      if (emailClash) {
+        errors.push({
+          row, code: rmCode, field: label,
+          category: 'manager_email_mismatch',
+          message: `${emailField} "${rmEmail}" doesn't match row ${existing.firstRow} which has "${existing.email}" for code "${rmCode}".`,
+        });
+      }
+    });
+  };
+  recordMgrReference('l1_manager', 'Reporting Manager Code', 'Reporting Manager Name', 'Reporting Manager Email');
+  if (hasL2) {
+    recordMgrReference('l2_manager', 'L2 Manager Code', 'L2 Manager Name', 'L2 Manager Email');
+  }
 
   // Code anomaly and similar-name checks
   for (const w of detectCodeAnomalies(employees)) warnings.push(w);

@@ -46,7 +46,15 @@ function isEmail(v) {
 }
 
 function generateTempPassword() {
-  return `Pass@${Math.random().toString(36).slice(2, 8)}`;
+  // 6-digit numeric OTP, cryptographically random. Recipients change it on
+  // first login (isTemp flow), so optimise for typability over entropy.
+  const arr = new Uint32Array(1);
+  if (typeof window !== 'undefined' && window.crypto?.getRandomValues) {
+    window.crypto.getRandomValues(arr);
+  } else {
+    arr[0] = Math.floor(Math.random() * 0xffffffff);
+  }
+  return String(arr[0] % 1000000).padStart(6, '0');
 }
 
 function genCodeFromName(name) {
@@ -244,6 +252,10 @@ export default function CreateOrgPage() {
       industryBadgeClass: existingOrg?.industryBadgeClass || 'badge-gray',
       employees: existingOrg ? existingOrg.employees : 0,
       setupPct: existingOrg ? existingOrg.setupPct : 5,
+      setupStatus: existingOrg ? existingOrg.setupStatus : 'in_progress',
+      setupReopened: existingOrg ? !!existingOrg.setupReopened : false,
+      setupReopenedAt: existingOrg ? existingOrg.setupReopenedAt || null : null,
+      setupReopenedBy: existingOrg ? existingOrg.setupReopenedBy || null : null,
       setupColor: existingOrg ? existingOrg.setupColor : '#2563EB',
       status: existingOrg ? existingOrg.status : 'Setup',
       statusBadgeClass: existingOrg ? existingOrg.statusBadgeClass : 'badge-amber',

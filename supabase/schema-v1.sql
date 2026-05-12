@@ -28,11 +28,32 @@ create table if not exists organizations (
   launched boolean not null default false,
   current_phase text not null default 'goal-setting',
   status text,
+  setup_status text not null default 'in_progress',
+  setup_reopened boolean not null default false,
+  setup_reopened_at timestamptz,
+  setup_reopened_by text,
   setup_pct integer not null default 0,
   setup_payload jsonb not null default '{}'::jsonb,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
+
+alter table organizations
+  add column if not exists setup_status text not null default 'in_progress',
+  add column if not exists setup_reopened boolean not null default false,
+  add column if not exists setup_reopened_at timestamptz,
+  add column if not exists setup_reopened_by text;
+
+do $$
+begin
+  if not exists (
+    select 1 from pg_constraint where conname = 'organizations_setup_status_check'
+  ) then
+    alter table organizations
+      add constraint organizations_setup_status_check
+      check (setup_status in ('in_progress', 'ready_to_launch', 'launched'));
+  end if;
+end $$;
 
 create unique index if not exists idx_organizations_workspace_slug
   on organizations (workspace_slug)

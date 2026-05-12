@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import zaroLogo from '../../images/final zaro logo.png';
 import '../admin.css';
 import { useApp } from '../AppContext';
@@ -7,16 +7,66 @@ import {
 } from '../AppContext';
 import { resolveLoginUser, changeEmployeePassword } from '../backend/authService';
 import { persistEmployeeSession } from '../backend/stateStore';
-import { loginWithServerSession } from '../backend/serverAuth';
+import {
+  loginWithServerSession,
+  changePasswordOnServer,
+  requestPasswordReset,
+  confirmPasswordReset,
+} from '../backend/serverAuth';
+import { resolveTenantContext } from '../backend/tenantResolver';
+
+const REMEMBER_KEY = 'zaro.login.remembered';
+
+const ROTATING_WORDS = ['clear.', 'structured.', 'actionable.', 'on time.'];
+
+function getLoginPrefillIdentifier() {
+  if (typeof window === 'undefined') return '';
+  try {
+    const params = new URLSearchParams(window.location.search || '');
+    return String(params.get('login') || params.get('email') || params.get('identifier') || '').trim();
+  } catch {
+    return '';
+  }
+}
 
 function RightPanel() {
+  const [wordIdx, setWordIdx] = useState(0);
+  useEffect(() => {
+    const id = setInterval(
+      () => setWordIdx((i) => (i + 1) % ROTATING_WORDS.length),
+      2400,
+    );
+    return () => clearInterval(id);
+  }, []);
+
   return (
     <div className="login-right">
+      <div className="login-right-blob b1"></div>
+      <div className="login-right-blob b2"></div>
+      <div className="login-right-blob b3"></div>
+      <div className="login-right-blob b4"></div>
       <div className="login-right-grid"></div>
-      <div className="login-right-glow"></div>
+
+      <div className="login-chip c1">
+        <span className="login-chip-dot"></span>
+        Goals submitted
+      </div>
+      <div className="login-chip c2">Cycle on track ↗</div>
+      <div className="login-chip c3">
+        <span className="login-chip-dot"></span>
+        Reviews approved
+      </div>
+      <div className="login-chip c4">8 managers active today</div>
+
       <div className="login-right-content anim-fadein">
         <h2 className="login-right-title">
-          Performance<br />management, <em>finally clear.</em>
+          Performance management,<br />
+          finally{' '}
+          <span className="login-rotator">
+            <span key={wordIdx} className="login-rotator-word">
+              {ROTATING_WORDS[wordIdx]}
+            </span>
+          </span>
         </h2>
         <p className="login-right-sub">
           Run performance cycles with clarity, structure, and confidence.
@@ -27,12 +77,10 @@ function RightPanel() {
 }
 
 function ChangePasswordScreen({ pendingEmp, onComplete }) {
-  const [currentPwd, setCurrentPwd]   = useState('');
   const [newPwd, setNewPwd]           = useState('');
   const [confirmPwd, setConfirmPwd]   = useState('');
   const [showNew, setShowNew]         = useState(false);
   const [showConf, setShowConf]       = useState(false);
-  const [showCurr, setShowCurr]       = useState(false);
   const [error, setError]             = useState('');
   const [loading, setLoading]         = useState(false);
 
@@ -41,19 +89,34 @@ function ChangePasswordScreen({ pendingEmp, onComplete }) {
     setError('');
     setLoading(true);
 
+    if (String(newPwd || '').length < 6) {
+      setError('New password must be at least 6 characters.');
+      setLoading(false);
+      return;
+    }
     if (newPwd !== confirmPwd) {
       setError('Passwords do not match.');
       setLoading(false);
       return;
     }
 
-    const result = await changeEmployeePassword(pendingEmp.empCode, currentPwd, newPwd);
+    const lookup = pendingEmp.empCode || pendingEmp.credentialKey || pendingEmp.email || pendingEmp.userName;
+    let result = await changePasswordOnServer({
+      identifier: lookup,
+      organizationKey: pendingEmp.orgKey || '',
+      credentialKey: pendingEmp.credentialKey || pendingEmp.empCode || '',
+      currentPassword: pendingEmp.tempPassword || '',
+      newPassword: newPwd,
+    });
+    if (!result?.ok && /not configured|failed to contact/i.test(String(result?.error || ''))) {
+      result = await changeEmployeePassword(lookup, pendingEmp.tempPassword || '', newPwd);
+    }
     if (!result.ok) {
       setError(result.error || 'Something went wrong. Please try again.');
       setLoading(false);
       return;
     }
-    onComplete();
+    onComplete(result);
   }
 
   const pwdWrap = { position: 'relative' };
@@ -77,24 +140,6 @@ function ChangePasswordScreen({ pendingEmp, onComplete }) {
 
         <form className="login-form anim-fadeup delay-3" onSubmit={handleSubmit}>
           <div className="form-group">
-            <label className="lbl">Current (Temporary) Password</label>
-            <div className="pwd-wrap" style={pwdWrap}>
-              <input
-                type={showCurr ? 'text' : 'password'}
-                placeholder="Enter temporary password"
-                value={currentPwd}
-                onChange={e => setCurrentPwd(e.target.value)}
-                autoComplete="current-password"
-                required
-                autoFocus
-              />
-              <button type="button" className="pwd-toggle" style={toggleBtn} onClick={() => setShowCurr(p => !p)} tabIndex={-1}>
-                {showCurr ? '🙈' : '👁'}
-              </button>
-            </div>
-          </div>
-
-          <div className="form-group">
             <label className="lbl">New Password</label>
             <div className="pwd-wrap" style={pwdWrap}>
               <input
@@ -104,6 +149,7 @@ function ChangePasswordScreen({ pendingEmp, onComplete }) {
                 onChange={e => setNewPwd(e.target.value)}
                 autoComplete="new-password"
                 required
+                autoFocus
               />
               <button type="button" className="pwd-toggle" style={toggleBtn} onClick={() => setShowNew(p => !p)} tabIndex={-1}>
                 {showNew ? '🙈' : '👁'}
@@ -149,15 +195,217 @@ function ChangePasswordScreen({ pendingEmp, onComplete }) {
   );
 }
 
+function ForgotPasswordPanel({ initialIdentifier = '', tenant, onBack, onSuccess }) {
+  const [step, setStep] = useState('request'); // 'request' | 'confirm'
+  const [identifier, setIdentifier] = useState(initialIdentifier);
+  const [code, setCode] = useState('');
+  const [newPwd, setNewPwd] = useState('');
+  const [confirmPwd, setConfirmPwd] = useState('');
+  const [showPwd, setShowPwd] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [info, setInfo] = useState('');
+  const [error, setError] = useState('');
+
+  function formatCodeDisplay(raw) {
+    const digits = String(raw || '').replace(/[^0-9]/g, '').slice(0, 6);
+    return digits.length > 3 ? `${digits.slice(0, 3)}-${digits.slice(3)}` : digits;
+  }
+
+  if (!tenant?.orgKey) {
+    return (
+      <div className="login-inline-panel anim-fadeup delay-3">
+        <div className="login-workspace-badge">Reset password</div>
+        <h1 className="login-heading login-heading-sm">Use your company login link</h1>
+        <p className="login-sub">
+          Password reset works only inside a workspace login URL. Open the sign-in link from your welcome email and try again from there.
+        </p>
+        <button type="button" className="btn btn-primary btn-xl w-full mt-8" onClick={onBack}>
+          Back to sign in
+        </button>
+      </div>
+    );
+  }
+
+  async function handleRequest(e) {
+    e.preventDefault();
+    setError('');
+    setInfo('');
+    if (!identifier.trim()) {
+      setError('Enter your email or employee ID.');
+      return;
+    }
+    setBusy(true);
+    const result = await requestPasswordReset(identifier, tenant.orgKey);
+    setBusy(false);
+    if (!result?.ok) {
+      const rawError = String(result?.error || '');
+      if (rawError.includes('Reset email cannot be sent')) {
+        setError('Password reset email is not available for this workspace right now. Contact your HR Admin to reset your password manually.');
+      } else {
+        setError(result?.error || 'Could not send reset code. Try again.');
+      }
+      return;
+    }
+    setInfo(`A 6-digit code was sent${result.maskedEmail ? ` to ${result.maskedEmail}` : ''}. It expires in 15 minutes.`);
+    setStep('confirm');
+  }
+
+  async function handleConfirm(e) {
+    e.preventDefault();
+    setError('');
+    const digits = code.replace(/[^0-9]/g, '');
+    if (digits.length !== 6) {
+      setError('Enter the 6-digit code.');
+      return;
+    }
+    if (newPwd.length < 6) {
+      setError('Password must be at least 6 characters.');
+      return;
+    }
+    if (newPwd !== confirmPwd) {
+      setError('Passwords do not match.');
+      return;
+    }
+    setBusy(true);
+    const result = await confirmPasswordReset(identifier, tenant.orgKey, digits, newPwd);
+    setBusy(false);
+    if (!result?.ok) {
+      setError(result?.error || 'Could not reset password.');
+      return;
+    }
+    onSuccess?.(identifier);
+  }
+
+  return (
+    <div className="login-inline-panel anim-fadeup delay-3">
+      {step === 'request' && (
+        <form className="login-form" onSubmit={handleRequest}>
+          <div className="login-workspace-badge">Reset password · {tenant.orgName || 'workspace'}</div>
+          <h1 className="login-heading login-heading-sm">Forgot your password?</h1>
+          <p className="login-sub">
+            Enter your email or employee code. We’ll find your login email inside this workspace and send a 6-digit verification code there.
+          </p>
+          <div className="form-group">
+            <label className="lbl">Email or Employee Code</label>
+            <input
+              type="text"
+              value={identifier}
+              onChange={(e) => setIdentifier(e.target.value)}
+              placeholder="you@company.com or employee code"
+              autoFocus
+              required
+            />
+          </div>
+          {error && <div className="login-error">{error}</div>}
+          <button type="submit" className="btn btn-primary btn-xl w-full mt-8" disabled={busy}>
+            {busy ? 'Sending…' : 'Send code'}
+          </button>
+          <button type="button" className="login-inline-back" onClick={onBack}>
+            ← Back to sign in
+          </button>
+        </form>
+      )}
+
+      {step === 'confirm' && (
+        <form className="login-form" onSubmit={handleConfirm}>
+          <div className="login-workspace-badge">Reset password</div>
+          <h1 className="login-heading login-heading-sm">Enter your code</h1>
+          {info && <div className="login-success">{info}</div>}
+          <div className="form-group">
+            <label className="lbl">6-digit Code</label>
+            <input
+              type="text"
+              inputMode="numeric"
+              autoComplete="one-time-code"
+              className="login-otp-input"
+              value={formatCodeDisplay(code)}
+              onChange={(e) => setCode(e.target.value.replace(/[^0-9]/g, '').slice(0, 6))}
+              placeholder="000-000"
+              maxLength={7}
+              autoFocus
+              required
+            />
+          </div>
+          <div className="form-group">
+            <label className="lbl">New Password</label>
+            <div className="pwd-wrap">
+              <input
+                type={showPwd ? 'text' : 'password'}
+                value={newPwd}
+                onChange={(e) => setNewPwd(e.target.value)}
+                placeholder="Min. 6 characters"
+                autoComplete="new-password"
+                required
+              />
+              <button type="button" className="pwd-toggle" onClick={() => setShowPwd((p) => !p)} tabIndex={-1}>
+                {showPwd ? '🙈' : '👁'}
+              </button>
+            </div>
+          </div>
+          <div className="form-group">
+            <label className="lbl">Confirm New Password</label>
+            <input
+              type={showPwd ? 'text' : 'password'}
+              value={confirmPwd}
+              onChange={(e) => setConfirmPwd(e.target.value)}
+              placeholder="Repeat new password"
+              autoComplete="new-password"
+              required
+            />
+          </div>
+          {error && <div className="login-error">{error}</div>}
+          <button type="submit" className="btn btn-primary btn-xl w-full mt-8" disabled={busy}>
+            {busy ? 'Updating…' : 'Update password'}
+          </button>
+          <button
+            type="button"
+            className="login-inline-back"
+            onClick={() => { setStep('request'); setError(''); setInfo(''); setCode(''); }}
+          >
+            ← Start over
+          </button>
+        </form>
+      )}
+    </div>
+  );
+}
+
 export default function LoginPage() {
-  const { login } = useApp();
-  const [identifier, setIdentifier] = useState('');
+  const { login, orgs } = useApp();
+  const [identifier, setIdentifier] = useState(() => {
+    const prefill = getLoginPrefillIdentifier();
+    if (prefill) return prefill;
+    try { return localStorage.getItem(REMEMBER_KEY) || ''; } catch { return ''; }
+  });
   const [password, setPassword]     = useState('');
   const [showPwd, setShowPwd]       = useState(false);
+  const [remember, setRemember]     = useState(() => {
+    try { return !!localStorage.getItem(REMEMBER_KEY); } catch { return false; }
+  });
   const [error, setError]           = useState('');
   const [loading, setLoading]       = useState(false);
   const [forcePwChange, setForcePwChange] = useState(false);
   const [pendingEmp, setPendingEmp]       = useState(null);
+  const [pendingUserKind, setPendingUserKind] = useState(null); // 'employee' | 'hr-admin'
+  const [forgotOpen, setForgotOpen] = useState(false);
+  const [resetBanner, setResetBanner] = useState('');
+  const [tenant, setTenant] = useState(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const ctx = await resolveTenantContext();
+        if (!cancelled) setTenant(ctx);
+      } catch { /* ignore */ }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  useEffect(() => {
+    const prefill = getLoginPrefillIdentifier();
+    if (prefill) setIdentifier(prefill);
+  }, []);
 
   async function handleSubmit(e) {
     e.preventDefault();
@@ -183,9 +431,27 @@ export default function LoginPage() {
       return;
     }
 
+    // Defensive isTemp detection: the server-side Edge Function may not yet
+    // return isTemp for HR admins (depends on deploy state). Cross-check the
+    // typed password against the org's temporaryPassword so a forced change
+    // is triggered regardless of what the server returned.
+    if (!user.isTemp && user.role === 'hr-admin' && user.orgKey) {
+      const matchedOrg = (orgs || []).find((o) => o.key === user.orgKey);
+      const orgTempPwd = String(matchedOrg?.temporaryPassword || '');
+      if (orgTempPwd && orgTempPwd === password) {
+        user = { ...user, isTemp: true, credentialKey: user.credentialKey || String(matchedOrg?.hrAdminEmail || '').toLowerCase() };
+      }
+    }
+
+    try {
+      if (remember) localStorage.setItem(REMEMBER_KEY, identifier.trim());
+      else localStorage.removeItem(REMEMBER_KEY);
+    } catch { /* ignore storage errors */ }
+
     if (user.role === 'employee') {
       if (user.isTemp) {
-        setPendingEmp(user);
+        setPendingEmp({ ...user, tempPassword: password });
+        setPendingUserKind('employee');
         setForcePwChange(true);
         setLoading(false);
         return;
@@ -200,6 +466,13 @@ export default function LoginPage() {
       login('employee', { userName: user.userName });
       window.location.hash = '#employee';
     } else if (user.role === 'hr-admin') {
+      if (user.isTemp) {
+        setPendingEmp({ ...user, tempPassword: password });
+        setPendingUserKind('hr-admin');
+        setForcePwChange(true);
+        setLoading(false);
+        return;
+      }
       login('hr-admin', {
         orgKey: user.orgKey,
         userName: user.userName,
@@ -221,7 +494,22 @@ export default function LoginPage() {
     return (
       <ChangePasswordScreen
         pendingEmp={pendingEmp}
-        onComplete={() => {
+        onComplete={(passwordChangeResult) => {
+          const serverSessionToken = passwordChangeResult?.serverSessionToken || pendingEmp.serverSessionToken || null;
+          if (pendingUserKind === 'hr-admin') {
+            login('hr-admin', {
+              orgKey: pendingEmp.orgKey,
+              userName: pendingEmp.userName,
+              isCoAdmin: !!pendingEmp.isCoAdmin,
+              isScopedHR: !!pendingEmp.isScopedHR,
+              hrTeamId: pendingEmp.hrTeamId || null,
+              empCode: pendingEmp.empCode || null,
+              allowedModules: pendingEmp.allowedModules || null,
+              serverSessionToken,
+            });
+            window.location.hash = '#hr-home';
+            return;
+          }
           persistEmployeeSession({
             empCode: pendingEmp.empCode,
             name: pendingEmp.userName,
@@ -229,7 +517,7 @@ export default function LoginPage() {
             managerCode: pendingEmp.managerCode,
             orgKey: pendingEmp.orgKey || '',
           });
-          login('employee', { userName: pendingEmp.userName });
+          login('employee', { userName: pendingEmp.userName, serverSessionToken });
           window.location.hash = '#employee';
         }}
       />
@@ -247,10 +535,18 @@ export default function LoginPage() {
         </div>
 
         <div className="anim-fadeup delay-1">
+          {tenant?.orgName && (
+            <div className="login-workspace-badge">{tenant.orgName} workspace</div>
+          )}
           <h1 className="login-heading">Welcome back</h1>
-          <p className="login-sub">Sign in to your workspace to continue.</p>
+          <p className="login-sub">
+            {tenant?.orgName
+              ? `Sign in to ${tenant.orgName} to continue.`
+              : 'Sign in to your workspace to continue.'}
+          </p>
         </div>
 
+        {!forgotOpen ? (
         <form className="login-form anim-fadeup delay-3" onSubmit={handleSubmit}>
           <div className="form-group">
             <label className="lbl">Email or Employee Code</label>
@@ -289,11 +585,24 @@ export default function LoginPage() {
 
           <div className="flex justify-between items-center login-meta-row">
             <label className="flex items-center gap-8" style={{ cursor: 'pointer', fontSize: '12.5px', color: 'var(--ink-3)' }}>
-              <input type="checkbox" defaultChecked style={{ width: 'auto' }} /> Remember me
+              <input
+                type="checkbox"
+                checked={remember}
+                onChange={(e) => setRemember(e.target.checked)}
+                style={{ width: 'auto' }}
+              />
+              {' '}Remember me
             </label>
-            <a href="#" className="login-forgot">Forgot password?</a>
+            <button
+              type="button"
+              className="login-forgot login-forgot-btn"
+              onClick={() => setForgotOpen(true)}
+            >
+              Forgot password?
+            </button>
           </div>
 
+          {resetBanner && <div className="login-success">{resetBanner}</div>}
           {error && <div className="login-error">{error}</div>}
 
           <button
@@ -301,19 +610,29 @@ export default function LoginPage() {
             className="btn btn-primary btn-xl w-full mt-8"
             disabled={loading}
           >
-            {loading ? 'Signing in…' : 'Sign In →'}
-          </button>
-
-          <div className="login-divider">or</div>
-
-          <button type="button" className="btn btn-secondary w-full" style={{ gap: 8 }}>
-            <span>🔑</span> Sign in with SSO
+            {loading ? 'Signing in…' : 'Sign In'}
           </button>
         </form>
+        ) : (
+          <ForgotPasswordPanel
+            initialIdentifier={identifier}
+            tenant={tenant}
+            onBack={() => {
+              setForgotOpen(false);
+              setError('');
+            }}
+            onSuccess={(usedIdentifier) => {
+              setForgotOpen(false);
+              setIdentifier(usedIdentifier || identifier);
+              setPassword('');
+              setResetBanner('Password updated. Sign in with your new password.');
+              setError('');
+            }}
+          />
+        )}
 
         <p className="login-help anim-fadeup delay-4">
-          Need access? Contact your HR Admin or{' '}
-          <a href="#">request an invite</a>.
+          Need access? Contact your HR Admin.
         </p>
       </div>
 

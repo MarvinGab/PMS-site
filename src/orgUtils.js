@@ -27,6 +27,28 @@ export function getOrganizationEmployeeCount(org) {
 }
 
 export function getOrganizationSetupMeta(org) {
+  if (org?.launched && !org?.setupReopened) {
+    return {
+      pct: 100,
+      status: 'Launched',
+      statusBadgeClass: 'badge-green',
+      setupColor: '#16A34A',
+      actionLabel: 'Manage',
+      source: 'organization',
+    };
+  }
+
+  if (org?.setupReopened) {
+    return {
+      pct: Math.max(0, Math.min(100, Math.round(Number(org?.setupPct) || 100))),
+      status: 'Setup Reopened',
+      statusBadgeClass: 'badge-amber',
+      setupColor: '#D97706',
+      actionLabel: 'Close Setup',
+      source: 'organization',
+    };
+  }
+
   const wizardState = readWizardState(org?.key);
   const saved = wizardState?.setupProgress;
   if (saved && Number.isFinite(saved.pct)) {

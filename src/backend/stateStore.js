@@ -10,6 +10,7 @@ const SESSION_KEY = 'zarohr_auth_session';
 const EMP_SESSION_KEY = 'zarohr_emp_session';
 const EMP_CREDENTIALS_KEY = 'zarohr_emp_credentials';
 const NORMALIZED_SYNC_KEY_PREFIX = 'zarohr_normalized_sync_v2';
+const ORG_BRAND_CACHE_KEY = 'zarohr_org_brand_cache_v1';
 
 const warnedKeys = new Set();
 const ORGANIZATION_SELECT = `
@@ -25,6 +26,10 @@ const ORGANIZATION_SELECT = `
   launched,
   current_phase,
   status,
+  setup_status,
+  setup_reopened,
+  setup_reopened_at,
+  setup_reopened_by,
   setup_pct,
   setup_payload,
   updated_at
@@ -57,6 +62,33 @@ function writeOrganizationsToLocalCache(organizations) {
     ...current,
     organizationsData: Array.isArray(organizations) ? organizations : [],
   });
+  writeOrgBrandCacheFromOrganizations(organizations);
+}
+
+function extractOrgBrand(org = {}) {
+  return {
+    key: String(org?.key || '').trim(),
+    name: org?.name || '',
+    brandLogo: org?.brandLogo || null,
+    brandEmailLogo: org?.brandEmailLogo || null,
+    brandName: org?.brandName || org?.name || '',
+    brandPalette: org?.brandPalette || null,
+    brandHero: org?.brandHero || null,
+    brandCards: org?.brandCards || 'default',
+    brandFill: org?.brandFill || 'gradient',
+    updatedAt: org?.updatedAt || org?.updated_at || new Date().toISOString(),
+  };
+}
+
+function writeOrgBrandCacheFromOrganizations(organizations) {
+  if (!Array.isArray(organizations)) return;
+  const current = readLocalJson(ORG_BRAND_CACHE_KEY, {}) || {};
+  const next = { ...current };
+  organizations.forEach((org) => {
+    const brand = extractOrgBrand(org);
+    if (brand.key) next[brand.key] = brand;
+  });
+  writeLocalJson(ORG_BRAND_CACHE_KEY, next);
 }
 
 function getDomainFromSlug(slug) {
@@ -80,6 +112,10 @@ function buildOrganizationRow(org) {
     launched: !!org?.launched,
     current_phase: String(org?.currentPhase || 'goal-setting').trim() || 'goal-setting',
     status: String(org?.status || '').trim() || null,
+    setup_status: String(org?.setupStatus || (org?.launched ? 'launched' : 'in_progress')).trim() || 'in_progress',
+    setup_reopened: !!org?.setupReopened,
+    setup_reopened_at: org?.setupReopenedAt || null,
+    setup_reopened_by: org?.setupReopenedBy || null,
     setup_pct: Number(org?.setupPct) || 0,
     setup_payload: {
       orgData: org,
@@ -531,6 +567,10 @@ function mapOrganizationRow(row) {
     launched: row?.launched ?? cachedOrg.launched ?? false,
     currentPhase: row?.current_phase ?? cachedOrg.currentPhase ?? 'goal-setting',
     status: row?.status ?? cachedOrg.status ?? '',
+    setupStatus: row?.setup_status ?? cachedOrg.setupStatus ?? ((row?.launched ?? cachedOrg.launched) ? 'launched' : 'in_progress'),
+    setupReopened: row?.setup_reopened ?? cachedOrg.setupReopened ?? false,
+    setupReopenedAt: row?.setup_reopened_at ?? cachedOrg.setupReopenedAt ?? null,
+    setupReopenedBy: row?.setup_reopened_by ?? cachedOrg.setupReopenedBy ?? null,
     setupPct: Number(row?.setup_pct ?? cachedOrg.setupPct ?? 0) || 0,
     setupFormSnapshot: cachedOrg.setupFormSnapshot || payload.setupFormSnapshot || {},
   };
@@ -711,12 +751,27 @@ export async function hydrateAppData() {
 
 export function persistAppData(payload) {
   writeLocalJson(APP_DATA_KEY, payload);
+  if (Array.isArray(payload?.organizationsData)) writeOrgBrandCacheFromOrganizations(payload.organizationsData);
   void writeRemoteState('app_data', '', stripOrganizationsFromPayload(payload));
 }
 
 export function readOrganizationsSync() {
   const data = readAppDataSync();
   return Array.isArray(data?.organizationsData) ? data.organizationsData : [];
+}
+
+export function readOrgBrandCacheSync(orgKey) {
+  const key = String(orgKey || '').trim();
+  if (!key) return null;
+  const cache = readLocalJson(ORG_BRAND_CACHE_KEY, {}) || {};
+  return cache[key] || null;
+}
+
+export function persistOrgBrandCache(org) {
+  const brand = extractOrgBrand(org);
+  if (!brand.key) return;
+  const current = readLocalJson(ORG_BRAND_CACHE_KEY, {}) || {};
+  writeLocalJson(ORG_BRAND_CACHE_KEY, { ...current, [brand.key]: brand });
 }
 
 export async function hydrateOrganizations() {
@@ -888,7 +943,10 @@ export async function hydrateWizardState(orgKey = '') {
 
 export function persistWizardState(orgKey, payload) {
   const key = `${WIZARD_STATE_KEY}:${orgKey || 'default'}`;
-  writeLocalJson(key, payload);
+  // Broadcast the change so subscribers (e.g. an open employee dashboard)
+  // can react in real time — without `emit: true`, only other tabs would
+  // see the storage event, and same-tab views would stay stale until reload.
+  writeLocalJson(key, payload, { emit: true });
   writeLocalJson(key, payload, { session: true });
   void writeRemoteState('wizard_state', orgKey, payload);
   void syncNormalizedWizardState(orgKey, payload);
@@ -940,10 +998,21 @@ export function readEmployeeCredentialsSync() {
   return readLocalJson(EMP_CREDENTIALS_KEY, {});
 }
 
+function generateEmployeeOtp() {
+  // 6-digit numeric one-time password, cryptographically random. Each
+  // employee receives a unique value so a leaked invite can't unlock the
+  // whole org. Recipients change it on first login via the isTemp flow.
+  if (typeof globalThis !== 'undefined' && globalThis.crypto?.getRandomValues) {
+    const arr = new Uint32Array(1);
+    globalThis.crypto.getRandomValues(arr);
+    return String(arr[0] % 1000000).padStart(6, '0');
+  }
+  return String(Math.floor(Math.random() * 1000000)).padStart(6, '0');
+}
+
 export async function syncEmployeeCredentialsForOrg({ orgKey = '', tempPassword = '', employees = [] } = {}) {
   const normalizedOrgKey = String(orgKey || '').trim();
-  const tempPass = String(tempPassword || '');
-  if (!normalizedOrgKey || !tempPass) return readEmployeeCredentialsSync();
+  if (!normalizedOrgKey) return readEmployeeCredentialsSync();
 
   const roster = Array.isArray(employees) ? employees : [];
   const uploadedCodes = new Set(
@@ -969,26 +1038,33 @@ export async function syncEmployeeCredentialsForOrg({ orgKey = '', tempPassword 
 
     const email = resolveEmployeeEmail(employee);
     const current = existing[code];
-    const nextValue = current
-      ? {
-          ...current,
-          name: String(employee['Employee Name'] || current.name || '').trim(),
-          email: email || current.email || '',
-          empCode: code,
-          designation: String(employee.Designation || employee.Role || current.designation || '').trim(),
-          managerCode: normalizeCode(employee['Reporting Manager Code'] || current.managerCode || ''),
-          orgKey: normalizedOrgKey,
-        }
-      : {
-          passwordHash: await hashPasswordValue(tempPass),
-          name: String(employee['Employee Name'] || '').trim(),
-          email,
-          empCode: code,
-          designation: String(employee.Designation || employee.Role || '').trim(),
-          managerCode: normalizeCode(employee['Reporting Manager Code'] || ''),
-          orgKey: normalizedOrgKey,
-          isTemp: true,
-        };
+    let nextValue;
+    if (current) {
+      nextValue = {
+        ...current,
+        name: String(employee['Employee Name'] || current.name || '').trim(),
+        email: email || current.email || '',
+        empCode: code,
+        designation: String(employee.Designation || employee.Role || current.designation || '').trim(),
+        managerCode: normalizeCode(employee['Reporting Manager Code'] || current.managerCode || ''),
+        orgKey: normalizedOrgKey,
+      };
+    } else {
+      const otp = generateEmployeeOtp();
+      nextValue = {
+        passwordHash: await hashPasswordValue(otp),
+        // Plaintext kept temporarily so the imminent invite email can include
+        // it. Cleared after a successful send by `clearPendingEmployeeOtps`.
+        pendingTempPassword: otp,
+        name: String(employee['Employee Name'] || '').trim(),
+        email,
+        empCode: code,
+        designation: String(employee.Designation || employee.Role || '').trim(),
+        managerCode: normalizeCode(employee['Reporting Manager Code'] || ''),
+        orgKey: normalizedOrgKey,
+        isTemp: true,
+      };
+    }
 
     if (JSON.stringify(current || null) !== JSON.stringify(nextValue)) {
       existing[code] = nextValue;
@@ -998,6 +1074,61 @@ export async function syncEmployeeCredentialsForOrg({ orgKey = '', tempPassword 
 
   if (changed) persistEmployeeCredentials(existing);
   return existing;
+}
+
+// Rotate each listed employee's OTP and persist the new hash. Returns a map
+// of code → plaintext so the caller can stuff it into the outgoing email.
+// Use this on every send so a resend always supersedes the prior OTP.
+export async function rotateEmployeeOtpsForSend({ orgKey = '', employees = [] } = {}) {
+  const normalizedOrgKey = String(orgKey || '').trim();
+  if (!normalizedOrgKey) return new Map();
+  const list = Array.isArray(employees) ? employees : [];
+  if (list.length === 0) return new Map();
+
+  const existing = { ...(readEmployeeCredentialsSync() || {}) };
+  const plaintextByCode = new Map();
+  let changed = false;
+
+  for (const employee of list) {
+    const code = normalizeCode(employee?.['Employee Code']);
+    if (!code) continue;
+    const current = existing[code];
+    if (current && !current.isTemp) continue; // user already changed password — don't clobber
+    const otp = generateEmployeeOtp();
+    const passwordHash = await hashPasswordValue(otp);
+    existing[code] = {
+      ...(current || {}),
+      passwordHash,
+      pendingTempPassword: otp,
+      empCode: code,
+      orgKey: normalizedOrgKey,
+      isTemp: true,
+    };
+    plaintextByCode.set(code, otp);
+    changed = true;
+  }
+
+  if (changed) persistEmployeeCredentials(existing);
+  return plaintextByCode;
+}
+
+// After a successful send, scrub the plaintext field so it doesn't sit in
+// storage. The passwordHash remains and is what the auth flow checks.
+export function clearPendingEmployeeOtps({ orgKey = '', codes = [] } = {}) {
+  const normalizedOrgKey = String(orgKey || '').trim();
+  if (!normalizedOrgKey || !codes?.length) return;
+  const existing = { ...(readEmployeeCredentialsSync() || {}) };
+  let changed = false;
+  codes.forEach((rawCode) => {
+    const code = normalizeCode(rawCode);
+    const cred = existing[code];
+    if (cred && cred.pendingTempPassword) {
+      const { pendingTempPassword: _drop, ...rest } = cred;
+      existing[code] = rest;
+      changed = true;
+    }
+  });
+  if (changed) persistEmployeeCredentials(existing);
 }
 
 export async function hydrateEmployeeCredentials() {
