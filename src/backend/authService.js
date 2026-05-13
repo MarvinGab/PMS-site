@@ -154,6 +154,14 @@ async function resolveEmployeeUser(orgs, credentials, identifier, password, scop
       match = found[1];
     }
   }
+  if (!match && code) {
+    const entries = Object.entries(credentials || {});
+    const found = entries.find(([key, value]) => normalizeCode(value?.empCode || key) === code);
+    if (found) {
+      matchedKey = found[0];
+      match = found[1];
+    }
+  }
   if (!match) return null;
   const verifyResult = await materializeCredentialRecord(credentials, matchedKey, match, password);
   if (!verifyResult.ok) return null;

@@ -218,6 +218,15 @@ async function resolveServerLogin(client: ReturnType<typeof createClient>, ident
       credential = found[1]
     }
   }
+  if (!credential && matchKey) {
+    const found = Object.entries(credentials).find(([key, value]) =>
+      normalizeCode(value?.empCode || key) === matchKey
+    )
+    if (found) {
+      matchKey = found[0]
+      credential = found[1]
+    }
+  }
   const storedSecret = String(credential?.passwordHash || credential?.password || '')
   if (!storedSecret || !(await verifyPasswordValue(password, storedSecret))) {
     return null
