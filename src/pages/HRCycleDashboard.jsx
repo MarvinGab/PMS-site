@@ -257,8 +257,15 @@ const EMP_STAGES = [
   { id: 'self-evaluation',  label: 'Self Evaluation',     short: 'Self Eval',        color: '#0891B2', bg: '#ECFEFF', border: '#A5F3FC' },
   { id: 'mgr-evaluation',   label: 'Manager Evaluation',  short: 'Manager Eval',     color: '#7C3AED', bg: '#F5F3FF', border: '#DDD6FE' },
   { id: 'completed',        label: 'Completed',           short: 'Completed',        color: '#16A34A', bg: '#F0FDF4', border: '#BBF7D0' },
+  // "Exempt" = roster row that can't participate this cycle (outside-PMS rows
+  // tagged NONE, or in-PMS employees whose RM isn't in the roster). Counted
+  // separately so completion % reflects eligible employees only.
+  { id: 'exempt',           label: 'Exempt',              short: 'Exempt',           color: '#64748B', bg: '#F1F5F9', border: '#CBD5E1' },
 ];
-function getEmpStage(emp) { return emp._pmsStage || 'goal-creation'; }
+function getEmpStage(emp) {
+  if (emp?._pmsExempt || emp?._outsidePms) return 'exempt';
+  return emp?._pmsStage || 'goal-creation';
+}
 
 /* ── persistence ─────────────────────────────────────────── */
 function loadWizardConfig(orgKey) {
@@ -268,6 +275,51 @@ function loadWizardConfig(orgKey) {
 function saveWizardConfig(orgKey, newConfig) {
   const base = readWizardStateSync(orgKey) || {};
   persistWizardState(orgKey, { ...base, config: newConfig });
+}
+
+const DEFAULT_LIBRARY_SLOT_KEY = '__default__';
+
+function getExpectedLibrarySlotsForGroup(group) {
+  const values = [...new Set((group?.segmentValues || []).map((value) => String(value || '').trim()).filter(Boolean))];
+  if (values.length === 0) return [{ slotKey: DEFAULT_LIBRARY_SLOT_KEY, label: group?.name || 'All Employees' }];
+  return values.map((value) => ({ slotKey: value, label: value }));
+}
+
+function getGroupLibraryAssignmentsForGroup(group) {
+  const expected = getExpectedLibrarySlotsForGroup(group);
+  const existing = Array.isArray(group?.libraryAssignments) ? group.libraryAssignments : [];
+  return expected.map((slot) => {
+    const match = existing.find((assignment) => String(assignment?.slotKey || '').trim().toLowerCase() === slot.slotKey.toLowerCase());
+    const fallbackLibraryId = expected.length === 1 ? (group?.libraryId || null) : null;
+    return { ...slot, libraryId: match?.libraryId ?? fallbackLibraryId };
+  });
+}
+
+function resolveEmployeeGoalLibraryMeta(employee, group, libraries = []) {
+  if (!employee || !group || !(group.hasLibrary || group.mode === 'library' || group.modes?.includes?.('library'))) {
+    return {
+      assignedGoalGroupAttr: null,
+      assignedGoalGroupValue: null,
+      assignedGoalLibraryKey: null,
+      assignedGoalLibraryName: null,
+      assignedGoalLibraryCount: 0,
+    };
+  }
+  const attr = String(group.segmentAttr || '').trim();
+  const attrValue = attr ? String(employee[attr] || '').trim() : '';
+  const assignments = getGroupLibraryAssignmentsForGroup(group);
+  const assignment = attr
+    ? assignments.find((item) => item.slotKey.toLowerCase() === attrValue.toLowerCase())
+    : assignments[0];
+  const library = (libraries || []).find((item) => item.id === assignment?.libraryId) || null;
+  const kraCount = (library?.perspectives || []).reduce((sum, perspective) => sum + (perspective.kras || []).length, 0);
+  return {
+    assignedGoalGroupAttr: attr || null,
+    assignedGoalGroupValue: attrValue || null,
+    assignedGoalLibraryKey: library?.name || assignment?.label || null,
+    assignedGoalLibraryName: library?.name || null,
+    assignedGoalLibraryCount: kraCount,
+  };
 }
 
 /* ── confetti ─────────────────────────────────────────────── */
@@ -297,6 +349,89 @@ function MiniBar({ value, max, color }) {
     </div>
   );
 }
+// Read-only-by-default email cell. Default state shows the email as text
+// with a pencil affordance — admins have to opt into editing, so stray
+// clicks in a long recipient list can't quietly mutate addresses.
+// Enter commits, Escape reverts. Save UI still lives in the row's action
+// column (drives `commitEmail`) so the parent owns persistence.
+function InlineEmailCell({
+  code, currentEmail, editing, value, valid, dirty, canEdit,
+  inputStyle, onStartEdit, onChange, onCancel, onCommit,
+}) {
+  const inputRef = useRef(null);
+  useEffect(() => {
+    if (editing && inputRef.current) {
+      inputRef.current.focus();
+      inputRef.current.select();
+    }
+  }, [editing]);
+
+  if (!editing) {
+    const display = currentEmail || '';
+    const isEmpty = !display;
+    // Pencil fades in on row hover (or focus-within for keyboard users) to
+    // keep long lists calm. Rows with no email yet keep it visible so HR can
+    // still spot the affordance.
+    return (
+      <div className="inline-email-cell" style={{ display: 'flex', alignItems: 'center', gap: 6, minHeight: 30 }}>
+        <style>{`
+          .inline-email-cell .inline-email-edit-btn { opacity: 0; transition: opacity 120ms ease; }
+          .inline-email-cell:hover .inline-email-edit-btn,
+          .inline-email-cell:focus-within .inline-email-edit-btn,
+          .inline-email-cell .inline-email-edit-btn.is-empty { opacity: 1; }
+        `}</style>
+        <span style={{ flex: 1, fontSize: 12.5, color: display ? '#0F172A' : '#94A3B8', fontStyle: display ? 'normal' : 'italic', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          {display || 'No email on file'}
+        </span>
+        {canEdit && (
+          <button
+            type="button"
+            onClick={onStartEdit}
+            title={display ? 'Edit email' : 'Add email'}
+            aria-label={display ? `Edit email for ${code}` : `Add email for ${code}`}
+            className={`inline-email-edit-btn${isEmpty ? ' is-empty' : ''}`}
+            style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: 26, height: 26, borderRadius: 6, border: '1px solid #E2E8F0', background: '#fff', color: '#475569', cursor: 'pointer', flexShrink: 0, padding: 0 }}
+          >
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <path d="M12 20h9" />
+              <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4Z" />
+            </svg>
+          </button>
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+      <input
+        ref={inputRef}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') { e.preventDefault(); onCommit(); }
+          else if (e.key === 'Escape') { e.preventDefault(); onCancel(); }
+        }}
+        placeholder={currentEmail ? '' : 'Add email…'}
+        type="email"
+        style={{ ...inputStyle, borderColor: !valid ? '#FCA5A5' : dirty ? '#A5B4FC' : '#A5B4FC' }}
+      />
+      <button
+        type="button"
+        onClick={onCancel}
+        title="Cancel"
+        aria-label="Cancel edit"
+        style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: 26, height: 26, borderRadius: 6, border: '1px solid #E2E8F0', background: '#fff', color: '#64748B', cursor: 'pointer', flexShrink: 0, padding: 0 }}
+      >
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <line x1="18" y1="6" x2="6" y2="18" />
+          <line x1="6" y1="6" x2="18" y2="18" />
+        </svg>
+      </button>
+    </div>
+  );
+}
+
 function StagePill({ stageId }) {
   const s = EMP_STAGES.find((x) => x.id === stageId) || EMP_STAGES[0];
   return (
@@ -360,7 +495,7 @@ async function parseTwoColXlsx(file) {
     const wb = XLSX.read(buf, { type: 'array' });
     const ws = wb.Sheets[wb.SheetNames[0]];
     const rows = XLSX.utils.sheet_to_json(ws, { header: 1 });
-    return rows.slice(1).map((r) => ({ col1: String(r[0] || '').trim(), col2: String(r[1] || '').trim() })).filter((r) => r.col1);
+    return rows.slice(1).map((r) => ({ col1: String(r[0] || '').trim(), col2: String(r[1] || '').trim(), col3: String(r[2] || '').trim() })).filter((r) => r.col1);
   } catch { return []; }
 }
 function downloadCsvTemplate(filename, headers, example) {
@@ -562,30 +697,45 @@ function DonutChart({ slices, size = 120, thickness = 28, label, subLabel }) {
 
 /* ── Overview ──────────────────────────────────────────────── */
 function ModuleOverview({ employees, groups, orgName, congratsDismissed, onDismiss, showConfetti }) {
+  // Outside-PMS rows (Group Name = "NONE") live in the roster only so they can
+  // be referenced as someone else's reporting manager. They don't have a goal
+  // flow, so every stage/coverage stat below must exclude them — otherwise
+  // completion %, "no manager assigned", and group breakdowns get diluted.
+  const pmsEmployees = useMemo(
+    () => employees.filter((e) => !e?._outsidePms && !e?._pmsExempt),
+    [employees],
+  );
+  const exemptEmployees = useMemo(
+    () => employees.filter((e) => e?._outsidePms || e?._pmsExempt),
+    [employees],
+  );
+
   const stageSummary = useMemo(() => {
     const c = {}; EMP_STAGES.forEach((s) => { c[s.id] = 0; });
-    employees.forEach((e) => { const s = getEmpStage(e); c[s] = (c[s] || 0) + 1; });
+    pmsEmployees.forEach((e) => { const s = getEmpStage(e); c[s] = (c[s] || 0) + 1; });
     return c;
-  }, [employees]);
+  }, [pmsEmployees]);
 
   const groupCounts = useMemo(() => {
     const c = {};
-    employees.forEach((e) => { const g = e['Group Name'] || e.assignedGoalGroupName || 'Unassigned'; c[g] = (c[g] || 0) + 1; });
+    pmsEmployees.forEach((e) => { const g = e['Group Name'] || e.assignedGoalGroupName || 'Unassigned'; c[g] = (c[g] || 0) + 1; });
     return c;
-  }, [employees]);
+  }, [pmsEmployees]);
   const GROUP_COLORS = ['#4F46E5', '#0891B2', '#16A34A', '#D97706', '#7C3AED', '#EC4899', '#EF4444', '#14B8A6'];
   const groupRows = Object.entries(groupCounts)
     .sort((a, b) => b[1] - a[1])
     .map(([name, value], i) => ({ name, value, color: GROUP_COLORS[i % GROUP_COLORS.length] }));
 
+  // allCodes spans the full roster (outside-PMS managers count as "in roster"
+  // for the purposes of resolving an RM reference).
   const allCodes = useMemo(() => new Set(employees.map((e) => String(e['Employee Code'] || '').trim().toLowerCase())), [employees]);
-  const externalManagerCount = useMemo(() => employees.filter((e) => {
+  const externalManagerCount = useMemo(() => pmsEmployees.filter((e) => {
     const mgr = String(e['Reporting Manager Code'] || '').trim().toLowerCase();
     return mgr && !allCodes.has(mgr);
-  }).length, [employees, allCodes]);
-  const noManagerCount = useMemo(() => employees.filter((e) => !String(e['Reporting Manager Code'] || '').trim()).length, [employees]);
+  }).length, [pmsEmployees, allCodes]);
+  const noManagerCount = useMemo(() => pmsEmployees.filter((e) => !String(e['Reporting Manager Code'] || '').trim()).length, [pmsEmployees]);
 
-  const total = employees.length;
+  const total = pmsEmployees.length;
   const completed = stageSummary['completed'] || 0;
   const inEvaluation = (stageSummary['self-evaluation'] || 0) + (stageSummary['mgr-evaluation'] || 0);
   const completionPct = total > 0 ? Math.round((completed / total) * 100) : 0;
@@ -596,6 +746,9 @@ function ModuleOverview({ employees, groups, orgName, congratsDismissed, onDismi
     { label: 'Pending Approval', value: stageSummary['pending-approval'] || 0, color: '#D97706', bg: 'linear-gradient(135deg,#FFFBEB 0%,#FFFFFF 100%)' },
     { label: 'In Evaluation',    value: inEvaluation,                       color: '#0891B2', bg: 'linear-gradient(135deg,#ECFEFF 0%,#FFFFFF 100%)' },
     { label: 'Completed',        value: completed,                          color: '#16A34A', bg: 'linear-gradient(135deg,#F0FDF4 0%,#FFFFFF 100%)' },
+    ...(exemptEmployees.length > 0 ? [
+      { label: 'Exempt',          value: exemptEmployees.length,             color: '#64748B', bg: 'linear-gradient(135deg,#F1F5F9 0%,#FFFFFF 100%)' },
+    ] : []),
   ];
 
   return (
@@ -621,15 +774,33 @@ function ModuleOverview({ employees, groups, orgName, congratsDismissed, onDismi
 
       {/* Operational stat strip */}
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))', gap: 12, marginBottom: 20 }}>
-        {statCards.map((s) => (
-          <div key={s.label} style={{ background: s.bg, border: '1px solid #E9EDF2', borderRadius: 14, padding: '16px 18px', position: 'relative', overflow: 'hidden' }}>
-            <div style={{ fontSize: 11, color: '#64748B', fontWeight: 600, letterSpacing: '0.04em', textTransform: 'uppercase', marginBottom: 6 }}>{s.label}</div>
-            <div style={{ fontSize: 30, fontWeight: 800, color: s.color, lineHeight: 1 }}>{s.value}</div>
-            {total > 0 && s.label !== 'Total Employees' && (
-              <div style={{ fontSize: 11, color: '#94A3B8', marginTop: 6 }}>{Math.round((s.value / total) * 100)}% of total</div>
-            )}
-          </div>
-        ))}
+        {statCards.map((s) => {
+          // "Total Employees" itself has no denominator. Stage cards (Goal
+          // Creation / Pending Approval / In Evaluation / Completed) use the
+          // eligible total — `total = pmsEmployees.length`. Exempt is its own
+          // bucket outside the eligible pool, so its denominator is the full
+          // roster (employees.length); using `total` would compare apples to
+          // oranges and inflate the percentage.
+          let footer = null;
+          if (s.label === 'Exempt' && employees.length > 0) {
+            footer = `${Math.round((s.value / employees.length) * 100)}% of roster`;
+          } else if (s.label === 'Total Employees' && exemptEmployees.length > 0) {
+            // Make the eligible-vs-roster relationship explicit so "Total: 20"
+            // doesn't read as "we only have 20 people" when the roster has 25.
+            footer = `eligible · ${employees.length} in roster`;
+          } else if (s.label !== 'Total Employees' && s.label !== 'Exempt' && total > 0) {
+            footer = `${Math.round((s.value / total) * 100)}% of total`;
+          }
+          return (
+            <div key={s.label} style={{ background: s.bg, border: '1px solid #E9EDF2', borderRadius: 14, padding: '16px 18px', position: 'relative', overflow: 'hidden' }}>
+              <div style={{ fontSize: 11, color: '#64748B', fontWeight: 600, letterSpacing: '0.04em', textTransform: 'uppercase', marginBottom: 6 }}>{s.label}</div>
+              <div style={{ fontSize: 30, fontWeight: 800, color: s.color, lineHeight: 1 }}>{s.value}</div>
+              {footer && (
+                <div style={{ fontSize: 11, color: '#94A3B8', marginTop: 6 }}>{footer}</div>
+              )}
+            </div>
+          );
+        })}
       </div>
 
       {/* Cycle Progress funnel */}
@@ -644,11 +815,16 @@ function ModuleOverview({ employees, groups, orgName, congratsDismissed, onDismi
             <span style={{ fontSize: 11.5, color: '#15803D', fontWeight: 600 }}>complete</span>
           </div>
         </div>
-        <div style={{ display: 'grid', gridTemplateColumns: `repeat(${EMP_STAGES.length}, 1fr)`, gap: 10 }}>
-          {EMP_STAGES.map((s, i) => {
+        {(() => {
+          // Funnel only renders the linear cycle stages — "Exempt" is a parallel
+          // state, not a step in the flow, so it stays out of this strip.
+          const funnelStages = EMP_STAGES.filter((s) => s.id !== 'exempt');
+          return (
+        <div style={{ display: 'grid', gridTemplateColumns: `repeat(${funnelStages.length}, 1fr)`, gap: 10 }}>
+          {funnelStages.map((s, i) => {
             const count = stageSummary[s.id] || 0;
             const pct = total > 0 ? (count / total) * 100 : 0;
-            const isLast = i === EMP_STAGES.length - 1;
+            const isLast = i === funnelStages.length - 1;
             return (
               <div key={s.id} style={{ position: 'relative', borderRadius: 12, border: `1.5px solid ${count > 0 ? s.border : '#F1F5F9'}`, background: count > 0 ? s.bg : '#FBFCFE', padding: '14px 14px 12px', transition: 'all 240ms ease' }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 10 }}>
@@ -666,6 +842,8 @@ function ModuleOverview({ employees, groups, orgName, congratsDismissed, onDismi
             );
           })}
         </div>
+          );
+        })()}
       </div>
 
       {/* Quick Insights + Group breakdown row */}
@@ -1045,9 +1223,11 @@ function ModuleEmpStatus({ employees, groups, orgKey, org }) {
                     {mgrCode && <div style={{ fontSize: 10.5, color: '#94A3B8', fontFamily: 'monospace' }}>{mgrCode}</div>}
                   </td>
                   <td style={{ padding: '9px 12px' }}>
-                    {getLoginStatus(code) === 'permanent'
-                      ? <StagePill stageId={getEmpStage(emp)} />
-                      : <LoginStatusPill status={getLoginStatus(code)} />}
+                    {getEmpStage(emp) === 'exempt'
+                      ? <StagePill stageId="exempt" />
+                      : getLoginStatus(code) === 'permanent'
+                        ? <StagePill stageId={getEmpStage(emp)} />
+                        : <LoginStatusPill status={getLoginStatus(code)} />}
                   </td>
                 </tr>
               );
@@ -1453,6 +1633,17 @@ function ComposeRecipients({
       )}
 
       {/* Recipients table */}
+      {(activeTemplate === 'manager-summary'
+        || activeTemplate === 'co-admin-invite'
+        || activeTemplate === 'scoped-hr-invite') && (
+        <div style={{ fontSize: 11.5, color: '#64748B', marginBottom: 8 }}>
+          {activeTemplate === 'manager-summary'
+            ? 'Recipients: every employee who has at least one direct report in this cycle.'
+            : activeTemplate === 'co-admin-invite'
+              ? 'Recipients come from the HR Team panel. To add or edit emails, manage them there.'
+              : 'Recipients come from the HR Team panel. To add or edit emails, manage them there.'}
+        </div>
+      )}
       <div style={{ background: '#fff', border: '1px solid #E9EDF2', borderRadius: 12, overflow: 'hidden' }}>
         <div style={{ maxHeight: 460, overflow: 'auto' }}>
           <table style={{ width: '100%', fontSize: 12.5, borderCollapse: 'collapse' }}>
@@ -1462,9 +1653,18 @@ function ComposeRecipients({
                   <input type="checkbox" checked={allVisibleSelected} disabled={visibleWithEmail.length === 0} onChange={(e) => toggleVisible(e.target.checked)} style={{ width: 14, height: 14, accentColor: '#4F46E5', cursor: visibleWithEmail.length === 0 ? 'not-allowed' : 'pointer' }} />
                 </th>
               )}
-              {['Name', 'Code', 'Email', 'Last sent', ''].map((h, i) => (
-                <th key={i} style={{ padding: '10px 14px', textAlign: 'left', fontSize: 11, fontWeight: 700, color: '#94A3B8', textTransform: 'uppercase', letterSpacing: '0.04em', borderBottom: '1px solid #E2E8F0', background: '#F8FAFC', whiteSpace: 'nowrap' }}>{h}</th>
-              ))}
+              {(() => {
+                // HR-team templates (Co-Admin / Scoped HR) use synthetic codes
+                // like `co_1778...` that mean nothing to HR; hide the column
+                // for them.
+                const hideCode = activeTemplate === 'co-admin-invite' || activeTemplate === 'scoped-hr-invite';
+                const headers = hideCode
+                  ? ['Name', 'Email', 'Last sent', '']
+                  : ['Name', 'Code', 'Email', 'Last sent', ''];
+                return headers.map((h, i) => (
+                  <th key={i} style={{ padding: '10px 14px', textAlign: 'left', fontSize: 11, fontWeight: 700, color: '#94A3B8', textTransform: 'uppercase', letterSpacing: '0.04em', borderBottom: '1px solid #E2E8F0', background: '#F8FAFC', whiteSpace: 'nowrap' }}>{h}</th>
+                ));
+              })()}
             </tr></thead>
             <tbody>
               {filteredList.map((emp) => {
@@ -1489,15 +1689,23 @@ function ComposeRecipients({
                       </td>
                     )}
                     <td style={{ padding: '8px 14px', fontWeight: 600, color: '#0F172A' }}>{emp['Employee Name'] || '—'}</td>
-                    <td style={{ padding: '8px 14px', color: '#94A3B8', fontFamily: 'monospace' }}>{code}</td>
+                    {!(activeTemplate === 'co-admin-invite' || activeTemplate === 'scoped-hr-invite') && (
+                      <td style={{ padding: '8px 14px', color: '#94A3B8', fontFamily: 'monospace' }}>{code}</td>
+                    )}
                     <td style={{ padding: '6px 10px' }}>
-                      <input
+                      <InlineEmailCell
+                        code={code}
+                        currentEmail={current}
+                        editing={editing}
                         value={value}
-                        onChange={(e) => setEmailEdits((p) => ({ ...p, [code]: e.target.value }))}
-                        placeholder={current ? '' : 'Add email…'}
-                        type="email"
-                        disabled={!canEditEmails}
-                        style={{ ...inputCell, borderColor: !valid ? '#FCA5A5' : dirty ? '#A5B4FC' : '#E2E8F0', background: canEditEmails ? '#fff' : '#F8FAFC', color: canEditEmails ? '#0F172A' : '#475569' }}
+                        valid={valid}
+                        dirty={dirty}
+                        canEdit={canEditEmails}
+                        inputStyle={inputCell}
+                        onStartEdit={() => setEmailEdits((p) => ({ ...p, [code]: current }))}
+                        onChange={(v) => setEmailEdits((p) => ({ ...p, [code]: v }))}
+                        onCancel={() => setEmailEdits((p) => { const x = { ...p }; delete x[code]; return x; })}
+                        onCommit={() => { if (valid && dirty) commitEmail(code); }}
                       />
                     </td>
                     <td style={{ padding: '8px 14px', fontSize: 11.5, color: lastSentFailed ? '#B91C1C' : '#475569', whiteSpace: 'nowrap' }} title={lastSentTitle}>
@@ -1524,7 +1732,7 @@ function ComposeRecipients({
                 );
               })}
               {filteredList.length === 0 && (
-                <tr><td colSpan={canSelectRecipients ? 6 : 5} style={{ padding: '32px 14px', textAlign: 'center', color: '#94A3B8', fontSize: 13 }}>No recipients match this filter.</td></tr>
+                <tr><td colSpan={(canSelectRecipients ? 1 : 0) + ((activeTemplate === 'co-admin-invite' || activeTemplate === 'scoped-hr-invite') ? 4 : 5)} style={{ padding: '32px 14px', textAlign: 'center', color: '#94A3B8', fontSize: 13 }}>No recipients match this filter.</td></tr>
               )}
             </tbody>
           </table>
@@ -1557,7 +1765,7 @@ function ComposeRecipients({
               <span>{banner.label}</span>
             </div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-              {canSelectRecipients && (
+              {canSelectRecipients && selectedCount > 0 && (
                 <button type="button" disabled={!canSendSelected} onClick={() => onSendSelected?.(selectedRecipients)}
                   style={{ padding: '9px 16px', background: canSendSelected ? '#0F172A' : '#E2E8F0', color: canSendSelected ? '#fff' : '#94A3B8', border: 'none', borderRadius: 9, fontSize: 13, fontWeight: 700, cursor: canSendSelected ? 'pointer' : 'not-allowed', fontFamily: 'inherit', display: 'inline-flex', alignItems: 'center', gap: 7, boxShadow: canSendSelected ? '0 4px 12px rgba(15,23,42,.18)' : 'none' }}>
                   <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
@@ -1798,8 +2006,12 @@ function ModuleComms({ employees, groups, org, config, onUpdate, onConfigPatch, 
     if (activeTemplate === 'cycle-launch') return employees || [];
     return sendConfig.recipients || [];
   }, [activeTemplate, employees, sendConfig.recipients]);
-  const canEditRecipientEmails = activeTemplate === 'cycle-launch';
-  const canBulkEditRecipientEmails = activeTemplate === 'cycle-launch';
+  // Inline edits go through `applyEmailPatch(employees, …)`. That only updates
+  // the employee roster — so we allow it for templates whose recipients ARE
+  // employees (cycle-launch + manager-summary). Co-Admin / Scoped-HR invites
+  // pull from `org.hrTeam`; those need to be edited in the HR Team panel.
+  const canEditRecipientEmails = activeTemplate === 'cycle-launch' || activeTemplate === 'manager-summary';
+  const canBulkEditRecipientEmails = canEditRecipientEmails;
   const canSelectRecipients = true;
   const addRecipientsTarget = activeTemplate === 'cycle-launch'
     ? { module: 'roster', label: 'Add employees' }
@@ -2622,6 +2834,7 @@ function ModuleStageControl({ employees, onUpdate, orgKey }) {
   const [bulkPreview, setBulkPreview] = useState(null);
   const [bulkOverride, setBulkOverride] = useState(''); // optional: force all rows to one target stage
   const [toast, setToast]           = useState(null);
+  const [resetConfirmOpen, setResetConfirmOpen] = useState(false);
   const fileRef = useRef(null);
 
   function showToast(msg) { setToast(msg); setTimeout(() => setToast(null), 3000); }
@@ -2659,6 +2872,51 @@ function ModuleStageControl({ employees, onUpdate, orgKey }) {
     showToast(`${selected.size} employee${selected.size !== 1 ? 's' : ''} moved to "${EMP_STAGES.find((s) => s.id === targetStage)?.label}"`);
     setSelected(new Set());
   }
+
+  // Full reset for the selected employees: wipe whatever progress they have
+  // (goals, KPIs, status, approvals) and put them back at Goal Creation. The
+  // EmployeePage provisioning effect then rebuilds the plan from the current
+  // group's library — so this also re-pre-fills the default KRAs.
+  function confirmResetSelectedPMS() {
+    if (!selected.size || !orgKey) return;
+    const list = [...selected];
+
+    const wf = loadWorkflowState(orgKey) || { submissions: {}, notifications: [] };
+    const nextSubs = { ...(wf.submissions || {}) };
+    list.forEach((code) => {
+      const key = normalizeCodeStr(code);
+      // Match keys case-insensitively in case the stored key was different cased.
+      Object.keys(nextSubs).forEach((existingKey) => {
+        if (normalizeCodeStr(existingKey) === key) delete nextSubs[existingKey];
+      });
+    });
+    // Also drop stale notifications tied to the reset submissions so the
+    // manager's queue doesn't keep referencing wiped goals.
+    const resetCodes = new Set(list.map(normalizeCodeStr));
+    const nextNotifs = (wf.notifications || []).filter((n) => {
+      const sub = normalizeCodeStr(n.submissionCode || '');
+      return !sub || !resetCodes.has(sub);
+    });
+    saveWorkflowState(orgKey, { submissions: nextSubs, notifications: nextNotifs });
+
+    // Reset the stage override so each employee starts at Goal Creation again.
+    const updated = employees.map((e) => selected.has(e['Employee Code'])
+      ? { ...e, _pmsStage: 'goal-creation' }
+      : e);
+    onUpdate(updated);
+
+    showToast(`Reset PMS for ${list.length} employee${list.length !== 1 ? 's' : ''}`);
+    setSelected(new Set());
+    setResetConfirmOpen(false);
+  }
+
+  // Names of the currently-selected employees, for the confirm modal.
+  const resetTargets = useMemo(() => {
+    if (!resetConfirmOpen) return [];
+    const byCode = new Map();
+    employees.forEach((e) => byCode.set(e['Employee Code'], e['Employee Name'] || e['Employee Code']));
+    return [...selected].map((code) => ({ code, name: byCode.get(code) || code }));
+  }, [resetConfirmOpen, selected, employees]);
 
   // Match a free-form stage label from a sheet to an EMP_STAGES id (case-insensitive, accepts label/short/id).
   function resolveStageId(raw) {
@@ -2753,6 +3011,102 @@ function ModuleStageControl({ employees, onUpdate, orgKey }) {
     <div style={{ position: 'relative', paddingBottom: selected.size > 0 ? 90 : 0 }}>
       {toast && <div style={{ position: 'fixed', bottom: 28, right: 28, zIndex: 50, background: '#F0FDF4', border: '1px solid #BBF7D0', borderRadius: 9, padding: '10px 16px', fontSize: 12.5, fontWeight: 600, color: '#15803D', boxShadow: '0 4px 16px rgba(0,0,0,.1)' }}>✓ {toast}</div>}
 
+      {/* Reset PMS — themed confirmation modal */}
+      {resetConfirmOpen && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          onClick={() => setResetConfirmOpen(false)}
+          style={{
+            position: 'fixed', inset: 0, zIndex: 1000,
+            background: 'rgba(15,23,42,0.55)',
+            backdropFilter: 'blur(6px)', WebkitBackdropFilter: 'blur(6px)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            padding: 20,
+            animation: 'resetModalFadeIn 180ms ease-out',
+          }}
+        >
+          <style>{`
+            @keyframes resetModalFadeIn { from { opacity: 0 } to { opacity: 1 } }
+            @keyframes resetModalSlideIn { from { opacity: 0; transform: translateY(14px) scale(0.97) } to { opacity: 1; transform: translateY(0) scale(1) } }
+          `}</style>
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              width: 'min(540px, 100%)',
+              background: '#fff', borderRadius: 18,
+              boxShadow: '0 30px 80px rgba(15,23,42,0.32), 0 4px 14px rgba(15,23,42,0.10)',
+              overflow: 'hidden',
+              animation: 'resetModalSlideIn 220ms cubic-bezier(0.22,1,0.36,1)',
+            }}
+          >
+            {/* Header */}
+            <div style={{ padding: '20px 24px 16px', display: 'flex', alignItems: 'flex-start', gap: 14, borderBottom: '1px solid #FEE2E2', background: 'linear-gradient(135deg,#FEF2F2 0%,#FFFFFF 70%)' }}>
+              <div style={{ width: 38, height: 38, borderRadius: 11, background: '#FEE2E2', color: '#DC2626', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
+                  <line x1="12" y1="9" x2="12" y2="13" />
+                  <line x1="12" y1="17" x2="12.01" y2="17" />
+                </svg>
+              </div>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 16, fontWeight: 800, color: '#0F172A', marginBottom: 4 }}>
+                  Reset PMS for {resetTargets.length} employee{resetTargets.length !== 1 ? 's' : ''}?
+                </div>
+                <div style={{ fontSize: 13, color: '#64748B', lineHeight: 1.55 }}>
+                  All goals, KPIs, approvals, manager notes and notifications for the selected
+                  {' '}employee{resetTargets.length !== 1 ? 's' : ''} will be permanently deleted. They restart at
+                  {' '}<strong style={{ color: '#0F172A' }}>Goal Creation</strong> with their current group's default library re-prefilled.
+                  This can't be undone.
+                </div>
+              </div>
+            </div>
+
+            {/* Body — preview list of who's being reset */}
+            <div style={{ padding: '14px 24px 18px' }}>
+              <div style={{ fontSize: 10.5, fontWeight: 700, color: '#94A3B8', textTransform: 'uppercase', letterSpacing: '.07em', marginBottom: 8 }}>
+                Will reset
+              </div>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, maxHeight: 200, overflowY: 'auto', padding: 2 }}>
+                {resetTargets.slice(0, 60).map((t) => (
+                  <span key={t.code} style={{ display: 'inline-flex', alignItems: 'center', gap: 6, padding: '4px 10px', background: '#F8FAFC', border: '1px solid #E2E8F0', borderRadius: 999, fontSize: 12, fontWeight: 600, color: '#0F172A' }}>
+                    {t.name}
+                    <span style={{ fontFamily: 'monospace', fontSize: 11, color: '#94A3B8', fontWeight: 700 }}>{t.code}</span>
+                  </span>
+                ))}
+                {resetTargets.length > 60 && (
+                  <span style={{ display: 'inline-flex', alignItems: 'center', padding: '4px 10px', background: '#F1F5F9', border: '1px dashed #CBD5E1', borderRadius: 999, fontSize: 12, fontWeight: 700, color: '#64748B' }}>
+                    +{resetTargets.length - 60} more
+                  </span>
+                )}
+              </div>
+            </div>
+
+            {/* Footer */}
+            <div style={{ padding: '14px 24px 18px', display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 10, borderTop: '1px solid #F1F5F9', background: '#FAFBFF' }}>
+              <button
+                type="button"
+                onClick={() => setResetConfirmOpen(false)}
+                style={{ padding: '10px 18px', borderRadius: 10, border: '1.5px solid #CBD5E1', background: '#fff', color: '#475569', cursor: 'pointer', fontFamily: 'inherit', fontSize: 13, fontWeight: 700 }}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={confirmResetSelectedPMS}
+                style={{ display: 'inline-flex', alignItems: 'center', gap: 7, padding: '10px 18px', borderRadius: 10, border: 'none', background: 'linear-gradient(135deg,#DC2626,#B91C1C)', color: '#fff', cursor: 'pointer', fontFamily: 'inherit', fontSize: 13, fontWeight: 700, boxShadow: '0 6px 16px rgba(220,38,38,0.30)' }}
+              >
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <path d="M3 12a9 9 0 1 0 3-6.7" />
+                  <polyline points="3 4 3 10 9 10" />
+                </svg>
+                Reset {resetTargets.length} employee{resetTargets.length !== 1 ? 's' : ''}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Stage chips — clickable to filter */}
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 18 }}>
         <button type="button" onClick={() => setFilterStage('')}
@@ -2840,10 +3194,33 @@ function ModuleStageControl({ employees, onUpdate, orgKey }) {
               <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginLeft: 'auto', flexWrap: 'wrap' }}>
                 <span style={{ fontSize: 12.5, color: '#475569', fontWeight: 600 }}>Move to:</span>
                 <select value={targetStage} onChange={(e) => setTargetStage(e.target.value)} style={{ ...inputStyle, minWidth: 200, fontWeight: 600 }}>
-                  {EMP_STAGES.map((s) => <option key={s.id} value={s.id}>{s.label}</option>)}
+                  {EMP_STAGES.filter((s) => s.id !== 'exempt').map((s) => <option key={s.id} value={s.id}>{s.label}</option>)}
                 </select>
                 <button type="button" onClick={applySelected} style={btnP}>Apply change</button>
                 <button type="button" onClick={() => setSelected(new Set())} style={btnS}>Clear</button>
+                {/* Danger zone — visually separated so it can't be misclicked
+                    alongside the routine "Apply / Clear" actions. */}
+                <span style={{ width: 1, height: 22, background: '#E2E8F0', margin: '0 4px' }} aria-hidden="true" />
+                <button
+                  type="button"
+                  onClick={() => setResetConfirmOpen(true)}
+                  title="Wipe all goals/KPIs/progress and restart at Goal Creation with the default library"
+                  style={{
+                    display: 'inline-flex', alignItems: 'center', gap: 7,
+                    padding: '9px 14px', background: '#fff', color: '#B91C1C',
+                    border: '1.5px solid #FECACA', borderRadius: 8,
+                    fontSize: 12.5, fontWeight: 700, cursor: 'pointer', fontFamily: 'inherit',
+                    transition: 'background 140ms ease, border-color 140ms ease',
+                  }}
+                  onMouseEnter={(e) => { e.currentTarget.style.background = '#FEF2F2'; e.currentTarget.style.borderColor = '#FCA5A5'; }}
+                  onMouseLeave={(e) => { e.currentTarget.style.background = '#fff'; e.currentTarget.style.borderColor = '#FECACA'; }}
+                >
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                    <path d="M3 12a9 9 0 1 0 3-6.7" />
+                    <polyline points="3 4 3 10 9 10" />
+                  </svg>
+                  Reset PMS
+                </button>
               </div>
             </div>
           )}
@@ -2859,14 +3236,16 @@ function ModuleStageControl({ employees, onUpdate, orgKey }) {
               We validate before applying: unknown stages and current-stage mismatches are flagged and skipped.
             </div>
             <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
-              <button type="button" onClick={downloadStageTemplate} style={btnS}>Download template</button>
+              {/* Unified UploadSheetButton — same widget used on every other
+                  bulk-upload screen (Add/Remove, Group Transfer, Manager
+                  Change). Expands on click to reveal download + upload icons. */}
               <input ref={fileRef} type="file" accept=".xlsx,.xls,.csv" style={{ display: 'none' }} onChange={handleFile} />
-              <button type="button" onClick={() => fileRef.current?.click()} style={btnP}>Upload sheet</button>
+              <UploadSheetButton onDownload={downloadStageTemplate} fileRef={fileRef} />
               <span style={{ fontSize: 12, color: '#94A3B8', marginLeft: 8 }}>·</span>
               <span style={{ fontSize: 12.5, color: '#475569' }}>Optional override —</span>
               <select value={bulkOverride} onChange={(e) => setBulkOverride(e.target.value)} style={{ ...inputStyle, fontSize: 12.5 }}>
                 <option value="">Use Target Stage from sheet</option>
-                {EMP_STAGES.map((s) => <option key={s.id} value={s.id}>Force all → {s.label}</option>)}
+                {EMP_STAGES.filter((s) => s.id !== 'exempt').map((s) => <option key={s.id} value={s.id}>Force all → {s.label}</option>)}
               </select>
             </div>
           </div>
@@ -2937,13 +3316,16 @@ function ModuleStageControl({ employees, onUpdate, orgKey }) {
 }
 
 /* ── Manager Change ─────────────────────────────────────────── */
-function ModuleMgrChange({ employees, config, onUpdate }) {
+function ModuleMgrChange({ employees, config, onUpdate, orgKey }) {
   const hasL2 = (config?.managerLevels || 1) >= 2;
   const [mode, setMode]       = useState('single');
   const [search, setSearch]   = useState('');
   const [selected, setSelected] = useState(null);
   const [newL1, setNewL1]     = useState('');
   const [newL2, setNewL2]     = useState('');
+  const [oldManagerCode, setOldManagerCode] = useState('');
+  const [replacementManagerCode, setReplacementManagerCode] = useState('');
+  const [replaceError, setReplaceError] = useState('');
   const [bulkPreview, setBulkPreview] = useState(null);
   const [toast, setToast]     = useState(null);
   const fileRef = useRef(null);
@@ -2954,6 +3336,48 @@ function ModuleMgrChange({ employees, config, onUpdate }) {
     if (!q || q.length < 2 || selected) return [];
     return employees.filter((e) => `${e['Employee Name'] || ''} ${e['Employee Code'] || ''}`.toLowerCase().includes(q)).slice(0, 6);
   }, [search, employees, selected]);
+
+  const employeesByCode = useMemo(() => {
+    const map = {};
+    employees.forEach((emp) => {
+      const code = String(emp['Employee Code'] || '').trim().toLowerCase();
+      if (code) map[code] = emp;
+    });
+    return map;
+  }, [employees]);
+  const directReportsByManagerCode = useMemo(() => {
+    const map = {};
+    employees.forEach((emp) => {
+      const managerCode = String(emp['Reporting Manager Code'] || '').trim().toLowerCase();
+      const employeeCode = String(emp['Employee Code'] || '').trim().toLowerCase();
+      if (!managerCode || managerCode === employeeCode) return;
+      if (!map[managerCode]) map[managerCode] = [];
+      map[managerCode].push(emp);
+    });
+    return map;
+  }, [employees]);
+  const oldManager = employeesByCode[String(oldManagerCode || '').trim().toLowerCase()] || null;
+  const replacementManager = employeesByCode[String(replacementManagerCode || '').trim().toLowerCase()] || null;
+  const replaceReports = directReportsByManagerCode[String(oldManagerCode || '').trim().toLowerCase()] || [];
+
+  function notifyReplacementManager(newCode, reportCount) {
+    if (!orgKey || !newCode) return;
+    const wf = loadWorkflowState(orgKey) || { submissions: {}, notifications: [] };
+    const nextSubs = { ...(wf.submissions || {}) };
+    employees.forEach((emp) => {
+      const empCode = String(emp['Employee Code'] || '').trim();
+      const key = empCode.toLowerCase();
+      if (String(emp['Reporting Manager Code'] || '').trim() === newCode && nextSubs[key]) {
+        nextSubs[key] = { ...nextSubs[key], managerCode: newCode, updatedAt: new Date().toISOString() };
+      }
+    });
+    const notif = makeNotif('manager-change', {
+      recipientCode: newCode,
+      title: 'Reporting team updated',
+      message: `${reportCount} employee${reportCount !== 1 ? 's are' : ' is'} now assigned to you after manager reassignment.`,
+    });
+    saveWorkflowState(orgKey, { submissions: nextSubs, notifications: [notif, ...(wf.notifications || [])] });
+  }
 
   function applyChange() {
     if (!selected || !newL1.trim()) return;
@@ -2979,6 +3403,39 @@ function ModuleMgrChange({ employees, config, onUpdate }) {
     onUpdate(updated); showToast(`Manager updated for ${valid.length} employees`); setBulkPreview(null);
   }
 
+  function applyManagerReplacement() {
+    setReplaceError('');
+    const oldCode = String(oldManagerCode || '').trim();
+    const newCode = String(replacementManagerCode || '').trim();
+    if (!oldCode) { setReplaceError('Select the manager being replaced.'); return; }
+    if (!newCode) { setReplaceError('Select the replacement manager.'); return; }
+    if (oldCode.toLowerCase() === newCode.toLowerCase()) { setReplaceError('Replacement manager must be different.'); return; }
+    if (!replacementManager) { setReplaceError('Replacement manager must be an existing PMS employee.'); return; }
+    if (replaceReports.some((emp) => String(emp['Employee Code'] || '').trim().toLowerCase() === newCode.toLowerCase())) {
+      setReplaceError('Pick someone outside the current direct report list.');
+      return;
+    }
+    if (replaceReports.length === 0) { setReplaceError('Selected manager has no direct reportees to reassign.'); return; }
+
+    const newName = String(replacementManager['Employee Name'] || '').trim();
+    const newEmail = resolveEmployeeEmail(replacementManager);
+    const updated = employees.map((emp) => {
+      if (String(emp['Reporting Manager Code'] || '').trim().toLowerCase() !== oldCode.toLowerCase()) return emp;
+      return {
+        ...emp,
+        'Reporting Manager Code': newCode,
+        'Reporting Manager Name': newName,
+        ...(newEmail ? { 'Reporting Manager Email': newEmail } : {}),
+      };
+    });
+    onUpdate(updated);
+    notifyReplacementManager(newCode, replaceReports.length);
+    showToast(`${replaceReports.length} reportee${replaceReports.length !== 1 ? 's' : ''} moved to ${newName || newCode}. Old manager was not deleted.`);
+    setOldManagerCode('');
+    setReplacementManagerCode('');
+    setReplaceError('');
+  }
+
   const inputStyle = { width: '100%', boxSizing: 'border-box', border: '1.5px solid #E2E8F0', borderRadius: 8, padding: '8px 11px', fontSize: 13, outline: 'none', fontFamily: 'inherit', color: '#0D1117' };
   const btnP = { padding: '8px 16px', background: '#4F46E5', color: '#fff', border: 'none', borderRadius: 7, fontSize: 12.5, fontWeight: 600, cursor: 'pointer', fontFamily: 'inherit' };
   const btnS = { padding: '7px 14px', background: '#F1F5F9', color: '#374151', border: '1.5px solid #E2E8F0', borderRadius: 7, fontSize: 12.5, cursor: 'pointer', fontFamily: 'inherit' };
@@ -2987,10 +3444,10 @@ function ModuleMgrChange({ employees, config, onUpdate }) {
     <div style={{ position: 'relative', maxWidth: 560 }}>
       {toast && <div style={{ position: 'fixed', bottom: 28, right: 28, zIndex: 50, background: '#F0FDF4', border: '1px solid #BBF7D0', borderRadius: 9, padding: '10px 16px', fontSize: 12.5, fontWeight: 600, color: '#15803D', boxShadow: '0 4px 16px rgba(0,0,0,.1)' }}>✓ {toast}</div>}
       <div style={{ display: 'flex', background: '#F1F5F9', borderRadius: 9, padding: 3, gap: 2, width: 'fit-content', marginBottom: 20 }}>
-        {['single', 'bulk'].map((m) => (
-          <button key={m} type="button" onClick={() => { setMode(m); setBulkPreview(null); setSelected(null); setSearch(''); }}
+        {['single', 'replace', 'bulk'].map((m) => (
+          <button key={m} type="button" onClick={() => { setMode(m); setBulkPreview(null); setSelected(null); setSearch(''); setReplaceError(''); }}
             style={{ padding: '5px 14px', borderRadius: 7, border: 'none', cursor: 'pointer', fontFamily: 'inherit', fontSize: 12, fontWeight: mode === m ? 600 : 400, background: mode === m ? '#fff' : 'transparent', color: mode === m ? '#0D1117' : '#64748B', boxShadow: mode === m ? '0 1px 4px rgba(0,0,0,.08)' : 'none' }}>
-            {m === 'single' ? 'Single' : 'Bulk upload'}
+            {m === 'single' ? 'One employee' : m === 'replace' ? 'Replace manager' : 'Bulk upload'}
           </button>
         ))}
       </div>
@@ -3027,6 +3484,64 @@ function ModuleMgrChange({ employees, config, onUpdate }) {
           <button type="button" onClick={applyChange} disabled={!selected || !newL1.trim()}
             style={{ ...btnP, width: 'fit-content', opacity: !selected || !newL1.trim() ? 0.5 : 1, cursor: !selected || !newL1.trim() ? 'not-allowed' : 'pointer' }}>
             Update Manager
+          </button>
+        </div>
+      )}
+
+      {mode === 'replace' && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+          <div style={{ background: '#EFF6FF', border: '1px solid #BFDBFE', borderRadius: 10, padding: '12px 14px', fontSize: 12.5, color: '#1E3A8A', lineHeight: 1.55 }}>
+            Replace manager moves every direct report from the old manager to the new manager. It does not delete the old manager account.
+          </div>
+          <div>
+            <label style={{ fontSize: 11.5, fontWeight: 600, color: '#64748B', display: 'block', marginBottom: 5 }}>Manager being replaced</label>
+            <select value={oldManagerCode} onChange={(e) => { setOldManagerCode(e.target.value); setReplaceError(''); }} style={inputStyle}>
+              <option value="">Select current manager…</option>
+              {Object.entries(directReportsByManagerCode)
+                .filter(([, reports]) => reports.length > 0)
+                .map(([code, reports]) => {
+                  const manager = employeesByCode[code];
+                  const label = manager?.['Employee Name'] || reports[0]?.['Reporting Manager Name'] || code;
+                  return <option key={code} value={manager?.['Employee Code'] || code}>{label} · {manager?.['Employee Code'] || code} · {reports.length} reportee{reports.length !== 1 ? 's' : ''}</option>;
+                })}
+            </select>
+          </div>
+          {oldManagerCode && (
+            <div style={{ padding: '10px 12px', background: '#F8FAFC', border: '1px solid #E2E8F0', borderRadius: 9 }}>
+              <div style={{ fontSize: 12.5, fontWeight: 800, color: '#0F172A' }}>
+                {oldManager?.['Employee Name'] || oldManagerCode} has {replaceReports.length} direct reportee{replaceReports.length !== 1 ? 's' : ''}
+              </div>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 8 }}>
+                {replaceReports.slice(0, 8).map((emp) => (
+                  <span key={emp['Employee Code']} style={{ fontSize: 11.5, color: '#475569', background: '#fff', border: '1px solid #E2E8F0', borderRadius: 999, padding: '3px 9px' }}>
+                    {emp['Employee Name'] || emp['Employee Code']}
+                  </span>
+                ))}
+                {replaceReports.length > 8 && <span style={{ fontSize: 11.5, color: '#64748B', padding: '3px 4px' }}>+{replaceReports.length - 8} more</span>}
+              </div>
+            </div>
+          )}
+          <div>
+            <label style={{ fontSize: 11.5, fontWeight: 600, color: '#64748B', display: 'block', marginBottom: 5 }}>Replacement manager</label>
+            <select value={replacementManagerCode} onChange={(e) => { setReplacementManagerCode(e.target.value); setReplaceError(''); }} style={inputStyle}>
+              <option value="">Select existing PMS employee…</option>
+              {employees
+                .filter((emp) => {
+                  const code = String(emp['Employee Code'] || '').trim().toLowerCase();
+                  const oldCode = String(oldManagerCode || '').trim().toLowerCase();
+                  const reportCodes = new Set(replaceReports.map((report) => String(report['Employee Code'] || '').trim().toLowerCase()));
+                  return code && code !== oldCode && !reportCodes.has(code);
+                })
+                .map((emp) => {
+                  const code = String(emp['Employee Code'] || '').trim();
+                  return <option key={code} value={code}>{emp['Employee Name'] || code} · {code}</option>;
+                })}
+            </select>
+          </div>
+          {replaceError && <div style={{ padding: '8px 12px', background: '#FEF2F2', border: '1px solid #FECACA', borderRadius: 8, fontSize: 12.5, color: '#991B1B' }}>{replaceError}</div>}
+          <button type="button" onClick={applyManagerReplacement} disabled={!oldManagerCode || !replacementManagerCode || replaceReports.length === 0}
+            style={{ ...btnP, width: 'fit-content', opacity: !oldManagerCode || !replacementManagerCode || replaceReports.length === 0 ? 0.5 : 1, cursor: !oldManagerCode || !replacementManagerCode || replaceReports.length === 0 ? 'not-allowed' : 'pointer' }}>
+            Replace manager for {replaceReports.length} reportee{replaceReports.length !== 1 ? 's' : ''}
           </button>
         </div>
       )}
@@ -3071,11 +3586,32 @@ function ModuleMgrChange({ employees, config, onUpdate }) {
 }
 
 /* ── Group Transfer ──────────────────────────────────────────── */
-function ModuleGrpTransfer({ employees, groups, onUpdate }) {
+function ModuleGrpTransfer({ employees, groups, goalLibraries = [], onUpdate, orgKey }) {
+  // The new group ships a different goal library, so the employee's stale
+  // submission (KRAs/KPIs drafted against the OLD library) has to be cleared
+  // — otherwise their dashboard shows old saved goals next to the new
+  // library cards. We only clobber drafts (`pending` / no status); anything
+  // already approved is left alone with a console note so HR can decide.
+  function resetEmployeeSubmissionForTransfer(code) {
+    if (!orgKey || !code) return { cleared: false, kept: false };
+    const wf = loadWorkflowState(orgKey) || { submissions: {}, notifications: [] };
+    const submissions = { ...(wf.submissions || {}) };
+    const key = normalizeCodeStr(code);
+    const matchKey = Object.keys(submissions).find((k) => normalizeCodeStr(k) === key);
+    if (!matchKey) return { cleared: false, kept: false };
+    const status = submissions[matchKey]?.status;
+    if (status === 'approved' || status === 'manager_approved' || status === 'completed') {
+      return { cleared: false, kept: true };
+    }
+    delete submissions[matchKey];
+    saveWorkflowState(orgKey, { ...wf, submissions });
+    return { cleared: true, kept: false };
+  }
   const [mode, setMode]       = useState('single');
   const [search, setSearch]   = useState('');
   const [selected, setSelected] = useState(null);
   const [targetGrp, setTargetGrp] = useState('');
+  const [routingValue, setRoutingValue] = useState('');
   const [bulkPreview, setBulkPreview] = useState(null);
   const [toast, setToast]     = useState(null);
   const fileRef = useRef(null);
@@ -3087,29 +3623,109 @@ function ModuleGrpTransfer({ employees, groups, onUpdate }) {
     return employees.filter((e) => `${e['Employee Name'] || ''} ${e['Employee Code'] || ''}`.toLowerCase().includes(q)).slice(0, 6);
   }, [search, employees, selected]);
 
+  // Resolve the target group's routing attribute (e.g. Designation/Role). When
+  // the new group has a goal-library routed by an attribute, the employee
+  // can't be transferred blind — without picking a valid slot value, the
+  // employee dashboard can't resolve a library and shows nothing.
+  const targetGroupObj = useMemo(
+    () => groups.find((g) => String(g?.name || '').trim().toLowerCase() === String(targetGrp || '').trim().toLowerCase()) || null,
+    [groups, targetGrp],
+  );
+  const targetSegmentAttr = String(targetGroupObj?.segmentAttr || '').trim();
+  const targetSegmentValues = useMemo(
+    () => [...new Set((targetGroupObj?.segmentValues || []).map((v) => String(v || '').trim()).filter(Boolean))],
+    [targetGroupObj],
+  );
+  const needsRouting = !!targetSegmentAttr && targetSegmentValues.length > 0;
+  // When routing is required, default to the employee's current value if it
+  // happens to be valid under the new group; otherwise leave blank so the
+  // user must consciously pick one.
+  useEffect(() => {
+    if (!needsRouting) { setRoutingValue(''); return; }
+    const current = String(selected?.[targetSegmentAttr] || '').trim();
+    const valid = targetSegmentValues.some((v) => v.toLowerCase() === current.toLowerCase());
+    setRoutingValue(valid ? current : '');
+  }, [needsRouting, selected, targetSegmentAttr, targetSegmentValues]);
+
   function applyChange() {
     if (!selected || !targetGrp) return;
+    if (needsRouting && !routingValue) return;
     const code = selected['Employee Code'];
-    const updated = employees.map((e) => e['Employee Code'] === code ? { ...e, 'Group Name': targetGrp, assignedGoalGroupName: targetGrp } : e);
-    onUpdate(updated); showToast(`${selected['Employee Name'] || code} transferred to "${targetGrp}"`);
-    setSelected(null); setSearch(''); setTargetGrp('');
+    const baseForMeta = { ...selected, 'Group Name': targetGrp, assignedGoalGroupName: targetGrp };
+    if (needsRouting) baseForMeta[targetSegmentAttr] = routingValue;
+    const patch = {
+      'Group Name': targetGrp,
+      assignedGoalGroupName: targetGrp,
+      ...resolveEmployeeGoalLibraryMeta(baseForMeta, targetGroupObj, goalLibraries),
+    };
+    if (needsRouting) patch[targetSegmentAttr] = routingValue;
+    const updated = employees.map((e) => e['Employee Code'] === code ? { ...e, ...patch } : e);
+    onUpdate(updated);
+    const resetResult = resetEmployeeSubmissionForTransfer(code);
+    const baseMsg = needsRouting
+      ? `${selected['Employee Name'] || code} → "${targetGrp}" as ${targetSegmentAttr} "${routingValue}"`
+      : `${selected['Employee Name'] || code} transferred to "${targetGrp}"`;
+    showToast(resetResult.kept ? `${baseMsg} · existing approved goals kept` : baseMsg);
+    setSelected(null); setSearch(''); setTargetGrp(''); setRoutingValue('');
   }
 
   async function handleFile(e) {
     const file = e.target.files?.[0]; if (!file) return;
     const empByCode = {};
     employees.forEach((emp) => { empByCode[String(emp['Employee Code'] || '').trim().toLowerCase()] = emp; });
-    const validGroups = new Set(groups.map((g) => g.name?.trim().toLowerCase()));
+    const groupByName = {};
+    groups.forEach((g) => { groupByName[String(g?.name || '').trim().toLowerCase()] = g; });
     const rows = await parseTwoColXlsx(file);
-    setBulkPreview(rows.map((r) => ({ code: r.col1, name: empByCode[r.col1.toLowerCase()]?.['Employee Name'], newGroup: r.col2, found: !!empByCode[r.col1.toLowerCase()], grpValid: validGroups.has(r.col2.trim().toLowerCase()) })));
+    setBulkPreview(rows.map((r) => {
+      const codeKey = String(r.col1 || '').trim().toLowerCase();
+      const grpKey = String(r.col2 || '').trim().toLowerCase();
+      const emp = empByCode[codeKey];
+      const grp = groupByName[grpKey];
+      const grpValid = !!grp;
+      // If the target group routes by an attribute, the employee's existing
+      // value for that attribute must be a valid slot. Otherwise this row
+      // would land them in a group with no resolvable library — silent
+      // dashboard failure.
+      const attr = String(grp?.segmentAttr || '').trim();
+      const allowed = [...new Set((grp?.segmentValues || []).map((v) => String(v || '').trim()).filter(Boolean))];
+      const needsAttr = !!attr && allowed.length > 0;
+      const sheetRoutingVal = String(r.col3 || '').trim();
+      const currentVal = needsAttr && emp ? String(sheetRoutingVal || emp[attr] || '').trim() : '';
+      const routingOk = !needsAttr || allowed.some((v) => v.toLowerCase() === currentVal.toLowerCase());
+      return {
+        code: r.col1, name: emp?.['Employee Name'], newGroup: r.col2,
+        found: !!emp, grpValid,
+        needsAttr, attr, currentVal, routingOk, allowed,
+      };
+    }));
     e.target.value = '';
   }
 
   function applyBulk() {
-    const valid = bulkPreview.filter((r) => r.found && r.grpValid);
-    const map = {}; valid.forEach((r) => { map[r.code] = r.newGroup; });
-    const updated = employees.map((e) => map[e['Employee Code']] ? { ...e, 'Group Name': map[e['Employee Code']], assignedGoalGroupName: map[e['Employee Code']] } : e);
-    onUpdate(updated); showToast(`${valid.length} employees transferred`); setBulkPreview(null);
+    // Only apply rows that have a valid group AND, when the new group routes
+    // by an attribute, an employee value that matches one of the slots.
+    const valid = bulkPreview.filter((r) => r.found && r.grpValid && r.routingOk);
+    const transferByCode = {};
+    valid.forEach((r) => { transferByCode[String(r.code || '').trim().toLowerCase()] = r; });
+    const groupByName = {};
+    groups.forEach((g) => { groupByName[String(g?.name || '').trim().toLowerCase()] = g; });
+    const updated = employees.map((e) => {
+      const transfer = transferByCode[String(e['Employee Code'] || '').trim().toLowerCase()];
+      if (!transfer) return e;
+      const group = groupByName[String(transfer.newGroup || '').trim().toLowerCase()] || null;
+      const patched = { ...e, 'Group Name': transfer.newGroup, assignedGoalGroupName: transfer.newGroup };
+      if (transfer.needsAttr && transfer.attr) patched[transfer.attr] = transfer.currentVal;
+      return {
+        ...patched,
+        ...resolveEmployeeGoalLibraryMeta(patched, group, goalLibraries),
+      };
+    });
+    onUpdate(updated);
+    // Clear stale goal drafts for everyone we transferred.
+    valid.forEach((r) => resetEmployeeSubmissionForTransfer(r.code));
+    const skipped = bulkPreview.length - valid.length;
+    showToast(skipped > 0 ? `${valid.length} transferred · ${skipped} skipped` : `${valid.length} employees transferred`);
+    setBulkPreview(null);
   }
 
   const inputStyle = { width: '100%', boxSizing: 'border-box', border: '1.5px solid #E2E8F0', borderRadius: 10, padding: '10px 13px', fontSize: 13, outline: 'none', fontFamily: 'inherit', color: '#0F172A', background: '#fff', transition: 'border-color 160ms ease, box-shadow 160ms ease' };
@@ -3134,7 +3750,7 @@ function ModuleGrpTransfer({ employees, groups, onUpdate }) {
 
   const currentGrp = selected?.['Group Name'] || selected?.assignedGoalGroupName || '';
   const sameGroup = !!(selected && targetGrp && String(currentGrp).trim() === String(targetGrp).trim());
-  const canSubmit = !!selected && !!targetGrp && !sameGroup;
+  const canSubmit = !!selected && !!targetGrp && !sameGroup && (!needsRouting || !!routingValue);
 
   return (
     <div style={{ position: 'relative', maxWidth: 580 }}>
@@ -3221,6 +3837,27 @@ function ModuleGrpTransfer({ employees, groups, onUpdate }) {
             </select>
           </div>
 
+          {/* Step 3 — Routing slot (only when the target group routes by an
+              attribute, e.g. Designation). Without this, the employee's goal
+              library can't be resolved and their dashboard renders empty. */}
+          {selected && targetGrp && !sameGroup && needsRouting && (
+            <div>
+              {step(3, `Pick ${targetSegmentAttr} for "${targetGrp}"`, !!routingValue)}
+              <select value={routingValue} onChange={(e) => setRoutingValue(e.target.value)}
+                style={inputStyle}>
+                <option value="">Select {targetSegmentAttr}…</option>
+                {targetSegmentValues.map((v) => <option key={v} value={v}>{v}</option>)}
+              </select>
+              <div style={{ marginTop: 6, fontSize: 11.5, color: '#64748B' }}>
+                {targetGrp} routes its goal library by <strong style={{ color: '#334155' }}>{targetSegmentAttr}</strong>. Their current value
+                {' '}<code style={{ background: '#F1F5F9', padding: '1px 6px', borderRadius: 4 }}>{String(selected[targetSegmentAttr] || '—')}</code>
+                {targetSegmentValues.some((v) => v.toLowerCase() === String(selected[targetSegmentAttr] || '').toLowerCase())
+                  ? ' is valid for this group.'
+                  : ' isn\'t a valid slot here — pick one above.'}
+              </div>
+            </div>
+          )}
+
           {/* Live preview / warning */}
           {selected && targetGrp && !sameGroup && (
             <div style={{ padding: '12px 14px', background: 'linear-gradient(135deg,#EEF2FF 0%, #F5F3FF 100%)', border: '1px solid #C7D2FE', borderRadius: 12, fontSize: 13, color: '#334155', display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
@@ -3266,10 +3903,10 @@ function ModuleGrpTransfer({ employees, groups, onUpdate }) {
       {mode === 'bulk' && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
           <div style={{ background: '#F8FAFC', border: '1px solid #E9EDF2', borderRadius: 10, padding: '14px 16px' }}>
-            <div style={{ fontSize: 12.5, fontWeight: 600, color: '#374151', marginBottom: 4 }}>Columns: <code style={{ background: '#E2E8F0', padding: '1px 6px', borderRadius: 4, fontSize: 12 }}>Employee Code, Target Group Name</code></div>
+            <div style={{ fontSize: 12.5, fontWeight: 600, color: '#374151', marginBottom: 4 }}>Columns: <code style={{ background: '#E2E8F0', padding: '1px 6px', borderRadius: 4, fontSize: 12 }}>Employee Code, Target Group Name, Routing Value</code></div>
             <div style={{ fontSize: 12, color: '#94A3B8' }}>Valid groups: {groups.map((g) => g.name).join(', ')}</div>
           </div>
-          <div><input ref={fileRef} type="file" accept=".xlsx,.xls,.csv" style={{ display: 'none' }} onChange={handleFile} /><UploadSheetButton onDownload={() => downloadCsvTemplate('group_transfer.csv', ['Employee Code', 'Target Group Name'], ['E001', groups[0]?.name || 'Group A'])} fileRef={fileRef} /></div>
+          <div><input ref={fileRef} type="file" accept=".xlsx,.xls,.csv" style={{ display: 'none' }} onChange={handleFile} /><UploadSheetButton onDownload={() => downloadCsvTemplate('group_transfer.csv', ['Employee Code', 'Target Group Name', 'Routing Value'], ['E001', groups[0]?.name || 'Group A', groups[0]?.segmentValues?.[0] || ''])} fileRef={fileRef} /></div>
           {bulkPreview && (
             <div>
               <div style={{ fontSize: 12, fontWeight: 600, color: '#374151', marginBottom: 8 }}>Preview</div>
@@ -3282,7 +3919,12 @@ function ModuleGrpTransfer({ employees, groups, onUpdate }) {
                     <td style={{ padding: '7px 12px' }}>
                       {!r.found && <span style={{ fontSize: 11, fontWeight: 600, color: '#991B1B', background: '#FEF2F2', borderRadius: 5, padding: '2px 7px' }}>✗ Emp not found</span>}
                       {r.found && !r.grpValid && <span style={{ fontSize: 11, fontWeight: 600, color: '#92400E', background: '#FFFBEB', borderRadius: 5, padding: '2px 7px' }}>⚠ Group not found</span>}
-                      {r.found && r.grpValid && <span style={{ fontSize: 11, fontWeight: 600, color: '#15803D', background: '#F0FDF4', borderRadius: 5, padding: '2px 7px' }}>✓ Valid</span>}
+                      {r.found && r.grpValid && !r.routingOk && (
+                        <span style={{ fontSize: 11, fontWeight: 600, color: '#92400E', background: '#FFFBEB', borderRadius: 5, padding: '2px 7px' }} title={`${r.attr || ''} must be one of: ${(r.allowed || []).join(', ')}`}>
+                          ⚠ {r.attr || 'Routing'} "{r.currentVal || '—'}" not valid for "{r.newGroup}"
+                        </span>
+                      )}
+                      {r.found && r.grpValid && r.routingOk && <span style={{ fontSize: 11, fontWeight: 600, color: '#15803D', background: '#F0FDF4', borderRadius: 5, padding: '2px 7px' }}>✓ Valid</span>}
                     </td>
                   </tr>)}</tbody>
                 </table>
@@ -3335,6 +3977,8 @@ function ManagerBlock({ code, match, onCodeChange, nameValue, onNameChange, emai
 }
 
 /* ── Add / Remove ───────────────────────────────────────────── */
+const OUTSIDE_PMS_GROUP_VALUE = '__outside_pms__';
+
 function ModuleRoster({ employees, config, onUpdate, orgKey }) {
   const [rosterTab, setRosterTab] = useState('add');           // 'add' | 'remove'
   const [addMode, setAddMode] = useState('manual');            // 'manual' | 'upload'
@@ -3342,6 +3986,7 @@ function ModuleRoster({ employees, config, onUpdate, orgKey }) {
   const [addPreview, setAddPreview] = useState(null);
   const [manualForm, setManualForm] = useState({});
   const [manualError, setManualError] = useState('');
+  const [showReportingManager, setShowReportingManager] = useState(false);
   // When the typed reporting-manager code is new, HR can opt to also create a
   // full PMS employee record for that manager (group + role + email). Otherwise
   // the manager surfaces only as a reference (synthesized external).
@@ -3354,18 +3999,23 @@ function ModuleRoster({ employees, config, onUpdate, orgKey }) {
   const [removeConfirmText, setRemoveConfirmText] = useState('');
   const [bulkDelPreview, setBulkDelPreview] = useState(null);
   const [confirmBulkDel, setConfirmBulkDel] = useState(false);
+  const [reassignPanel, setReassignPanel] = useState(null);
+  const [reassignNewCode, setReassignNewCode] = useState('');
+  const [reassignError, setReassignError] = useState('');
   const [toast, setToast] = useState(null);
   const addFileRef = useRef(null);
   const delFileRef = useRef(null);
 
   const meta = useMemo(() => employeeTemplateMeta(config || {}), [config]);
   const goalGroups = useMemo(() => (config?.goalGroups || []), [config]);
+  const pmsEmployeeCount = useMemo(() => employees.filter((emp) => !emp?._outsidePms).length, [employees]);
 
   // Per-group routing field — derive from currently-picked group only.
   const selectedGroupName = String(manualForm['Group Name'] || '').trim();
+  const isOutsidePmsGroup = selectedGroupName === OUTSIDE_PMS_GROUP_VALUE;
   const selectedGroup = useMemo(
-    () => goalGroups.find((g) => String(g?.name || '').trim().toLowerCase() === selectedGroupName.toLowerCase()) || null,
-    [goalGroups, selectedGroupName],
+    () => isOutsidePmsGroup ? null : goalGroups.find((g) => String(g?.name || '').trim().toLowerCase() === selectedGroupName.toLowerCase()) || null,
+    [goalGroups, selectedGroupName, isOutsidePmsGroup],
   );
   const segmentAttr = String(selectedGroup?.segmentAttr || '').trim();
   const segmentValues = useMemo(
@@ -3444,7 +4094,12 @@ function ModuleRoster({ employees, config, onUpdate, orgKey }) {
       const rows = result.employees || [];
       const preview = rows.map((r) => {
         const code = String(r['Employee Code'] || '').trim();
-        return { ...r, 'Employee Code': code, _duplicate: existingCodes.has(code.toLowerCase()), _missing: !code };
+        return {
+          ...r,
+          'Employee Code': code,
+          _duplicate: existingCodes.has(code.toLowerCase()),
+          _missing: !code,
+        };
       }).filter((r) => !r._missing);
       if (preview.length === 0 && rows.length === 0) { showToast('No employee rows found — check the file format'); return; }
       setAddPreview(preview);
@@ -3454,7 +4109,13 @@ function ModuleRoster({ employees, config, onUpdate, orgKey }) {
   function applyAdd() {
     if (!addPreview) return;
     const toAdd = addPreview.filter((r) => !r._duplicate);
-    const updated = [...employees, ...toAdd.map(({ _duplicate, _missing, ...rest }) => rest)];
+    const cleanedRows = toAdd.map((row) => {
+      const clean = { ...row };
+      delete clean._duplicate;
+      delete clean._missing;
+      return clean;
+    });
+    const updated = [...employees, ...cleanedRows];
     onUpdate(updated);
     showToast(`${toAdd.length} employee${toAdd.length !== 1 ? 's' : ''} added`);
     setAddPreview(null);
@@ -3468,7 +4129,7 @@ function ModuleRoster({ employees, config, onUpdate, orgKey }) {
     if (!name) { setManualError('Employee Name is required'); return; }
     const existingCodes = new Set(employees.map((emp) => String(emp['Employee Code'] || '').trim().toLowerCase()));
     if (existingCodes.has(code.toLowerCase())) { setManualError(`Employee Code "${code}" already exists`); return; }
-    if (meta.hasGoalGroups && !selectedGroup) {
+    if (meta.hasGoalGroups && !selectedGroup && !isOutsidePmsGroup) {
       setManualError('Group Name is required'); return;
     }
     if (segmentAttr && segmentValues.length > 0) {
@@ -3479,10 +4140,14 @@ function ModuleRoster({ employees, config, onUpdate, orgKey }) {
         return;
       }
     }
-
     const newEmp = {};
     // Basic + group + segment from form / template headers.
     meta.headers.forEach((h) => { newEmp[h] = String(manualForm[h] || '').trim(); });
+    if (isOutsidePmsGroup) {
+      newEmp['Group Name'] = '';
+      newEmp.assignedGoalGroupName = '';
+      newEmp._outsidePms = true;
+    }
     if (segmentAttr) newEmp[segmentAttr] = String(manualForm[segmentAttr] || '').trim();
 
     // If the new L1 manager is being added as a full PMS employee, validate now
@@ -3534,7 +4199,26 @@ function ModuleRoster({ employees, config, onUpdate, orgKey }) {
     onUpdate([...employees, ...additions]);
     showToast(mgrEmp ? `${name} added · manager ${mgrEmp['Employee Name']} also added to PMS` : `${name} added`);
     setManualForm({});
+    setShowReportingManager(false);
     setL1NewMgrInPMS(false); setL1NewMgrGroup(''); setL1NewMgrSegment('');
+  }
+
+  function clearManualReportingManagers() {
+    setManualForm((prev) => {
+      const next = { ...prev };
+      [
+        'Reporting Manager Code',
+        'Reporting Manager Name',
+        'Reporting Manager Email',
+        'L2 Manager Code',
+        'L2 Manager Name',
+      ].forEach((key) => { delete next[key]; });
+      return next;
+    });
+    setShowReportingManager(false);
+    setL1NewMgrInPMS(false);
+    setL1NewMgrGroup('');
+    setL1NewMgrSegment('');
   }
 
   // Pick & Remove operates on the full roster — real employees + reporting managers
@@ -3549,7 +4233,14 @@ function ModuleRoster({ employees, config, onUpdate, orgKey }) {
   }, [removeSearch, fullRoster]);
 
   function toggleRemove(code) {
-    setRemoveSelected((prev) => prev.includes(code) ? prev.filter((c) => c !== code) : [...prev, code]);
+    setRemoveSelected((prev) => {
+      if (prev.includes(code)) return prev.filter((c) => c !== code);
+      if (getManagerBlock(code).blocked) {
+        showToast('Reassign this manager’s reportees before removing them');
+        return prev;
+      }
+      return [...prev, code];
+    });
   }
 
   const empByRemoveCode = useMemo(() => {
@@ -3561,6 +4252,22 @@ function ModuleRoster({ employees, config, onUpdate, orgKey }) {
     .map((code) => empByRemoveCode[String(code || '').trim().toLowerCase()])
     .filter(Boolean), [removeSelected, empByRemoveCode]);
   const selectedRealRemovalRecords = selectedRemovalRecords.filter((e) => !e._external);
+
+  function getEmployeeStageId(empOrCode) {
+    const code = typeof empOrCode === 'string'
+      ? String(empOrCode || '').trim().toLowerCase()
+      : String(empOrCode?.['Employee Code'] || '').trim().toLowerCase();
+    const emp = typeof empOrCode === 'string'
+      ? employees.find((item) => String(item['Employee Code'] || '').trim().toLowerCase() === code)
+      : empOrCode;
+    if (!code) return getEmpStage(emp || {});
+    const wf = orgKey ? loadWorkflowState(orgKey) : null;
+    const status = wf?.submissions?.[code]?.status;
+    if (status === 'pending-manager') return 'pending-approval';
+    if (status === 'approved') return 'self-evaluation';
+    if (status === 'sent-back') return 'goal-creation';
+    return getEmpStage(emp || {});
+  }
 
   function cleanupRemovedEmployeeData(codes) {
     const normalized = new Set((Array.isArray(codes) ? codes : []).map((c) => String(c || '').trim().toLowerCase()).filter(Boolean));
@@ -3596,7 +4303,74 @@ function ModuleRoster({ employees, config, onUpdate, orgKey }) {
     if (changed) persistEmployeeCredentials(creds);
   }
 
+  function openReassignPanel(manager) {
+    const block = getManagerBlock(manager, new Set());
+    setReassignPanel({
+      code: String(manager?.['Employee Code'] || '').trim(),
+      name: manager?.['Employee Name'] || manager?.['Employee Code'] || '',
+      reports: block.reports,
+    });
+    setReassignNewCode('');
+    setReassignError('');
+  }
+
+  function applyManagerReassign() {
+    setReassignError('');
+    if (!reassignPanel?.code) return;
+    const oldCode = String(reassignPanel.code || '').trim();
+    const oldKey = oldCode.toLowerCase();
+    const newKey = String(reassignNewCode || '').trim().toLowerCase();
+    if (!newKey) { setReassignError('Select the replacement manager.'); return; }
+    if (newKey === oldKey) { setReassignError('Replacement manager must be different.'); return; }
+    const newManager = employees.find((emp) => String(emp['Employee Code'] || '').trim().toLowerCase() === newKey);
+    if (!newManager) { setReassignError('Replacement manager must be an existing PMS employee.'); return; }
+    const reportKeys = new Set((reassignPanel.reports || []).map((emp) => String(emp['Employee Code'] || '').trim().toLowerCase()));
+    if (reportKeys.has(newKey)) { setReassignError('Pick someone outside this manager’s direct report list.'); return; }
+
+    const newCode = String(newManager['Employee Code'] || '').trim();
+    const newName = String(newManager['Employee Name'] || '').trim();
+    const newEmail = getStoredEmail(newManager);
+    const updated = employees.map((emp) => {
+      const mgrCode = String(emp['Reporting Manager Code'] || '').trim().toLowerCase();
+      if (mgrCode !== oldKey) return emp;
+      return {
+        ...emp,
+        'Reporting Manager Code': newCode,
+        'Reporting Manager Name': newName,
+        ...(meta.needsEmail ? { 'Reporting Manager Email': newEmail } : {}),
+      };
+    });
+
+    if (orgKey) {
+      const wf = loadWorkflowState(orgKey);
+      const reportCodes = (reassignPanel.reports || []).map((emp) => String(emp['Employee Code'] || '').trim()).filter(Boolean);
+      const nextSubs = { ...(wf.submissions || {}) };
+      reportCodes.forEach((code) => {
+        const key = code.toLowerCase();
+        if (nextSubs[key]) nextSubs[key] = { ...nextSubs[key], managerCode: newCode, updatedAt: new Date().toISOString() };
+      });
+      const notif = makeNotif('manager-change', {
+        recipientCode: newCode,
+        title: 'Reporting team updated',
+        message: `${reportCodes.length} employee${reportCodes.length !== 1 ? 's are' : ' is'} now assigned to you after manager reassignment.`,
+      });
+      saveWorkflowState(orgKey, { submissions: nextSubs, notifications: [notif, ...(wf.notifications || [])] });
+    }
+
+    onUpdate(updated);
+    showToast(`${reassignPanel.reports.length} reportee${reassignPanel.reports.length !== 1 ? 's' : ''} reassigned to ${newName || newCode}`);
+    setReassignPanel(null);
+    setReassignNewCode('');
+    setReassignError('');
+  }
+
   function applyRemove() {
+    const removalSet = new Set(removeSelected.map((code) => String(code || '').trim().toLowerCase()));
+    const blocked = selectedRealRemovalRecords.filter((emp) => getManagerBlock(emp, removalSet).blocked);
+    if (blocked.length > 0) {
+      showToast(`${blocked.length} manager${blocked.length !== 1 ? 's' : ''} still have reportees — reassign first`);
+      return;
+    }
     const toRemove = new Set(removeSelected.map((code) => String(code || '').trim().toLowerCase()));
     const before = employees.length;
     const next = employees.filter((e) => !toRemove.has(String(e['Employee Code'] || '').trim().toLowerCase()));
@@ -3629,7 +4403,8 @@ function ModuleRoster({ employees, config, onUpdate, orgKey }) {
         if (seen.has(key)) return null;
         seen.add(key);
         const match = empByCode[key];
-        return { code, name: match?.['Employee Name'] || '', found: !!match };
+        const block = match ? getManagerBlock(match) : { blocked: false, reports: [] };
+        return { code, name: match?.['Employee Name'] || '', found: !!match, blocked: !!block.blocked, reportCount: block.reports.length, stageId: match ? getEmployeeStageId(match) : null };
       }).filter(Boolean);
       setBulkDelPreview(preview);
       setConfirmBulkDel(false);
@@ -3639,8 +4414,12 @@ function ModuleRoster({ employees, config, onUpdate, orgKey }) {
   }
 
   function applyBulkDelete() {
-    const toRemove = new Set(bulkDelPreview.filter((r) => r.found).map((r) => r.code.toLowerCase()));
-    if (toRemove.size === 0) { showToast('No matching employees to remove'); setBulkDelPreview(null); return; }
+    const toRemove = new Set(bulkDelPreview.filter((r) => r.found && !r.blocked).map((r) => r.code.toLowerCase()));
+    if (toRemove.size === 0) {
+      const blockedCount = bulkDelPreview.filter((r) => r.blocked).length;
+      showToast(blockedCount > 0 ? 'All matched managers have reportees — reassign first' : 'No matching employees to remove');
+      return;
+    }
     cleanupRemovedEmployeeData(Array.from(toRemove));
     onUpdate(employees.filter((e) => !toRemove.has(String(e['Employee Code'] || '').trim().toLowerCase())));
     showToast(`${toRemove.size} employee${toRemove.size !== 1 ? 's' : ''} removed`);
@@ -3663,14 +4442,40 @@ function ModuleRoster({ employees, config, onUpdate, orgKey }) {
     </div>
   );
 
-  const visibleNotSelected = removeResults.filter((e) => !removeSelected.includes(String(e['Employee Code'] || '').trim()));
-  const allVisibleSelected = visibleNotSelected.length === 0 && removeResults.length > 0;
+  const directReportsByManagerCode = useMemo(() => {
+    const map = {};
+    employees.forEach((emp) => {
+      const managerCode = String(emp['Reporting Manager Code'] || '').trim().toLowerCase();
+      const employeeCode = String(emp['Employee Code'] || '').trim().toLowerCase();
+      if (!managerCode || managerCode === employeeCode) return;
+      if (!map[managerCode]) map[managerCode] = [];
+      map[managerCode].push(emp);
+    });
+    return map;
+  }, [employees]);
+
+  function getManagerBlock(empOrCode) {
+    const code = typeof empOrCode === 'string'
+      ? empOrCode
+      : String(empOrCode?.['Employee Code'] || '').trim();
+    const key = String(code || '').trim().toLowerCase();
+    if (!key) return { blocked: false, reports: [] };
+    const reports = directReportsByManagerCode[key] || [];
+    return { blocked: reports.length > 0, reports };
+  }
+
+  const visibleSelectableNotSelected = removeResults.filter((e) => {
+    const code = String(e['Employee Code'] || '').trim();
+    return !removeSelected.includes(code) && !getManagerBlock(e).blocked;
+  });
+  const allVisibleSelected = visibleSelectableNotSelected.length === 0 && removeResults.some((e) => !getManagerBlock(e).blocked);
+
   function toggleSelectAllVisible() {
     if (allVisibleSelected) {
       const visibleCodes = new Set(removeResults.map((e) => String(e['Employee Code'] || '').trim()));
       setRemoveSelected((prev) => prev.filter((c) => !visibleCodes.has(c)));
     } else {
-      const additions = visibleNotSelected.map((e) => String(e['Employee Code'] || '').trim());
+      const additions = visibleSelectableNotSelected.map((e) => String(e['Employee Code'] || '').trim());
       setRemoveSelected((prev) => Array.from(new Set([...prev, ...additions])));
     }
   }
@@ -3685,6 +4490,10 @@ function ModuleRoster({ employees, config, onUpdate, orgKey }) {
             setRosterTab(k);
             setAddPreview(null);
             setManualError('');
+            setShowReportingManager(false);
+            setL1NewMgrInPMS(false);
+            setL1NewMgrGroup('');
+            setL1NewMgrSegment('');
             setRemoveSelected([]);
             setRemoveSearch('');
             setConfirmRemove(false);
@@ -3701,7 +4510,7 @@ function ModuleRoster({ employees, config, onUpdate, orgKey }) {
             <div style={{ fontSize: 12.5, color: '#64748B', marginTop: 2 }}>Add one employee manually, or use bulk upload for a sheet.</div>
           </div>
           {tabPills(addMode, [{ k: 'manual', label: 'Add manually' }, { k: 'upload', label: 'Bulk upload' }],
-            (k) => { setAddMode(k); setAddPreview(null); setManualForm({}); setManualError(''); })}
+            (k) => { setAddMode(k); setAddPreview(null); setManualForm({}); setManualError(''); setShowReportingManager(false); setL1NewMgrInPMS(false); setL1NewMgrGroup(''); setL1NewMgrSegment(''); })}
         </header>
 
         <div style={{ padding: '16px 18px' }}>
@@ -3711,38 +4520,47 @@ function ModuleRoster({ employees, config, onUpdate, orgKey }) {
               <UploadSheetButton onDownload={() => downloadEmployeeTemplate(config || {})} fileRef={addFileRef} />
               <div style={{ fontSize: 11.5, color: '#94A3B8', marginTop: 8 }}>Download the employee template, fill it, then upload it here. New employees are appended; duplicate codes are skipped automatically.</div>
 
-              {addPreview && (
+              {addPreview && (() => {
+                const newCount = addPreview.filter((r) => !r._duplicate).length;
+                const dupCount = addPreview.filter((r) => r._duplicate).length;
+                return (
                 <div style={{ marginTop: 14 }}>
                   <div style={{ fontSize: 12, fontWeight: 600, color: '#374151', marginBottom: 8 }}>
-                    {addPreview.filter((r) => !r._duplicate).length} new · {addPreview.filter((r) => r._duplicate).length} duplicate{addPreview.filter((r) => r._duplicate).length !== 1 ? 's' : ''} (skipped)
+                    {newCount} new · {dupCount} duplicate{dupCount !== 1 ? 's' : ''} (skipped)
                   </div>
                   <div style={{ border: '1px solid #E9EDF2', borderRadius: 9, overflow: 'hidden', maxHeight: 220, overflowY: 'auto', marginBottom: 10 }}>
                     <table style={{ width: '100%', fontSize: 12.5, borderCollapse: 'collapse' }}>
                       <thead><tr style={{ background: '#F8FAFC' }}>
                         {['Name', 'Code', 'Group', 'Status'].map((h) => <th key={h} style={{ padding: '7px 10px', textAlign: 'left', fontSize: 11, fontWeight: 700, color: '#94A3B8', textTransform: 'uppercase' }}>{h}</th>)}
                       </tr></thead>
-                      <tbody>{addPreview.map((r, i) => (
-                        <tr key={i} style={{ borderTop: '1px solid #F1F5F9', opacity: r._duplicate ? 0.5 : 1 }}>
+                      <tbody>{addPreview.map((r, i) => {
+                        const skipped = r._duplicate;
+                        return (
+                        <tr key={i} style={{ borderTop: '1px solid #F1F5F9', opacity: skipped ? 0.6 : 1 }}>
                           <td style={{ padding: '6px 10px' }}>{r['Employee Name'] || '—'}</td>
                           <td style={{ padding: '6px 10px', fontFamily: 'monospace', fontWeight: 700, color: '#4F46E5' }}>{r['Employee Code']}</td>
                           <td style={{ padding: '6px 10px', color: '#64748B' }}>{r['Group Name'] || '—'}</td>
                           <td style={{ padding: '6px 10px' }}>
-                            <span style={{ fontSize: 11, fontWeight: 600, color: r._duplicate ? '#92400E' : '#15803D', background: r._duplicate ? '#FFFBEB' : '#F0FDF4', borderRadius: 5, padding: '2px 7px' }}>
-                              {r._duplicate ? 'Duplicate' : '✓ New'}
-                            </span>
+                            {r._duplicate ? (
+                              <span style={{ fontSize: 11, fontWeight: 600, color: '#92400E', background: '#FFFBEB', borderRadius: 5, padding: '2px 7px' }}>Duplicate</span>
+                            ) : (
+                              <span style={{ fontSize: 11, fontWeight: 600, color: '#15803D', background: '#F0FDF4', borderRadius: 5, padding: '2px 7px' }}>✓ New</span>
+                            )}
                           </td>
                         </tr>
-                      ))}</tbody>
+                        );
+                      })}</tbody>
                     </table>
                   </div>
                   <div style={{ display: 'flex', gap: 8 }}>
-                    <button type="button" style={{ ...btnP, background: '#16A34A' }} onClick={applyAdd} disabled={!addPreview.some((r) => !r._duplicate)}>
-                      Add {addPreview.filter((r) => !r._duplicate).length} employee{addPreview.filter((r) => !r._duplicate).length !== 1 ? 's' : ''}
+                    <button type="button" style={{ ...btnP, background: '#16A34A' }} onClick={applyAdd} disabled={newCount === 0}>
+                      Add {newCount} employee{newCount !== 1 ? 's' : ''}
                     </button>
                     <button type="button" style={btnS} onClick={() => setAddPreview(null)}>Cancel</button>
                   </div>
                 </div>
-              )}
+                );
+              })()}
             </>
           )}
 
@@ -3760,6 +4578,7 @@ function ModuleRoster({ employees, config, onUpdate, orgKey }) {
                         </label>
                         <select value={value} onChange={(e) => setGroupAndResetRouting(e.target.value)} style={inputBase}>
                           <option value="">Select a group…</option>
+                          <option value={OUTSIDE_PMS_GROUP_VALUE}>NONE</option>
                           {meta.groupNames.map((g) => <option key={g} value={g}>{g}</option>)}
                         </select>
                       </div>
@@ -3796,67 +4615,78 @@ function ModuleRoster({ employees, config, onUpdate, orgKey }) {
                 })}
               </div>
 
-              {/* Reporting Manager — autofills when the code is already in the org */}
-              <div style={{ marginTop: 14, padding: '12px 14px', background: '#FAFBFF', border: '1px solid #E2E8F0', borderRadius: 10 }}>
-                <div style={{ fontSize: 11, fontWeight: 700, color: '#475569', textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: 10 }}>Reporting manager</div>
-                <ManagerBlock
-                  code={l1Code}
-                  match={l1Match}
-                  onCodeChange={(v) => setManualForm((p) => ({ ...p, 'Reporting Manager Code': v }))}
-                  nameValue={manualForm['Reporting Manager Name'] || ''}
-                  onNameChange={(v) => setManualForm((p) => ({ ...p, 'Reporting Manager Name': v }))}
-                  emailValue={manualForm['Reporting Manager Email'] || ''}
-                  onEmailChange={(v) => setManualForm((p) => ({ ...p, 'Reporting Manager Email': v }))}
-                  needsEmail={meta.needsEmail}
-                  inputBase={inputBase}
-                  getStoredEmail={getStoredEmail}
-                />
-                {!l1Code && <div style={{ fontSize: 11.5, color: '#94A3B8', marginTop: 8 }}>Leave blank for the top-of-hierarchy roles.</div>}
-                {l1Code && !l1Match && (
-                  <div style={{ marginTop: 10 }}>
-                    <div style={{ fontSize: 11.5, color: '#475569', marginBottom: 8 }}>
-                      Code <code style={{ background: '#F1F5F9', padding: '1px 6px', borderRadius: 4, fontSize: 11 }}>{l1Code}</code> is new — fill in the name{meta.needsEmail ? ' and email' : ''} above.
-                    </div>
-                    <label style={{ display: 'inline-flex', alignItems: 'center', gap: 8, fontSize: 12.5, color: '#0F172A', cursor: 'pointer', userSelect: 'none' }}>
-                      <input type="checkbox" checked={l1NewMgrInPMS}
-                        onChange={(e) => { setL1NewMgrInPMS(e.target.checked); if (!e.target.checked) { setL1NewMgrGroup(''); setL1NewMgrSegment(''); } }}
-                        style={{ width: 15, height: 15, accentColor: '#4F46E5' }} />
-                      <span>Also add this manager as a PMS employee</span>
-                    </label>
-                    {l1NewMgrInPMS && (
-                      <div style={{ marginTop: 10, padding: '12px 14px', background: '#fff', border: '1px solid #E2E8F0', borderRadius: 9 }}>
-                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 12 }}>
-                          {meta.hasGoalGroups && (
-                            <div>
-                              <label style={{ fontSize: 11.5, fontWeight: 600, color: '#64748B', display: 'block', marginBottom: 5 }}>
-                                Group <span style={{ color: '#DC2626' }}>*</span>
-                              </label>
-                              <select value={l1NewMgrGroup} onChange={(e) => { setL1NewMgrGroup(e.target.value); setL1NewMgrSegment(''); }} style={inputBase}>
-                                <option value="">Select a group…</option>
-                                {meta.groupNames.map((g) => <option key={g} value={g}>{g}</option>)}
-                              </select>
-                            </div>
-                          )}
-                          {l1MgrSegmentAttr && l1MgrSegmentValues.length > 0 && (
-                            <div>
-                              <label style={{ fontSize: 11.5, fontWeight: 600, color: '#64748B', display: 'block', marginBottom: 5 }}>
-                                {l1MgrSegmentAttr} <span style={{ color: '#DC2626' }}>*</span>
-                                <span style={{ fontWeight: 500, color: '#94A3B8', marginLeft: 6 }}>· for {l1MgrGroupObj?.name}</span>
-                              </label>
-                              <select value={l1NewMgrSegment} onChange={(e) => setL1NewMgrSegment(e.target.value)} style={inputBase}>
-                                <option value="">Select…</option>
-                                {l1MgrSegmentValues.map((v) => <option key={v} value={v}>{v}</option>)}
-                              </select>
-                            </div>
-                          )}
-                        </div>
-                      </div>
-                    )}
+              {!showReportingManager ? (
+                <button
+                  type="button"
+                  onClick={() => setShowReportingManager(true)}
+                  style={{ ...btnS, marginTop: 14 }}
+                >
+                  Add reporting manager <span style={{ color: '#94A3B8', fontWeight: 500 }}>(optional)</span>
+                </button>
+              ) : (
+                <div style={{ marginTop: 14, padding: '12px 14px', background: '#FAFBFF', border: '1px solid #E2E8F0', borderRadius: 10 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, marginBottom: 10 }}>
+                    <div style={{ fontSize: 11, fontWeight: 700, color: '#475569', textTransform: 'uppercase', letterSpacing: '0.04em' }}>Reporting manager</div>
+                    <button type="button" onClick={clearManualReportingManagers} style={{ border: 'none', background: 'transparent', color: '#DC2626', fontSize: 12, fontWeight: 700, cursor: 'pointer', fontFamily: 'inherit' }}>Remove</button>
                   </div>
-                )}
-              </div>
+                  <ManagerBlock
+                    code={l1Code}
+                    match={l1Match}
+                    onCodeChange={(v) => setManualForm((p) => ({ ...p, 'Reporting Manager Code': v }))}
+                    nameValue={manualForm['Reporting Manager Name'] || ''}
+                    onNameChange={(v) => setManualForm((p) => ({ ...p, 'Reporting Manager Name': v }))}
+                    emailValue={manualForm['Reporting Manager Email'] || ''}
+                    onEmailChange={(v) => setManualForm((p) => ({ ...p, 'Reporting Manager Email': v }))}
+                    needsEmail={meta.needsEmail}
+                    inputBase={inputBase}
+                    getStoredEmail={getStoredEmail}
+                  />
+                  {l1Code && !l1Match && (
+                    <div style={{ marginTop: 10 }}>
+                      <div style={{ fontSize: 11.5, color: '#475569', marginBottom: 8 }}>
+                        Code <code style={{ background: '#F1F5F9', padding: '1px 6px', borderRadius: 4, fontSize: 11 }}>{l1Code}</code> is new — fill in the name{meta.needsEmail ? ' and email' : ''} above.
+                      </div>
+                      <label style={{ display: 'inline-flex', alignItems: 'center', gap: 8, fontSize: 12.5, color: '#0F172A', cursor: 'pointer', userSelect: 'none' }}>
+                        <input type="checkbox" checked={l1NewMgrInPMS}
+                          onChange={(e) => { setL1NewMgrInPMS(e.target.checked); if (!e.target.checked) { setL1NewMgrGroup(''); setL1NewMgrSegment(''); } }}
+                          style={{ width: 15, height: 15, accentColor: '#4F46E5' }} />
+                        <span>Also add this manager as a PMS employee</span>
+                      </label>
+                      {l1NewMgrInPMS && (
+                        <div style={{ marginTop: 10, padding: '12px 14px', background: '#fff', border: '1px solid #E2E8F0', borderRadius: 9 }}>
+                          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 12 }}>
+                            {meta.hasGoalGroups && (
+                              <div>
+                                <label style={{ fontSize: 11.5, fontWeight: 600, color: '#64748B', display: 'block', marginBottom: 5 }}>
+                                  Group <span style={{ color: '#DC2626' }}>*</span>
+                                </label>
+                                <select value={l1NewMgrGroup} onChange={(e) => { setL1NewMgrGroup(e.target.value); setL1NewMgrSegment(''); }} style={inputBase}>
+                                  <option value="">Select a group…</option>
+                                  {meta.groupNames.map((g) => <option key={g} value={g}>{g}</option>)}
+                                </select>
+                              </div>
+                            )}
+                            {l1MgrSegmentAttr && l1MgrSegmentValues.length > 0 && (
+                              <div>
+                                <label style={{ fontSize: 11.5, fontWeight: 600, color: '#64748B', display: 'block', marginBottom: 5 }}>
+                                  {l1MgrSegmentAttr} <span style={{ color: '#DC2626' }}>*</span>
+                                  <span style={{ fontWeight: 500, color: '#94A3B8', marginLeft: 6 }}>· for {l1MgrGroupObj?.name}</span>
+                                </label>
+                                <select value={l1NewMgrSegment} onChange={(e) => setL1NewMgrSegment(e.target.value)} style={inputBase}>
+                                  <option value="">Select…</option>
+                                  {l1MgrSegmentValues.map((v) => <option key={v} value={v}>{v}</option>)}
+                                </select>
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
 
-              {meta.hasL2 && (
+              {showReportingManager && meta.hasL2 && (
                 <div style={{ marginTop: 12, padding: '12px 14px', background: '#FAFBFF', border: '1px solid #E2E8F0', borderRadius: 10 }}>
                   <div style={{ fontSize: 11, fontWeight: 700, color: '#475569', textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: 10 }}>L2 manager <span style={{ fontWeight: 500, color: '#94A3B8', textTransform: 'none', letterSpacing: 0 }}>· optional</span></div>
                   <ManagerBlock
@@ -3877,7 +4707,7 @@ function ModuleRoster({ employees, config, onUpdate, orgKey }) {
               )}
               <div style={{ display: 'flex', gap: 8, marginTop: 14 }}>
                 <button type="button" style={{ ...btnP, background: '#16A34A' }} onClick={applyManualAdd}>Add employee</button>
-                <button type="button" style={btnS} onClick={() => { setManualForm({}); setManualError(''); }}>Clear</button>
+                <button type="button" style={btnS} onClick={() => { setManualForm({}); setManualError(''); clearManualReportingManagers(); }}>Clear</button>
               </div>
             </>
           )}
@@ -3889,7 +4719,7 @@ function ModuleRoster({ employees, config, onUpdate, orgKey }) {
         <header style={{ padding: '16px 18px', borderBottom: '1px solid #EEF2F7', display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
           <div style={{ flex: 1, minWidth: 0 }}>
             <div style={{ fontSize: 15, fontWeight: 800, color: '#0F172A' }}>Remove employees</div>
-            <div style={{ fontSize: 12.5, color: '#64748B', marginTop: 2 }}>{fullRoster.length} roster records · {employees.length} PMS employees · removal needs confirmation.</div>
+            <div style={{ fontSize: 12.5, color: '#64748B', marginTop: 2 }}>{fullRoster.length} roster records · {pmsEmployeeCount} PMS employees · removal needs confirmation.</div>
           </div>
           {tabPills(removeMode, [{ k: 'pick', label: 'Pick & remove' }, { k: 'bulk', label: 'Bulk by code' }],
             (k) => { setRemoveMode(k); setRemoveSelected([]); setRemoveSearch(''); setConfirmRemove(false); setBulkDelPreview(null); setConfirmBulkDel(false); })}
@@ -3910,6 +4740,48 @@ function ModuleRoster({ employees, config, onUpdate, orgKey }) {
                 </button>
               </div>
 
+              {reassignPanel && (
+                <div style={{ marginBottom: 12, padding: '12px 14px', background: '#EFF6FF', border: '1.5px solid #BFDBFE', borderRadius: 12 }}>
+                  <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
+                    <div style={{ minWidth: 0 }}>
+                      <div style={{ fontSize: 13, fontWeight: 850, color: '#1E3A8A' }}>
+                        Reassign before deleting {reassignPanel.name}
+                      </div>
+                      <div style={{ fontSize: 12.2, color: '#475569', marginTop: 3 }}>
+                        {reassignPanel.reports.length} reportee{reassignPanel.reports.length !== 1 ? 's' : ''} will move to the replacement manager immediately.
+                      </div>
+                    </div>
+                    <button type="button" style={{ ...btnS, background: '#fff', padding: '6px 10px' }} onClick={() => { setReassignPanel(null); setReassignNewCode(''); setReassignError(''); }}>Cancel</button>
+                  </div>
+                  <div style={{ display: 'grid', gridTemplateColumns: 'minmax(240px, 1fr) auto', gap: 10, alignItems: 'end', marginTop: 12 }}>
+                    <div>
+                      <label style={{ fontSize: 11.5, fontWeight: 700, color: '#475569', display: 'block', marginBottom: 5 }}>Replacement manager</label>
+                      <select value={reassignNewCode} onChange={(e) => { setReassignNewCode(e.target.value); setReassignError(''); }} style={inputBase}>
+                        <option value="">Select existing PMS employee…</option>
+                        {(() => {
+                          const oldKey = String(reassignPanel.code || '').trim().toLowerCase();
+                          const reportKeys = new Set((reassignPanel.reports || []).map((emp) => String(emp['Employee Code'] || '').trim().toLowerCase()));
+                          return employees
+                            .filter((emp) => {
+                              const code = String(emp['Employee Code'] || '').trim().toLowerCase();
+                              return code && code !== oldKey && !reportKeys.has(code);
+                            })
+                            .map((emp) => {
+                              const code = String(emp['Employee Code'] || '').trim();
+                              return <option key={code} value={code}>{emp['Employee Name'] || code} · {code}</option>;
+                            });
+                        })()}
+                      </select>
+                    </div>
+                    <button type="button" style={{ ...btnP, background: '#2563EB', whiteSpace: 'nowrap' }} onClick={applyManagerReassign}>Reassign now</button>
+                  </div>
+                  <div style={{ marginTop: 8, fontSize: 11.8, color: '#64748B' }}>
+                    Need a new manager who is not in PMS yet? Add that person first from Add employees, then select them here.
+                  </div>
+                  {reassignError && <div style={{ marginTop: 8, fontSize: 12, color: '#991B1B', background: '#FEF2F2', border: '1px solid #FECACA', borderRadius: 8, padding: '7px 10px' }}>{reassignError}</div>}
+                </div>
+              )}
+
               <div style={{ border: '1px solid #E2E8F0', borderRadius: 10, overflow: 'hidden', background: '#fff' }}>
                 <div style={{ display: 'grid', gridTemplateColumns: '42px minmax(220px,1fr) 90px minmax(130px,.6fr)', gap: 0, padding: '9px 12px', background: '#F8FAFC', borderBottom: '1px solid #E2E8F0', fontSize: 10.5, fontWeight: 800, color: '#94A3B8', textTransform: 'uppercase', letterSpacing: '.06em' }}>
                   <span></span>
@@ -3926,18 +4798,38 @@ function ModuleRoster({ employees, config, onUpdate, orgKey }) {
                     removeResults.map((emp) => {
                       const code = String(emp['Employee Code'] || '').trim();
                       const isSelected = removeSelected.includes(code);
+                      const managerBlock = getManagerBlock(emp);
+                      const isBlocked = managerBlock.blocked;
                       return (
                         <button key={code} type="button" onClick={() => toggleRemove(code)}
-                          style={{ width: '100%', display: 'grid', gridTemplateColumns: '42px minmax(220px,1fr) 90px minmax(130px,.6fr)', alignItems: 'center', gap: 0, padding: '10px 12px', background: isSelected ? '#FEF2F2' : '#fff', border: 'none', borderBottom: '1px solid #F1F5F9', cursor: 'pointer', fontFamily: 'inherit', textAlign: 'left' }}>
-                          <div style={{ width: 16, height: 16, borderRadius: 4, border: `2px solid ${isSelected ? '#DC2626' : '#E2E8F0'}`, background: isSelected ? '#DC2626' : '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+                          title={isBlocked ? `Reassign ${managerBlock.reports.length} reportee${managerBlock.reports.length !== 1 ? 's' : ''} before removing this manager.` : undefined}
+                          style={{ width: '100%', display: 'grid', gridTemplateColumns: '42px minmax(220px,1fr) 90px minmax(130px,.6fr)', alignItems: 'center', gap: 0, padding: '10px 12px', background: isSelected ? '#FEF2F2' : isBlocked ? '#FFFBEB' : '#fff', border: 'none', borderBottom: '1px solid #F1F5F9', cursor: isBlocked && !isSelected ? 'not-allowed' : 'pointer', fontFamily: 'inherit', textAlign: 'left', opacity: isBlocked && !isSelected ? 0.78 : 1 }}>
+                          <div style={{ width: 16, height: 16, borderRadius: 4, border: `2px solid ${isSelected ? '#DC2626' : isBlocked ? '#F59E0B' : '#E2E8F0'}`, background: isSelected ? '#DC2626' : '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
                             {isSelected && <span style={{ color: '#fff', fontSize: 10, fontWeight: 800 }}>✓</span>}
+                            {!isSelected && isBlocked && <span style={{ color: '#D97706', fontSize: 10, fontWeight: 900 }}>!</span>}
                           </div>
                           <div style={{ minWidth: 0, display: 'flex', alignItems: 'center', gap: 10 }}>
                             <div style={{ width: 28, height: 28, borderRadius: '50%', background: '#EEF2FF', color: '#4338CA', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 10, fontWeight: 800, flexShrink: 0 }}>{getInitials(emp['Employee Name'] || code)}</div>
                             <span style={{ fontSize: 12.8, fontWeight: 700, color: '#0D1117', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{emp['Employee Name'] || code}</span>
+                            {isBlocked && (
+                              <>
+                                <span style={{ fontSize: 10.8, fontWeight: 800, color: '#92400E', background: '#FEF3C7', border: '1px solid #FDE68A', borderRadius: 999, padding: '2px 7px', flexShrink: 0 }}>
+                                  {managerBlock.reports.length} reportee{managerBlock.reports.length !== 1 ? 's' : ''}
+                                </span>
+                                <span
+                                  role="button"
+                                  tabIndex={0}
+                                  onClick={(e) => { e.stopPropagation(); openReassignPanel(emp); }}
+                                  onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); openReassignPanel(emp); } }}
+                                  style={{ fontSize: 10.8, fontWeight: 850, color: '#2563EB', background: '#EFF6FF', border: '1px solid #BFDBFE', borderRadius: 999, padding: '2px 8px', flexShrink: 0, cursor: 'pointer' }}
+                                >
+                                  Reassign reportees
+                                </span>
+                              </>
+                            )}
                           </div>
                           <span style={{ fontSize: 12.2, color: '#64748B', fontFamily: 'monospace', flexShrink: 0 }}>{code}</span>
-                          <span style={{ fontSize: 11.8, color: '#64748B', flexShrink: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{emp['Group Name'] || emp.assignedGoalGroupName || '—'}</span>
+                          <span style={{ fontSize: 11.8, color: '#64748B', flexShrink: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{emp._outsidePms ? 'NONE' : (emp['Group Name'] || emp.assignedGoalGroupName || '—')}</span>
                         </button>
                       );
                     })
@@ -3947,7 +4839,7 @@ function ModuleRoster({ employees, config, onUpdate, orgKey }) {
 
               <div style={{ marginTop: 12, display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', justifyContent: 'space-between' }}>
                 <span style={{ fontSize: 12.5, color: removeSelected.length > 0 ? '#0F172A' : '#64748B', fontWeight: removeSelected.length > 0 ? 700 : 500 }}>
-                  {removeSelected.length} selected · {removeResults.length} roster records visible · {employees.length} PMS employees
+                  {removeSelected.length} selected · {removeResults.length} roster records visible · {pmsEmployeeCount} PMS employees
                 </span>
                 {removeSelected.length > 0 && <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
                   <button type="button" style={{ ...btnS, fontSize: 11.5 }} onClick={() => { setRemoveSelected([]); setConfirmRemove(false); }}>Clear</button>
@@ -3970,7 +4862,7 @@ function ModuleRoster({ employees, config, onUpdate, orgKey }) {
               {bulkDelPreview && (
                 <div style={{ marginTop: 14 }}>
                   <div style={{ fontSize: 12, fontWeight: 600, color: '#374151', marginBottom: 8 }}>
-                    {bulkDelPreview.filter((r) => r.found).length} match · {bulkDelPreview.filter((r) => !r.found).length} not found
+                    {bulkDelPreview.filter((r) => r.found && !r.blocked).length} removable · {bulkDelPreview.filter((r) => r.blocked).length} blocked manager{bulkDelPreview.filter((r) => r.blocked).length !== 1 ? 's' : ''} · {bulkDelPreview.filter((r) => !r.found).length} not found
                   </div>
                   <div style={{ border: '1px solid #E9EDF2', borderRadius: 9, overflow: 'hidden', maxHeight: 240, overflowY: 'auto', marginBottom: 10 }}>
                     <table style={{ width: '100%', fontSize: 12.5, borderCollapse: 'collapse' }}>
@@ -3978,20 +4870,28 @@ function ModuleRoster({ employees, config, onUpdate, orgKey }) {
                         {['Code', 'Name', 'Status'].map((h) => <th key={h} style={{ padding: '7px 10px', textAlign: 'left', fontSize: 11, fontWeight: 700, color: '#94A3B8', textTransform: 'uppercase', position: 'sticky', top: 0, background: '#F8FAFC' }}>{h}</th>)}
                       </tr></thead>
                       <tbody>{bulkDelPreview.map((r, i) => (
-                        <tr key={i} style={{ borderTop: '1px solid #F1F5F9', opacity: r.found ? 1 : 0.5 }}>
+                        <tr key={i} style={{ borderTop: '1px solid #F1F5F9', opacity: r.found ? 1 : 0.5, background: r.blocked ? '#FFFBEB' : '#fff' }}>
                           <td style={{ padding: '6px 10px', fontFamily: 'monospace', fontWeight: 700, color: '#4F46E5' }}>{r.code}</td>
                           <td style={{ padding: '6px 10px' }}>{r.name || '—'}</td>
                           <td style={{ padding: '6px 10px' }}>
-                            <span style={{ fontSize: 11, fontWeight: 600, color: r.found ? '#991B1B' : '#92400E', background: r.found ? '#FEF2F2' : '#FFFBEB', borderRadius: 5, padding: '2px 7px' }}>
-                              {r.found ? 'Will remove' : 'Not found'}
-                            </span>
+                            {r.blocked ? (
+                              <span style={{ fontSize: 11, fontWeight: 700, color: '#92400E', background: '#FEF3C7', borderRadius: 5, padding: '2px 7px' }}>
+                                Blocked · {r.reportCount} reportee{r.reportCount !== 1 ? 's' : ''}
+                              </span>
+                            ) : r.found ? (
+                              <StagePill stageId={r.stageId} />
+                            ) : (
+                              <span style={{ fontSize: 11, fontWeight: 700, color: '#92400E', background: '#FFFBEB', borderRadius: 5, padding: '2px 7px' }}>
+                                Not found
+                              </span>
+                            )}
                           </td>
                         </tr>
                       ))}</tbody>
                     </table>
                   </div>
                   {(() => {
-                    const matchCount = bulkDelPreview.filter((r) => r.found).length;
+                    const matchCount = bulkDelPreview.filter((r) => r.found && !r.blocked).length;
                     return (
                       <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
                         {!confirmBulkDel
@@ -5811,6 +6711,7 @@ export default function HRCycleDashboard() {
       const existing = readEmployeeCredentialsSync();
       let changed = false;
       for (const emp of liveEmployees) {
+        if (emp?._outsidePms) continue;
         const code = String(emp['Employee Code'] || '').trim();
         const email = String(resolveEmployeeEmail(emp) || '').trim().toLowerCase();
         if (code && !existing[code]) {
@@ -5904,13 +6805,16 @@ export default function HRCycleDashboard() {
   }
 
   // The list everyone downstream consumes: base record + live stage derived from workflow.
-  const liveEmployeesWithStage = useMemo(() => liveEmployees.map((e) => {
-    const key = normalizeCodeStr(e['Employee Code']);
-    const wfStatus = submissionStatuses[key];
-    // If workflow has a status, it wins. Otherwise keep whatever HR set via Stage Control.
-    const derived = wfStatus ? statusToStage(wfStatus) : (e._pmsStage || 'goal-creation');
-    return derived === e._pmsStage ? e : { ...e, _pmsStage: derived };
-  }), [liveEmployees, submissionStatuses]);
+  const liveEmployeesWithStage = useMemo(() => {
+    return liveEmployees.map((e) => {
+      const key = normalizeCodeStr(e['Employee Code']);
+      const wfStatus = submissionStatuses[key];
+      const derived = wfStatus ? statusToStage(wfStatus) : (e._pmsStage || 'goal-creation');
+      const isExempt = !!e._outsidePms;
+      if (derived === e._pmsStage && (!!e._pmsExempt) === isExempt) return e;
+      return { ...e, _pmsStage: derived, _pmsExempt: isExempt };
+    });
+  }, [liveEmployees, submissionStatuses]);
 
   /* congrats */
   const congratsKey = `zarohr_congrats_shown_${orgKey}`;
@@ -6138,8 +7042,8 @@ export default function HRCycleDashboard() {
           {activeModule === 'emp-status' && <ModuleEmpStatus employees={empsForModules} groups={groups} orgKey={orgKey} org={org} />}
           {activeModule === 'comms'      && <ModuleComms     employees={empsForModules} groups={groups} org={org} config={config} onUpdate={handleEmpUpdate} onConfigPatch={handleConfigPatch} orgKey={orgKey} onNavigate={setActiveModule} />}
           {activeModule === 'stage'      && <ModuleStageControl  employees={empsForModules} onUpdate={handleEmpUpdate} orgKey={orgKey} />}
-          {activeModule === 'mgr-change' && <ModuleMgrChange     employees={empsForModules} config={config} onUpdate={handleEmpUpdate} />}
-          {activeModule === 'grp-transfer' && <ModuleGrpTransfer employees={empsForModules} groups={groups} onUpdate={handleEmpUpdate} />}
+          {activeModule === 'mgr-change' && <ModuleMgrChange     employees={empsForModules} config={config} onUpdate={handleEmpUpdate} orgKey={orgKey} />}
+          {activeModule === 'grp-transfer' && <ModuleGrpTransfer employees={empsForModules} groups={groups} goalLibraries={config?.goalLibraries || []} onUpdate={handleEmpUpdate} orgKey={orgKey} />}
           {activeModule === 'roster'     && <ModuleRoster employees={empsForModules} config={config} onUpdate={handleEmpUpdate} orgKey={orgKey} />}
           {activeModule === 'test-creds' && <ModuleTestCreds employees={empsForModules} org={org} orgKey={orgKey} />}
           {activeModule === 'hr-team' && !isScopedHR && (

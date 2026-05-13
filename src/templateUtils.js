@@ -1516,10 +1516,13 @@ export function employeeTemplateMeta(config) {
     ...(needsEmail ? [mgrEmail] : []),
     ...(hasL2 ? [l2Code, l2Name] : []),
   ];
+  const blankRoutingValues = routingColumns.map(() => '');
   const exampleRows = [
     ex('EMP001','Priya Sharma',  'priya@company.com',  getExampleGroupName(0), getRoutingExampleValues(0), 'MGR001','Amit Shah',  'amit@company.com',  'DIR001','Ravi Verma'),
     ex('EMP002','Rahul Mehta',   'rahul@company.com',  getExampleGroupName(1), getRoutingExampleValues(1), 'MGR002','Neha Patel', 'neha@company.com',  'DIR001','Ravi Verma'),
     ex('EMP003','Sneha Iyer',    'sneha@company.com',  getExampleGroupName(2), getRoutingExampleValues(2), 'MGR001','Amit Shah',  'amit@company.com',  'DIR002','Sonal Desai'),
+    // Outside-PMS row: available for reporting-manager references without PMS goals.
+    ex('MGR001','Amit Shah',     'amit@company.com',   'NONE',                  blankRoutingValues,         '',      '',           '',                   '',      ''),
   ];
 
   const fmtType = empCodeFormat?.type || 'free';
@@ -1540,8 +1543,8 @@ export function employeeTemplateMeta(config) {
     ['NOTES'],
     [codeNote],
     ['• Employee Name must be a real person name. Use letters, spaces, dots, apostrophes, or hyphens only.'],
-    ...(hasGoalGroups ? [['• Group Name is required on every row and must match the configured group names in the Reference sheet exactly.']] : []),
-    ['• Reporting Manager Code can point to any employee — in this file or elsewhere in the org. Leave it blank for top-of-hierarchy roles.'],
+    ...(hasGoalGroups ? [['• Group Name is required on every row. Use one of the configured names from the Reference sheet, OR enter "NONE" if the person sits outside PMS but is still referenced as someone\'s reporting manager.']] : []),
+    ['• Reporting Manager Code is optional. If filled, that code must also appear as an Employee Code row in this file.'],
     ...(hasL2 ? [['• L2 Manager Code is the skip-level manager (manager of the direct manager).']] : []),
     ...(routingNote ? [[routingNote]] : []),
     ...(requireEmail === false ? [['• Email ID is optional for this configuration.']] : []),
@@ -1605,21 +1608,26 @@ export async function downloadEmployeeTemplate(config) {
     ['Employee Code', 'Unique identifier for the employee. Must be consistent across all files — same code used every cycle.'],
     ['Employee Name', 'Full name of the employee (display only).'],
     ...(meta.needsEmail ? [['Email ID', 'Work email address. Used for login link and notifications. Must be unique per employee.']] : []),
-    ...(meta.hasGoalGroups ? [['Group Name', 'The goal group this employee belongs to. Must exactly match one of the configured group names listed in the "Valid Group Names" section below. Determines which goal library and workflow applies to this employee.']] : []),
-    ...meta.routingColumns.map(column => [column.label, `Used to identify the specific library slot within the employee's group. Must match one of the configured values listed in the "${column.label} Values" section below.`]),
-    ['Reporting Manager Code', 'Employee Code of the direct reporting manager. It can be inside this upload or outside the PMS rollout. Leave blank only if this employee is at the top of the PMS hierarchy.'],
-    ['Reporting Manager Name', 'Full name of the reporting manager. If the manager is outside PMS, keep this filled so the upload treats it as an intentional external-manager reference.'],
-    ...(meta.needsEmail ? [['Reporting Manager Email', 'Work email of the reporting manager. Used for manager summary emails.']] : []),
+    ...(meta.hasGoalGroups ? [['Group Name', 'The goal group this employee belongs to. Must exactly match one of the configured group names listed in the "Valid Group Names" section below — OR enter "NONE" (case-insensitive) to mark this row as outside PMS. Outside-PMS rows belong in the roster only so they can be referenced as someone\'s reporting manager; they do not get a goal plan, library, or routing values.']] : []),
+    ...meta.routingColumns.map(column => [column.label, `Used to identify the specific library slot within the employee's group. Must match one of the configured values listed in the "${column.label} Values" section below. Leave blank for Group Name = "NONE" rows.`]),
+    ['Reporting Manager Code', 'Optional. If filled, this code must also appear as an Employee Code row in this file. Use Group Name = "NONE" for managers outside PMS.'],
+    ['Reporting Manager Name', 'Full name of the reporting manager. Must match the Employee Name on the manager\'s own row.'],
+    ...(meta.needsEmail ? [['Reporting Manager Email', 'Work email of the reporting manager. Must match the Email ID on the manager\'s own row.']] : []),
     ...(meta.hasL2 ? [
-      ['L2 Manager Code', 'Employee Code of the skip-level manager (manager\'s manager). Optional — leave blank if the employee has no L2 reviewer.'],
-      ['L2 Manager Name', 'Full name of the L2 manager (display only). Leave blank if L2 Manager Code is blank.'],
+      ['L2 Manager Code', 'Employee Code of the skip-level manager (manager\'s manager). Optional. If filled, the L2 manager MUST also appear as their own Employee Code row in this file — outside-PMS L2s should be added with Group Name = "NONE".'],
+      ['L2 Manager Name', 'Full name of the L2 manager. Must match the Employee Name on the L2 manager\'s own row. Leave blank if L2 Manager Code is blank.'],
     ] : []),
   ];
   refSection('Column Guide', colGuide);
 
-  // Valid Group Names (when goal groups are configured)
+  // Valid Group Names (when goal groups are configured). "NONE" is listed
+  // alongside the configured groups so the Reference sheet alone tells HR
+  // every accepted value for the Group Name column.
   if (meta.hasGoalGroups && meta.groupNames.length > 0) {
-    refSection('Valid Group Names', meta.groupNames.map(name => [name, `Use exactly this value in the "Group Name" column.`]));
+    refSection('Valid Group Names', [
+      ['NONE', 'Use this for roster entries that sit outside PMS but are still referenced as someone\'s reporting manager. These rows do not get a goal plan; routing values and Reporting Manager are optional. Case-insensitive.'],
+      ...meta.groupNames.map(name => [name, `Use exactly this value in the "Group Name" column.`]),
+    ]);
   }
 
   // Valid attribute values (if goal library is segmented)
@@ -1655,6 +1663,12 @@ export function parseEmployeeXlsx(file) {
         const employees = dataRows.map(row => {
           const obj = {};
           headers.forEach((h, i) => { obj[h] = String(row[i] || '').trim(); });
+          // Group Name = "NONE" marks an outside-PMS roster row: keeps the
+          // person available as a reporting manager but excludes them from
+          // counts, group membership, and goal flows.
+          if (String(obj['Group Name'] || '').trim().toUpperCase() === 'NONE') {
+            obj._outsidePms = true;
+          }
           return obj;
         }).filter(e => e['Employee Code'] || e['Employee Name']);
 
@@ -1770,20 +1784,25 @@ export function validateEmployeeData(employees, config) {
     }
 
     let matchedGroup = null;
+    // "NONE" (case-insensitive) marks an outside-PMS employee — they live in
+    // the roster (so they can show up as a reporting manager for others) but
+    // don't get a goal plan, library, or routing. Manager is optional for
+    // these rows.
+    const groupNameRaw = getEmployeeRowValue(emp, 'Group Name');
+    const isOutsidePms = groupNameRaw.trim().toUpperCase() === 'NONE';
     if (hasGoalGroups) {
-      const groupName = getEmployeeRowValue(emp, 'Group Name');
-      if (!groupName) {
+      if (!groupNameRaw) {
         errors.push({ row, code: code || '—', field: 'group_name',
-          message: 'Group Name is required. Use the exact group name from the Reference sheet.' });
-      } else if (!validGroupNames.has(groupName.toLowerCase())) {
+          message: 'Group Name is required. Use the exact group name from the Reference sheet, or "NONE" to mark this row as outside PMS.' });
+      } else if (!isOutsidePms && !validGroupNames.has(groupNameRaw.toLowerCase())) {
         errors.push({ row, code: code || '—', field: 'group_name',
-          message: `"${groupName}" is not a configured group name. Use the exact names from the Reference sheet.` });
-    } else {
-        matchedGroup = goalGroups.find(group => String(group.name || '').trim().toLowerCase() === groupName.toLowerCase()) || null;
+          message: `"${groupNameRaw}" is not a configured group name. Use the exact names from the Reference sheet, or "NONE" to mark this row as outside PMS.` });
+    } else if (!isOutsidePms) {
+        matchedGroup = goalGroups.find(group => String(group.name || '').trim().toLowerCase() === groupNameRaw.toLowerCase()) || null;
       }
     }
 
-    if (hasGoalGroups && routingColumns.length > 0) {
+    if (hasGoalGroups && !isOutsidePms && routingColumns.length > 0) {
       routingColumns.forEach(column => {
         const attrVal = getEmployeeRowValue(emp, column.label);
         const validValues = column.values || [];
@@ -1798,7 +1817,7 @@ export function validateEmployeeData(employees, config) {
       });
     }
 
-    if (hasGoalGroups && isEmployeeGroupLibraryEnabled(matchedGroup)) {
+    if (hasGoalGroups && !isOutsidePms && isEmployeeGroupLibraryEnabled(matchedGroup)) {
       const routeAttr = String(matchedGroup.segmentAttr || '').trim();
       const routeValues = getNormalizedGroupSegmentValues(matchedGroup);
       const routeValue = routeAttr ? getEmployeeRowValue(emp, routeAttr) : '';
@@ -1852,10 +1871,15 @@ export function validateEmployeeData(employees, config) {
       });
     }
 
-    // Reporting Manager: blank = top of hierarchy. Non-blank codes that
-    // aren't in the file are treated as ordinary external references (no
-    // warning). Only flag name inconsistency when the manager IS in the file.
+    // Reporting Manager is optional. If supplied, it must reference a row in the upload.
     const l1Code = getEmployeeRowValue(emp, 'Reporting Manager Code');
+    if (l1Code && !allCodes.has(l1Code.toLowerCase())) {
+      errors.push({
+        row, code: code || '—', field: 'l1_manager',
+        category: 'manager_not_in_roster',
+        message: `Reporting Manager Code "${l1Code}" isn't in this roster. Add them as an employee first (Group Name = "NONE" if outside PMS).`,
+      });
+    }
     if (l1Code && allCodes.has(l1Code.toLowerCase())) {
       const l1Key = l1Code.toLowerCase();
       const l1Name = getEmployeeRowValue(emp, 'Reporting Manager Name');
@@ -1880,6 +1904,13 @@ export function validateEmployeeData(employees, config) {
     // L2 Manager (optional per employee) — same treatment as L1.
     if (hasL2) {
       const l2Code = getEmployeeRowValue(emp, 'L2 Manager Code');
+      if (l2Code && !allCodes.has(l2Code.toLowerCase())) {
+        errors.push({
+          row, code: code || '—', field: 'l2_manager',
+          category: 'manager_not_in_roster',
+          message: `L2 Manager Code "${l2Code}" isn't in this roster. Add them as an employee first (Group Name = "NONE" if outside PMS).`,
+        });
+      }
       if (l2Code && allCodes.has(l2Code.toLowerCase())) {
         const l2Key = l2Code.toLowerCase();
         const l2Name = getEmployeeRowValue(emp, 'L2 Manager Name');

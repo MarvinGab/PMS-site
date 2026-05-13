@@ -672,3 +672,68 @@ export function renderThemedEmailText({ subject = '', body = '', tokens = {} } =
   ];
   return lines.filter((s) => s !== undefined).join('\n');
 }
+
+// Plain renderer for transactional manager-to-report emails (reminders, ad-hoc
+// notes). Deliberately no header banner, no logo, no "Powered by" footer —
+// reads like a normal person-to-person email. URL-only paragraphs render as
+// a single accent-colored CTA button; inline URLs render as underlined links.
+// `accent` defaults to a tasteful indigo; pass the org's brand primary to
+// match the rest of the app subtly.
+function renderPlainBody(body, accent, accentDark) {
+  const urlOnlyRe = /^https?:\/\/\S+$/;
+  const inlineUrlRe = /(https?:\/\/[^\s<>"']+)/g;
+  const paragraphs = String(body || '').split(/\n\s*\n/);
+  return paragraphs.map((para) => {
+    const trimmed = para.trim();
+    // A URL-only paragraph becomes a CTA button. Rendered as a table because
+    // Gmail/Outlook strip <div>+<a inline-block> layouts; the table form also
+    // avoids triggering Gmail's "trim trailing content" widget that was
+    // showing as an extra "..." below the button.
+    if (urlOnlyRe.test(trimmed)) {
+      return `<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;margin:6px 0 20px;">
+        <tr><td style="border-radius:8px;background:${accent};box-shadow:0 1px 2px ${accentDark}33;">
+          <a href="${trimmed}" style="display:inline-block;padding:10px 22px;font-size:14px;font-weight:600;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;color:#FFFFFF;text-decoration:none;letter-spacing:.01em;">Sign in to your workspace</a>
+        </td></tr>
+      </table>`;
+    }
+    const lines = para.split('\n').map((l) => escapeHtml(l)).join('<br />');
+    const linked = lines.replace(inlineUrlRe, (url) => `<a href="${url}" style="color:${accent};text-decoration:underline;">${url}</a>`);
+    return `<p style="margin:0 0 14px;font-size:15px;line-height:1.65;color:#374151;">${linked}</p>`;
+  }).join('');
+}
+
+function darkenForShadow(hex) {
+  const m = /^#([0-9a-f]{6})$/i.exec(String(hex || ''));
+  if (!m) return '#000000';
+  const r = Math.max(0, Math.floor(parseInt(m[1].slice(0, 2), 16) * 0.7));
+  const g = Math.max(0, Math.floor(parseInt(m[1].slice(2, 4), 16) * 0.7));
+  const b = Math.max(0, Math.floor(parseInt(m[1].slice(4, 6), 16) * 0.7));
+  return `#${r.toString(16).padStart(2, '0')}${g.toString(16).padStart(2, '0')}${b.toString(16).padStart(2, '0')}`;
+}
+
+export function renderPlainEmailHtml({
+  subject = '',
+  body = '',
+  tokens = {},
+  signature = '',
+  accent = '#4F46E5',
+} = {}) {
+  const resolvedSubject = resolveTokens(subject, tokens);
+  const resolvedBody = resolveTokens(body, tokens);
+  const resolvedSignature = signature ? resolveTokens(signature, tokens) : '';
+  const safeAccent = /^#[0-9A-Fa-f]{6}$/.test(String(accent || '')) ? accent : '#4F46E5';
+  const accentDark = darkenForShadow(safeAccent);
+  // resolvedSubject is the email's Subject header — Gmail / Outlook show it in
+  // the inbox list, so we don't repeat it inside the body.
+  void resolvedSubject;
+  return `
+    <div style="margin:0;padding:32px 16px;background:#F4F6FA;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;color:#111827;">
+      <table role="presentation" cellpadding="0" cellspacing="0" border="0" align="center" style="border-collapse:collapse;max-width:560px;width:100%;background:#FFFFFF;border:1px solid #E5E7EB;border-radius:12px;box-shadow:0 1px 2px rgba(15,23,42,.04);">
+        <tr><td style="padding:34px 36px 28px;">
+          ${renderPlainBody(resolvedBody, safeAccent, accentDark)}
+          ${resolvedSignature ? `<div style="margin-top:18px;padding-top:16px;border-top:1px solid #EEF1F5;font-size:12px;color:#9CA3AF;letter-spacing:.02em;">${escapeHtml(resolvedSignature)}</div>` : ''}
+        </td></tr>
+      </table>
+    </div>
+  `;
+}

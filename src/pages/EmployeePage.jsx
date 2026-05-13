@@ -17,6 +17,7 @@ import {
   hydrateOrganizations,
   readOrgBrandCacheSync,
 } from '../backend/stateStore';
+import { sendCustomBroadcast } from '../backend/emailService';
 
 const EMP_SESSION_KEY = 'zarohr_emp_session';
 const WIZARD_STATE_KEY = 'zarohr_pms_wizard_state_v1';
@@ -24,6 +25,55 @@ const APP_DATA_KEY = 'zarohr_app_data_v1';
 const GOAL_WORKFLOW_KEY = 'zarohr_goal_workflow_v1';
 const MESSAGES_KEY = 'zarohr_messages_v1';
 const REMINDER_COOLDOWN_MS = 4 * 60 * 60 * 1000;
+
+// Templates a manager can pick from when emailing a direct report. Token
+// resolver (src/backend/emailRenderer.js) matches single-brace {name} tokens
+// — using {{double}} would leave the outer braces in the rendered email.
+// All templates are always selectable; per-recipient applicability is
+// enforced in `recipientApplicable` below, so a manager picking
+// "Self-evaluation reminder" during goal-setting can see the template but
+// won't be able to send to recipients whose cycle hasn't reached that stage.
+const MANAGER_REMINDER_TEMPLATES = [
+  {
+    id: 'goal-setting',
+    label: 'Goal-setting reminder',
+    requiresPhase: 'goal-setting',
+    subject: 'Reminder: please finalize your goals for this cycle',
+    body: `Hi {employee_name},
+
+This is a friendly reminder to finalize your performance goals for this cycle. You can sign in here and submit your goals for review:
+
+{login_url}
+
+Let me know if anything is blocking you.
+
+Thanks,
+{manager_name}`,
+  },
+  {
+    id: 'self-evaluation',
+    label: 'Self-evaluation reminder',
+    requiresPhase: 'self-evaluation',
+    subject: 'Reminder: complete your self-evaluation',
+    body: `Hi {employee_name},
+
+The self-evaluation window is open. Please log in and rate yourself against your goals so we can move forward with the review:
+
+{login_url}
+
+Reach out if you'd like to discuss before submitting.
+
+Thanks,
+{manager_name}`,
+  },
+  {
+    id: 'custom',
+    label: 'Custom message',
+    requiresPhase: null,
+    subject: '',
+    body: '',
+  },
+];
 
 // Feature flag. Rating + competency flows are parked until the rating math / rollup is wired.
 // Flip to `true` to re-enable the self-evaluation phase, rating widgets, and scale-colour UI.
@@ -54,21 +104,117 @@ const SCALE_COLORS = ['#DC2626', '#F97316', '#FBBF24', '#84CC16', '#22C55E', '#1
 // using them for decorative perspective stripes makes a blue-coded goal look "approved" or
 // an amber-coded goal look "pending review" at a glance.
 const PERSPECTIVE_COLORS = ['#3B82F6', '#38BDF8', '#6366F1', '#818CF8', '#A78BFA', '#22D3EE'];
-// Any perspective record that has one of these hexes stored was set from the old defaults;
-// we swap it at read-time for a safe colour so existing orgs get cleaned up automatically.
+// 20 distinct hues for KRA / goal accents. Strictly no red and no green
+// (or their close cousins — rose, lime, emerald, teal-green). Pinks /
+// magentas / fuchsias ARE allowed per the user's call.
+//
+// Hue families are INTERLEAVED rather than clustered: every consecutive
+// pair of indices belongs to a different family (blue → pink → yellow →
+// violet → orange → cyan → fuchsia → amber → …). The goal color picker
+// hashes goal names into this list, so interleaving means even a random
+// pair of goals lands on visibly distinct colors, not two adjacent blues.
+const KRA_GOAL_COLORS = [
+  '#2563EB', // royal blue
+  '#EC4899', // hot pink
+  '#EAB308', // yellow
+  '#7C3AED', // violet
+  '#F97316', // orange
+  '#06B6D4', // cyan
+  '#C026D3', // fuchsia
+  '#F59E0B', // amber
+  '#4F46E5', // indigo
+  '#D946EF', // bright magenta
+  '#FCD34D', // gold
+  '#0891B2', // dark cyan
+  '#FB923C', // light orange
+  '#8B5CF6', // violet medium
+  '#78350F', // brown
+  '#A855F7', // purple light
+  '#1E40AF', // navy
+  '#6366F1', // indigo light
+  '#3B82F6', // sky blue
+  '#0EA5E9', // bright sky
+];
+// Hue-family buckets used to keep adjacent goal cards visibly distinct.
+// Stored displayColor and library-index lookups don't know about the
+// on-screen order, so two cards from the same family (e.g. pink + fuchsia)
+// can end up side by side. The renderer uses this to walk visible goals in
+// order and skip any candidate sharing a family with the previous card.
+const GOAL_HUE_FAMILIES = {
+  '#2563EB': 'blue',  '#3B82F6': 'blue',  '#0EA5E9': 'blue',
+  '#1E40AF': 'blue',  '#4F46E5': 'blue',  '#6366F1': 'blue',
+  '#7C3AED': 'violet', '#8B5CF6': 'violet', '#A855F7': 'violet',
+  '#EC4899': 'pink',  '#C026D3': 'pink',  '#D946EF': 'pink',
+  '#EAB308': 'yellow', '#F59E0B': 'yellow', '#FCD34D': 'yellow',
+  '#F97316': 'orange', '#FB923C': 'orange',
+  '#06B6D4': 'cyan',  '#0891B2': 'cyan',
+  '#78350F': 'brown',
+};
+function goalHueFamily(hex) {
+  return GOAL_HUE_FAMILIES[String(hex || '').toUpperCase()] || 'other';
+}
+// Reserved hues that get swapped at read-time for a safe deterministic color
+// when an existing record stored one of them. Reds and greens ONLY — the
+// user has explicitly OK'd pinks / fuchsias / magentas as decorative.
+// Rose-reds that lean clearly red stay reserved.
 const SEMANTIC_RESERVED_HEXES = new Set([
   // reds
   '#DC2626', '#B91C1C', '#991B1B', '#EF4444', '#F87171', '#FCA5A5',
-  // oranges / ambers
-  '#D97706', '#C2410C', '#EA580C', '#F59E0B', '#FB923C', '#FDBA74', '#EAB308',
+  '#E11D48', '#BE123C', '#9F1239', '#F43F5E', '#FB7185', '#FECDD3',
+  '#FEE2E2', '#FEF2F2', '#7F1D1D',
   // greens
-  '#16A34A', '#15803D', '#22C55E', '#4ADE80', '#86EFAC', '#10B981',
+  '#16A34A', '#15803D', '#166534', '#14532D',
+  '#22C55E', '#4ADE80', '#86EFAC', '#BBF7D0',
+  '#10B981', '#059669', '#047857', '#065F46',
+  '#D1FAE5', '#A7F3D0', '#6EE7B7', '#34D399',
+  // lime / yellow-greens that read as green-adjacent
+  '#65A30D', '#84CC16', '#A3E635', '#BEF264', '#D9F99D',
+  '#365314', '#4D7C0F',
+  // teal-greens (teal-blues like #0EA5E9 are fine; teal-greens excluded)
+  '#0D9488', '#0F766E', '#115E59', '#14B8A6', '#5EEAD4', '#99F6E4',
 ]);
 function safePerspectiveColor(stored, index) {
   const fallback = PERSPECTIVE_COLORS[index % PERSPECTIVE_COLORS.length];
   if (!stored) return fallback;
   const upper = String(stored).toUpperCase();
   return SEMANTIC_RESERVED_HEXES.has(upper) ? fallback : stored;
+}
+
+function stableColorIndex(seed) {
+  const text = String(seed || '');
+  let hash = 0;
+  for (let i = 0; i < text.length; i += 1) hash = ((hash << 5) - hash + text.charCodeAt(i)) | 0;
+  return Math.abs(hash);
+}
+
+function getKraGoalColor(kra, index = 0) {
+  const key = kra?.name || kra?.libraryKraId || kra?.sourceKraId || kra?.originalKraId || kra?.id || '';
+  const basis = key ? stableColorIndex(key) : index;
+  const fallback = KRA_GOAL_COLORS[Math.abs(basis) % KRA_GOAL_COLORS.length];
+  // Stored displayColor wins UNLESS it's a reserved validation hue (red /
+  // amber / green) from the old palette — those get swapped for a deterministic
+  // safe color so existing orgs heal automatically without a data migration.
+  const stored = kra?.displayColor;
+  if (!stored) return fallback;
+  const upper = String(stored).toUpperCase();
+  return SEMANTIC_RESERVED_HEXES.has(upper) ? fallback : stored;
+}
+
+function getGoalIdentity(goal) {
+  const libraryKey = sanitizeText(goal?.libraryKraId || goal?.sourceKraId || goal?.originalKraId || '');
+  const nameKey = sanitizeText(goal?.name || '');
+  return libraryKey || nameKey;
+}
+
+function dedupeGoals(goals = []) {
+  const seen = new Set();
+  return (goals || []).filter((goal) => {
+    const key = getGoalIdentity(goal);
+    if (!key) return true;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 function uid(prefix) {
@@ -500,22 +646,22 @@ const FALLBACK_NOTIFICATION_META = {
   ),
 };
 
-function getPerspectiveColor(kra, perspectives) {
-  if (!kra?.perspName) return '#2563EB';
-  const index = perspectives.findIndex((perspective) => perspective.name === kra.perspName);
-  if (index < 0) return '#2563EB';
-  return safePerspectiveColor(perspectives[index].color, index);
+function getPerspectiveColor(kra, perspectives, goalIndex = 0) {
+  if (!kra?.perspName || !perspectives?.length) return getKraGoalColor(kra, goalIndex);
+  const perspectiveIndex = perspectives.findIndex((perspective) => perspective.name === kra.perspName);
+  if (perspectiveIndex < 0) return getKraGoalColor(kra, goalIndex);
+  return safePerspectiveColor(perspectives[perspectiveIndex].color, perspectiveIndex);
 }
 
 const TARGET_TYPES = [
-  { id: 'text',       icon: 'Aa', label: 'Free text',   example: 'anything' },
-  { id: 'number',     icon: '#',  label: 'Number',      example: 'e.g. 5000' },
-  { id: 'currency',   icon: '₹',  label: 'Currency',    example: 'e.g. 5 Cr' },
-  { id: 'percentage', icon: '%',  label: 'Percentage',  example: 'e.g. 95' },
-  { id: 'duration',   icon: '⧗',  label: 'Duration',    example: 'e.g. < 24 hrs' },
-  { id: 'date',       icon: '📅', label: 'Date',        example: 'pick a date' },
-  { id: 'rating',     icon: '★',  label: 'Rating',      example: 'e.g. 4.5 / 5' },
-  { id: 'milestone',  icon: '✓',  label: 'Milestone',   example: 'e.g. Phase 2 live' },
+  { id: 'text',       icon: 'Aa', label: 'Free text',   example: 'Target outcome (e.g. signed MoU)' },
+  { id: 'number',     icon: '#',  label: 'Number',      example: 'Target number (e.g. 5000)' },
+  { id: 'currency',   icon: '₹',  label: 'Currency',    example: 'Target amount (e.g. 5 Cr)' },
+  { id: 'percentage', icon: '%',  label: 'Percentage',  example: 'Target % (e.g. 95)' },
+  { id: 'duration',   icon: '⧗',  label: 'Duration',    example: 'Target duration (e.g. < 24 hrs)' },
+  { id: 'date',       icon: '📅', label: 'Date',        example: 'Target date' },
+  { id: 'rating',     icon: '★',  label: 'Rating',      example: 'Target rating (e.g. 4.5 / 5)' },
+  { id: 'milestone',  icon: '✓',  label: 'Milestone',   example: 'Target milestone (e.g. Phase 2 live)' },
 ];
 
 function TargetField({ value, onValueChange, type, onTypeChange }) {
@@ -932,6 +1078,10 @@ function buildEmptyKpi(source = 'employee') {
   return createKpi({ name: '', weight: '', target: '' }, source);
 }
 
+function hasDragType(dataTransfer, type) {
+  return Array.from(dataTransfer?.types || []).includes(type);
+}
+
 // Find the configured goal group + library assigned to this employee (new multi-group model)
 function getEmployeeGroupAndLibrary(config, employee) {
   const groups = config?.goalGroups;
@@ -1032,8 +1182,6 @@ function generateRewriteSuggestions(text) {
   return Array.from(suggestions).slice(0, 3);
 }
 
-const LIBRARY_CARD_COLORS = ['#F97316','#3B82F6','#22C55E','#14B8A6','#8B5CF6','#EC4899','#EAB308','#06B6D4','#DC2626','#0EA5E9'];
-
 function GoalLibraryPanel({ kras, libraryType, libraryName, canAdd, onAdd, addedIds = new Set(), draggedGoalId = null, canReturnGoal, onReturnGoal }) {
   const [selectedId, setSelectedId] = useState(null);
   const [hoveredId, setHoveredId] = useState(null);
@@ -1049,7 +1197,7 @@ function GoalLibraryPanel({ kras, libraryType, libraryName, canAdd, onAdd, added
   const hasAnyKpis = visibleKras.some((k) => (k.kpis || []).length > 0);
 
   const handleReturnDragOver = (e) => {
-    if (!canAdd || !e.dataTransfer.types.includes('application/goal-id')) return;
+    if (!canAdd || !hasDragType(e.dataTransfer, 'application/goal-id')) return;
     const goalId = draggedGoalId || e.dataTransfer.getData('application/goal-id');
     if (goalId && canReturnGoal?.(goalId)) {
       e.preventDefault();
@@ -1060,7 +1208,7 @@ function GoalLibraryPanel({ kras, libraryType, libraryName, canAdd, onAdd, added
 
   const handleReturnDrop = (e) => {
     setReturnDropActive(false);
-    if (!canAdd || !e.dataTransfer.types.includes('application/goal-id')) return;
+    if (!canAdd || !hasDragType(e.dataTransfer, 'application/goal-id')) return;
     const goalId = draggedGoalId || e.dataTransfer.getData('application/goal-id');
     if (!goalId || !canReturnGoal?.(goalId)) return;
     e.preventDefault();
@@ -1089,37 +1237,38 @@ function GoalLibraryPanel({ kras, libraryType, libraryName, canAdd, onAdd, added
   return (
     <div
       {...libraryDropProps}
-      style={{ marginBottom: 22, background: returnDropActive ? '#EEF2FF' : 'linear-gradient(135deg,#EEF2FF 0%,#F5F8FF 60%,#FFFFFF 100%)', border: `1.5px ${returnDropActive ? 'dashed' : 'solid'} ${returnDropActive ? '#6366F1' : '#C7D2FE'}`, borderRadius: 16, padding: '16px 18px', transition: 'border-color .15s, background .15s' }}
+      style={{ marginBottom: 22, background: returnDropActive ? '#EEF2FF' : '#F6F8FF', border: `1.5px ${returnDropActive ? 'dashed' : 'solid'} ${returnDropActive ? '#6366F1' : '#C7D2FE'}`, borderRadius: 14, padding: '14px 18px 18px', transition: 'border-color .15s, background .15s', boxShadow: '0 6px 18px rgba(59,130,246,.06)' }}
     >
       {/* Header */}
-	      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginBottom: 14, flexWrap: 'wrap' }}>
+	      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginBottom: 13, flexWrap: 'wrap' }}>
 	        <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0, flexWrap: 'wrap' }}>
-	          <div style={{ fontSize: 15, fontWeight: 800, color: '#0F172A', whiteSpace: 'nowrap' }}>Goal Library</div>
-	          <div style={{ width: 1, height: 16, background: '#C7D2FE' }} />
+	          <div style={{ fontSize: 13, fontWeight: 800, color: '#0F172A', whiteSpace: 'nowrap' }}>Goal Library</div>
 	          {returnDropActive ? (
-	            <span style={{ fontSize: 12, fontWeight: 800, color: '#4338CA', background: '#E0E7FF', border: '1px solid #C7D2FE', padding: '3px 10px', borderRadius: 999 }}>
+	            <span style={{ fontSize: 11.5, fontWeight: 800, color: '#4338CA', background: '#EEF2FF', border: '1px solid #C7D2FE', padding: '2px 8px', borderRadius: 999 }}>
 	              Drop to return KRA
 	            </span>
 	          ) : canAdd ? (
-	            <span style={{ fontSize: 12.5, fontWeight: 700, color: '#4F46E5', whiteSpace: 'nowrap' }}>
+	            <span style={{ fontSize: 11.5, fontWeight: 800, color: '#4F46E5', whiteSpace: 'nowrap' }}>
 	              Drag to plan · Double-click add · Click preview
 	            </span>
 	          ) : (
-	            <span style={{ fontSize: 12, color: '#4F46E5', fontWeight: 700 }}>{visibleKras.length} KRA{visibleKras.length !== 1 ? 's' : ''} available</span>
+	            <span style={{ fontSize: 12, color: '#475569', fontWeight: 700 }}>{visibleKras.length} KRA{visibleKras.length !== 1 ? 's' : ''} available</span>
 	          )}
 	        </div>
-	        <span style={{ fontSize: 10.5, fontWeight: 700, color: '#4338CA', background: '#E0E7FF', padding: '3px 10px', borderRadius: 999, border: '1px solid #C7D2FE', whiteSpace: 'nowrap', flexShrink: 0 }}>
+	        <span style={{ fontSize: 10.5, fontWeight: 800, color: '#4F46E5', background: '#FFFFFF', padding: '4px 10px', borderRadius: 999, border: '1px solid #C7D2FE', whiteSpace: 'nowrap', flexShrink: 0 }}>
 	          {libraryType === 'kra-kpi' && hasAnyKpis ? 'KRA + KPI' : 'KRA only'}
 	        </span>
       </div>
 
       {/* Card grid */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(200px,1fr))', gap: 12 }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(172px,1fr))', gap: 12 }}>
         {visibleKras.map((kra, index) => {
           const cardId = kra.id || kra.name;
           const isSelected = selectedId === cardId;
           const kpiList = kra.kpis || [];
-          const color = LIBRARY_CARD_COLORS[index % LIBRARY_CARD_COLORS.length];
+          const sourceIndex = kras.findIndex((item) => (item.id || item.name) === cardId || sanitizeText(item.name) === sanitizeText(kra.name));
+          const color = KRA_GOAL_COLORS[(sourceIndex >= 0 ? sourceIndex : index) % KRA_GOAL_COLORS.length];
+          const actionColor = '#2563EB';
           const initial = (kra.name || '?').trim().charAt(0).toUpperCase();
 
           return (
@@ -1137,29 +1286,30 @@ function GoalLibraryPanel({ kras, libraryType, libraryName, canAdd, onAdd, added
               title={canAdd ? 'Drag or double-click to add to plan' : undefined}
               style={{
                 background: '#fff',
-                border: `1.5px solid ${isSelected ? '#A5B4FC' : hoveredId === cardId ? `${color}55` : '#E2E8F0'}`,
-                borderRadius: 12,
-                padding: '14px',
+                border: `1.5px solid ${isSelected ? `${color}66` : hoveredId === cardId ? '#D6E4FF' : '#DCE6F2'}`,
+                borderRadius: 10,
+                padding: '12px',
+                minHeight: 86,
                 cursor: canAdd ? 'grab' : 'default',
-                boxShadow: isSelected ? '0 4px 16px rgba(79,70,229,.14)' : hoveredId === cardId ? `0 8px 20px rgba(15,23,42,.10)` : '0 1px 4px rgba(15,23,42,.05)',
-                transform: hoveredId === cardId && !isSelected ? 'translateY(-3px)' : 'none',
+                boxShadow: hoveredId === cardId ? '0 7px 16px rgba(15,23,42,.08)' : '0 2px 7px rgba(15,23,42,.04)',
+                transform: 'none',
                 userSelect: 'none',
                 display: 'flex',
                 flexDirection: 'column',
-                gap: 8,
-                transition: 'box-shadow .15s, border-color .15s, transform .15s',
+                gap: 10,
+                transition: 'box-shadow .15s, border-color .15s',
               }}
             >
               {/* Icon + Name */}
               <div style={{ display: 'flex', gap: 10, alignItems: 'flex-start' }}>
-                <div style={{ width: 36, height: 36, borderRadius: 10, background: `${color}18`, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
-                  <span style={{ fontSize: 17, fontWeight: 800, color }}>{initial}</span>
+                <div style={{ width: 35, height: 35, borderRadius: 9, background: `${color}18`, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+                  <span style={{ fontSize: 13.5, fontWeight: 900, color }}>{initial}</span>
                 </div>
                 <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontSize: 13, fontWeight: 700, color: '#0F172A', lineHeight: 1.35 }}>{kra.name}</div>
+                  <div style={{ fontSize: 11.5, fontWeight: 800, color: '#0F172A', lineHeight: 1.25 }}>{kra.name}</div>
                   {kra.desc && (
-                    <div style={{ fontSize: 11.5, color: '#64748B', lineHeight: 1.4, marginTop: 2 }}>
-                      {kra.desc.length > 72 ? `${kra.desc.slice(0, 72)}…` : kra.desc}
+                    <div style={{ fontSize: 10.5, color: '#64748B', lineHeight: 1.35, marginTop: 2 }}>
+                      {kra.desc.length > 54 ? `${kra.desc.slice(0, 54)}…` : kra.desc}
                     </div>
                   )}
                 </div>
@@ -1184,7 +1334,7 @@ function GoalLibraryPanel({ kras, libraryType, libraryName, canAdd, onAdd, added
               {/* Footer: weight chip + perspective chip */}
               <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center', marginTop: 'auto' }}>
                 {kra.weight && (
-                  <span style={{ fontSize: 10.5, fontWeight: 700, color, background: `${color}14`, padding: '2px 8px', borderRadius: 999 }}>
+                  <span style={{ fontSize: 10, fontWeight: 800, color, background: `${color}12`, padding: '2px 7px', borderRadius: 999 }}>
                     {kra.weight}%
                   </span>
                 )}
@@ -1192,7 +1342,7 @@ function GoalLibraryPanel({ kras, libraryType, libraryName, canAdd, onAdd, added
                   <span style={{ fontSize: 10.5, color: '#64748B' }}>{kpiList.length} KPI{kpiList.length !== 1 ? 's' : ''}</span>
                 )}
                 {kra.perspName && kra.perspName !== 'All KRAs' && (
-                  <span style={{ fontSize: 10.5, fontWeight: 700, color, background: `${color}14`, padding: '2px 8px', borderRadius: 999, border: `1px solid ${color}22` }}>
+                  <span style={{ fontSize: 10, fontWeight: 700, color, background: `${color}12`, padding: '2px 7px', borderRadius: 999, border: `1px solid ${color}22` }}>
                     {kra.perspName}
                   </span>
                 )}
@@ -1203,7 +1353,7 @@ function GoalLibraryPanel({ kras, libraryType, libraryName, canAdd, onAdd, added
                 <button
                   type="button"
                   onClick={(e) => { e.stopPropagation(); onAdd(kra); setSelectedId(null); }}
-                  style={{ padding: '7px', borderRadius: 8, border: 'none', background: color, color: '#fff', cursor: 'pointer', fontFamily: 'inherit', fontSize: 12, fontWeight: 700 }}
+                  style={{ padding: '7px', borderRadius: 8, border: 'none', background: actionColor, color: '#fff', cursor: 'pointer', fontFamily: 'inherit', fontSize: 12, fontWeight: 700 }}
                 >
                   ＋ Add to plan
                 </button>
@@ -1497,13 +1647,24 @@ export default function EmployeePage() {
   // Persist the active tab so refresh stays on the same tab.
   const activeSectionKey = `zarohr_emp_active_section:${session?.orgKey || 'default'}:${session?.empCode || 'anon'}`;
   const [activeSection, setActiveSectionInner] = useState(() => {
+    // Users without a submittable RM (no manager, or RM not in roster) shouldn't
+    // land on Goals — they have no way to act on it. Compute here so first paint
+    // is correct; an effect below also corrects late-changing access.
+    const emp = session && config ? getEmployeeRecord(config, session.empCode) : null;
+    const rmCode = String(emp?.['Reporting Manager Code'] || session?.managerCode || '').trim();
+    const roster = config?.employeeUploadData?.employees || [];
+    const rmExists = rmCode && roster.some((e) => normalizeCode(e['Employee Code']) === normalizeCode(rmCode));
+    const canSetGoalsNow = !!emp && !!rmCode && !!rmExists;
     try {
       const stored = localStorage.getItem(activeSectionKey);
-      if (stored) return stored === 'dashboard' ? 'goals' : stored;
+      if (stored) {
+        const next = stored === 'dashboard' ? 'goals' : stored;
+        if (next === 'goals' && !canSetGoalsNow) return 'team';
+        return next;
+      }
     } catch (_) {}
-    // First visit: external managers (no PMS employee record) land on Team; everyone else on Goals.
-    const emp = session && config ? getEmployeeRecord(config, session.empCode) : null;
-    return emp ? 'goals' : 'team';
+    // First visit: send no-goal users to Team; everyone else to Goals.
+    return canSetGoalsNow ? 'goals' : 'team';
   });
   const setActiveSection = (next) => {
     setActiveSectionInner(next);
@@ -1520,6 +1681,12 @@ export default function EmployeePage() {
   const [dragOverGoalId, setDragOverGoalId] = useState(null);
   const [libDropActive, setLibDropActive] = useState(false);
   const [editingGoalId, setEditingGoalId] = useState(null);
+  // Track which goals the user has attempted to save (clicked "Done" on at
+  // least once). Validation errors in the goal editor only appear after this
+  // attempt — on first open the modal stays clean, so a freshly-added empty
+  // goal doesn't get hit with a wall of red "missing X" pills before the
+  // user has typed anything.
+  const [attemptedDoneIds, setAttemptedDoneIds] = useState(() => new Set());
   const [confirmDeleteGoal, setConfirmDeleteGoal] = useState(false);
   const [hoveredGoalId, setHoveredGoalId] = useState(null);
   // When jumping to My Team from a notification or CTA, remember which report's review panel to
@@ -1528,6 +1695,24 @@ export default function EmployeePage() {
   const [expandedReviewCode, setExpandedReviewCode] = useState(null);
   const [teamFilter, setTeamFilter] = useState('all');
   const [teamSearch, setTeamSearch] = useState('');
+  // Reminder composer state. `target` is the direct-report row being emailed;
+  // `templateId` picks which preset to start from; `subject`/`body` are the
+  // editable values the manager will actually send. Null = modal closed.
+  const [reminderComposer, setReminderComposer] = useState(null);
+  const [reminderSending, setReminderSending] = useState(false);
+  const [reminderError, setReminderError] = useState('');
+  const [reminderToast, setReminderToast] = useState(null);
+  // Bulk-mail page state (Send Mail tab). Templates live in MANAGER_REMINDER_TEMPLATES.
+  // bulkSubject/bulkBody hold the editable copy seeded from the chosen template.
+  // bulkSelected holds the set of direct-report Employee Codes the manager has
+  // ticked for this send. Template list is phase-gated — see `phaseTemplates`
+  // below — so a manager in goal-setting can't pick "Self-evaluation reminder".
+  const [bulkTemplateId, setBulkTemplateId] = useState('goal-setting');
+  const [bulkSubject, setBulkSubject] = useState(() => (MANAGER_REMINDER_TEMPLATES.find((t) => t.id === 'goal-setting')?.subject || ''));
+  const [bulkBody, setBulkBody] = useState(() => (MANAGER_REMINDER_TEMPLATES.find((t) => t.id === 'goal-setting')?.body || ''));
+  const [bulkSelected, setBulkSelected] = useState(() => new Set());
+  const [bulkSending, setBulkSending] = useState(false);
+  const [bulkStatus, setBulkStatus] = useState(null);
   // Confirmation-modal state for Approve all / Reject all / Submit decision. null = closed.
   // Two-stage flow: stage='confirm' shows a plain "are you sure?" question; only after
   // the manager acknowledges does stage flip to 'review' which exposes the full summary
@@ -1604,6 +1789,8 @@ export default function EmployeePage() {
   const accessMode = useMemo(() => getGoalAccessMode(effectiveConfig), [effectiveConfig]);
   const currentScale = useMemo(() => SCALE_DEFAULTS[config?.scalePoints] || SCALE_DEFAULTS[5], [config]);
   const phaseIndex = PHASES.findIndex((phase) => phase.id === currentPhase);
+  const isFlatFramework = config?.frameworkId === 'kra-kpi' || config?.frameworkId === 'kra';
+  const activePerspectives = useMemo(() => (isFlatFramework ? [] : perspectives), [isFlatFramework, perspectives]);
 
   useEffect(() => {
     if (session?.orgKey) {
@@ -1630,13 +1817,16 @@ export default function EmployeePage() {
         const backfilled = hasNoGoals
           ? buildInitialGoals(config, employee, employeeGroup, config?.goalLibraries)
           : null;
+        const cleanedGoals = backfilled && backfilled.length > 0
+          ? dedupeGoals(backfilled)
+          : dedupeGoals(current.goals || []);
 
         const patched = {
           ...current,
           employeeCode: session.empCode,
           employeeName: session.name || employee?.['Employee Name'] || current.employeeName,
           managerCode,
-          ...(backfilled && backfilled.length > 0 ? { goals: backfilled } : {}),
+          goals: cleanedGoals,
         };
         if (JSON.stringify(patched) === JSON.stringify(current)) return prev;
         return {
@@ -1657,7 +1847,7 @@ export default function EmployeePage() {
             employeeName: session.name || employee?.['Employee Name'] || session.empCode,
             managerCode,
             status: 'draft',
-            goals: buildInitialGoals(config, employee, employeeGroup, config?.goalLibraries),
+            goals: dedupeGoals(buildInitialGoals(config, employee, employeeGroup, config?.goalLibraries)),
             createdAt: new Date().toISOString(),
             updatedAt: new Date().toISOString(),
           },
@@ -1743,7 +1933,7 @@ export default function EmployeePage() {
   const goalMetrics = getGoalPlanMetrics(myGoals, effectiveConfig, accessMode);
   const myStatusMeta = getSubmissionStatusMeta(mySubmission);
   const limits = getGoalLimits(config, employee, employeeGroup);
-  const myValidation = getGoalPlanValidation(myGoals, effectiveConfig, accessMode, limits, perspectives);
+  const myValidation = getGoalPlanValidation(myGoals, effectiveConfig, accessMode, limits, activePerspectives);
   // Per-goal issue map for inline red badges on cards. Shares getGoalIssues() with submit-level
   // validation so card state and submit state are always consistent.
   const goalIssuesById = useMemo(() => {
@@ -1755,14 +1945,14 @@ export default function EmployeePage() {
       map[goal.id || `goal_${index}`] = getGoalIssues(goal, {
         config: effectiveConfig,
         accessMode,
-        perspectives,
+        perspectives: activePerspectives,
         isEditableStructure,
         mustCreateKpis,
         isLocked,
       });
     });
     return map;
-  }, [myGoals, effectiveConfig, accessMode, perspectives]);
+  }, [myGoals, effectiveConfig, accessMode, activePerspectives]);
   const totalGoalsWithIssues = Object.values(goalIssuesById).filter((arr) => arr.some((i) => i.kind === 'error')).length;
   const notifications = (workflow?.notifications || []).filter((notification) => notification.recipientCode === employeeCodeKey)
     .sort((left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime());
@@ -1795,9 +1985,33 @@ export default function EmployeePage() {
       messageContacts.push({ code, name: String(dr['Employee Name'] || code).trim(), role: 'Direct report' });
     }
   });
-  const perspectiveGroups = groupGoalsByPerspective(myGoals, perspectives);
-  const canEditGoalPlan = currentPhase === 'goal-setting' && mySubmission && !['pending-manager', 'approved'].includes(mySubmission.status);
-  const canAddKra = canEditGoalPlan && (effectiveConfig?.goalCreationMode === 'employee-self' || accessMode === 'edit-freely');
+  const perspectiveGroups = groupGoalsByPerspective(myGoals, activePerspectives);
+  // Goal-setting requires someone to submit *to*. Centralised here so future
+  // changes (skip-level approval, self-approving execs, group-level override)
+  // touch one place. `reason` is consumed by the empty-state copy.
+  const goalSelfAccess = (() => {
+    if (isExternalManager) return { allowed: false, reason: 'no-employee' };
+    if (!managerCode) return { allowed: false, reason: 'no-rm' };
+    const rmExists = employees.some((e) => normalizeCode(e['Employee Code']) === normalizeCode(managerCode));
+    if (!rmExists) return { allowed: false, reason: 'rm-missing' };
+    return { allowed: true, reason: 'ok' };
+  })();
+  const canSetOwnGoals = goalSelfAccess.allowed;
+  // If a previous session pinned activeSection='goals' but this user can't set
+  // goals (e.g. they were promoted out of an RM-linked group), redirect to a
+  // useful landing — Team if they have reports, otherwise Messages.
+  useEffect(() => {
+    if (activeSection === 'goals' && !canSetOwnGoals) {
+      setActiveSection(directReports.length > 0 ? 'team' : 'messages');
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeSection, canSetOwnGoals, directReports.length]);
+  const canEditGoalPlan = canSetOwnGoals && currentPhase === 'goal-setting' && mySubmission && !['pending-manager', 'approved'].includes(mySubmission.status);
+  const canAddKra = canEditGoalPlan && (
+    effectiveConfig?.goalCreationMode === 'employee-self' ||
+    accessMode === 'edit-freely' ||
+    effectiveConfig?.employeeCanAddGoals === true
+  );
   const canEditKraFields = canAddKra;
   const canAddKpi = canEditGoalPlan && (effectiveConfig?.goalCreationMode === 'employee-self' || accessMode === 'edit-freely' || accessMode === 'add-kpis');
   const canEditExistingKpi = canEditGoalPlan && (effectiveConfig?.goalCreationMode === 'employee-self' || accessMode === 'edit-freely' || (accessMode === 'add-kpis' && effectiveConfig?.goalKpiMode === 'kra-only'));
@@ -1824,11 +2038,12 @@ export default function EmployeePage() {
         employeeName,
         managerCode,
         status: 'draft',
-        goals: buildInitialGoals(config, employee, employeeGroup, config?.goalLibraries),
+        goals: dedupeGoals(buildInitialGoals(config, employee, employeeGroup, config?.goalLibraries)),
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
       };
       const nextRecord = mutator(deepClone(base));
+      nextRecord.goals = dedupeGoals(nextRecord.goals || []);
       return {
         ...prev,
         submissions: {
@@ -1890,14 +2105,16 @@ export default function EmployeePage() {
   }
 
   function addGoal() {
+    if (!canAddKra) return;
     updateMySubmission((record) => {
-      record.goals = [...(record.goals || []), buildEmptyKra(perspectives)];
+      record.goals = [...(record.goals || []), buildEmptyKra(activePerspectives)];
       return record;
     });
   }
 
   function addGoalAndEdit() {
-    const newKra = buildEmptyKra(perspectives);
+    if (!canAddKra) return;
+    const newKra = buildEmptyKra(activePerspectives);
     updateMySubmission((record) => {
       record.goals = [...(record.goals || []), newKra];
       return record;
@@ -1906,6 +2123,8 @@ export default function EmployeePage() {
   }
 
   function addGoalToPerspective(perspName) {
+    if (!canAddKra) return;
+    if (isFlatFramework) return addGoalAndEdit();
     const newKra = createKra({ name: '', weight: '', perspName: perspName || '', kpis: [] });
     updateMySubmission((record) => {
       record.goals = [...(record.goals || []), newKra];
@@ -1915,6 +2134,7 @@ export default function EmployeePage() {
   }
 
   function removeGoal(goalId) {
+    if (!canEditGoalPlan) return;
     updateMySubmission((record) => {
       record.goals = (record.goals || []).filter((goal) => goal.id !== goalId);
       return record;
@@ -1922,6 +2142,7 @@ export default function EmployeePage() {
   }
 
   function addKpi(goalId) {
+    if (!canAddKpi) return;
     const source = config?.goalCreationMode === 'admin-library' && config?.goalKpiMode === 'kra-kpi' && accessMode === 'add-kpis'
       ? 'employee'
       : 'employee';
@@ -1952,6 +2173,7 @@ export default function EmployeePage() {
   }
 
   function removeKpi(goalId, kpiId) {
+    if (!canEditGoalPlan) return;
     updateMySubmission((record) => {
       record.goals = (record.goals || []).map((goal) => (
         goal.id === goalId
@@ -2122,29 +2344,256 @@ export default function EmployeePage() {
       return Number.isFinite(sentAt) ? Math.max(latest, sentAt) : latest;
     }, 0);
 
-    const remainingMs = latestReminderTime + REMINDER_COOLDOWN_MS - Date.now();
-    if (remainingMs <= 0) return { blocked: false, label: '' };
+    if (!latestReminderTime) return { blocked: false, label: '', lastSentLabel: '' };
 
-    const remainingMinutes = Math.ceil(remainingMs / 60000);
-    const hours = Math.floor(remainingMinutes / 60);
-    const minutes = remainingMinutes % 60;
-    const label = hours > 0
-      ? `${hours}h${minutes > 0 ? ` ${minutes}m` : ''}`
-      : `${minutes}m`;
-    return { blocked: true, label };
+    const elapsedMs = Date.now() - latestReminderTime;
+    const elapsedMinutes = Math.max(1, Math.floor(elapsedMs / 60000));
+    const elapsedHours = Math.floor(elapsedMinutes / 60);
+    const lastSentLabel = elapsedHours > 0
+      ? `${elapsedHours}h ago`
+      : `${elapsedMinutes}m ago`;
+
+    // Cooldown is temporarily disabled while the manager-reminder flow is
+    // being smoke-tested. Re-enable by switching `blocked` back to the
+    // remainingMs check (see memory entry feedback_reminder_cooldown_disabled).
+    return { blocked: false, label: '', lastSentLabel };
   }
 
   function sendReminder(report) {
     const reminderState = getReminderState(report['Employee Code']);
     if (reminderState.blocked) return;
+    // Default to the goal-setting template during goal-setting phase, the
+    // self-evaluation template during self-eval. Manager can switch templates
+    // or edit subject/body inside the composer before sending.
+    const defaultTemplateId = currentPhase === 'self-evaluation' ? 'self-evaluation' : 'goal-setting';
+    const template = MANAGER_REMINDER_TEMPLATES.find((t) => t.id === defaultTemplateId) || MANAGER_REMINDER_TEMPLATES[0];
+    setReminderError('');
+    setReminderComposer({
+      target: report,
+      templateId: template.id,
+      subject: template.subject,
+      body: template.body,
+    });
+  }
+
+  function pickReminderTemplate(templateId) {
+    const template = MANAGER_REMINDER_TEMPLATES.find((t) => t.id === templateId) || MANAGER_REMINDER_TEMPLATES[0];
+    setReminderComposer((prev) => prev ? {
+      ...prev,
+      templateId,
+      // Replace subject/body with the new template's defaults so switching is
+      // intuitive — the manager is opting into the preset's text, not merging.
+      subject: template.subject,
+      body: template.body,
+    } : prev);
+  }
+
+  async function commitReminder() {
+    if (!reminderComposer) return;
+    const { target: report, templateId, subject, body } = reminderComposer;
+    const reminderState = getReminderState(report['Employee Code']);
+    if (reminderState.blocked) {
+      setReminderError(`Reminder available in ${reminderState.label}.`);
+      return;
+    }
+    const trimmedSubject = String(subject || '').trim();
+    const trimmedBody = String(body || '').trim();
+    if (!trimmedSubject || !trimmedBody) {
+      setReminderError('Subject and message are both required.');
+      return;
+    }
+    setReminderError('');
+    setReminderSending(true);
+
+    // In-app notification fires first so the bell badge updates regardless of
+    // whether email delivery succeeds (org may not have SMTP configured).
     addNotification(createNotification({
       type: 'goal-reminder',
       recipientCode: report['Employee Code'],
       senderCode: session.empCode,
       submissionCode: report['Employee Code'],
-      title: 'Goal-setting reminder',
-      message: `${employeeName} asked you to complete your goal-setting submission.`,
+      title: templateId === 'self-evaluation' ? 'Self-evaluation reminder' : (templateId === 'custom' ? 'Message from your manager' : 'Goal-setting reminder'),
+      message: trimmedSubject,
     }));
+
+    let emailNote = '';
+    const recipientEmail = String(report['Email ID'] || report.Email || '').trim();
+    if (!recipientEmail) {
+      emailNote = '· no email on file';
+    } else {
+      try {
+        const org = (appData?.organizationsData || []).find((item) => item.key === (session?.orgKey || '')) || null;
+        if (!org?.key) {
+          emailNote = '· email skipped (org not loaded)';
+        } else {
+          const result = await sendCustomBroadcast({
+            org,
+            recipients: [report],
+            template: { subject: trimmedSubject, body: trimmedBody },
+            tokensFor: () => ({ manager_name: employeeName || '' }),
+            plain: true,
+          });
+          if (result?.ok) {
+            emailNote = '· email sent';
+          } else {
+            emailNote = `· email failed${result?.error ? `: ${result.error}` : ''}`;
+          }
+        }
+      } catch (err) {
+        emailNote = `· email failed${err?.message ? `: ${err.message}` : ''}`;
+      }
+    }
+
+    setReminderSending(false);
+    setReminderComposer(null);
+    const recipientName = String(report['Employee Name'] || report['Employee Code'] || 'employee').trim();
+    setReminderToast({
+      tone: emailNote.startsWith('· email failed') ? 'warn' : 'ok',
+      text: `Reminder sent to ${recipientName} ${emailNote}`.trim(),
+    });
+    setTimeout(() => setReminderToast(null), 5000);
+  }
+
+  function closeReminderComposer() {
+    if (reminderSending) return;
+    setReminderComposer(null);
+    setReminderError('');
+  }
+
+  // ── Send Mail tab (bulk) ────────────────────────────────────────────────
+  // Whether a given report can receive the currently-selected template right
+  // now. The template stays selectable in the UI; this only gates the
+  // recipient checkboxes — so a manager can preview a self-eval reminder
+  // during goal-setting but can't actually send it until the cycle advances.
+  function recipientApplicable(report, templateId) {
+    const template = MANAGER_REMINDER_TEMPLATES.find((t) => t.id === templateId);
+    if (!template || !template.requiresPhase) return { ok: true, reason: '' };
+    if (currentPhase !== template.requiresPhase) {
+      const phaseLabel = template.requiresPhase === 'self-evaluation' ? 'self-evaluation' : 'goal-setting';
+      return { ok: false, reason: `not in ${phaseLabel} stage yet` };
+    }
+    return { ok: true, reason: '' };
+  }
+
+  function pickBulkTemplate(templateId) {
+    const template = MANAGER_REMINDER_TEMPLATES.find((t) => t.id === templateId) || MANAGER_REMINDER_TEMPLATES[0];
+    setBulkTemplateId(templateId);
+    setBulkSubject(template.subject);
+    setBulkBody(template.body);
+    setBulkStatus(null);
+  }
+
+  function toggleBulkRecipient(code) {
+    const key = String(code || '').trim();
+    if (!key) return;
+    setBulkSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key); else next.add(key);
+      return next;
+    });
+  }
+
+  function toggleBulkSelectAll() {
+    // Only applicable recipients can be bulk-selected — picking "Self-eval
+    // reminder" during goal-setting and hitting "Select all" should not check
+    // every name, only the ones the template can actually go to.
+    const eligible = directReports
+      .filter((r) => recipientApplicable(r, bulkTemplateId).ok)
+      .map((r) => String(r['Employee Code'] || '').trim())
+      .filter(Boolean);
+    setBulkSelected((prev) => {
+      const allPicked = eligible.length > 0 && eligible.every((code) => prev.has(code));
+      return allPicked ? new Set() : new Set(eligible);
+    });
+  }
+
+  async function commitBulkReminder() {
+    if (bulkSending) return;
+    const subjectTrim = String(bulkSubject || '').trim();
+    const bodyTrim = String(bulkBody || '').trim();
+    if (!subjectTrim || !bodyTrim) {
+      setBulkStatus({ tone: 'warn', text: 'Subject and message are both required.' });
+      return;
+    }
+    const targets = directReports.filter((r) => bulkSelected.has(String(r['Employee Code'] || '').trim()));
+    if (targets.length === 0) {
+      setBulkStatus({ tone: 'warn', text: 'Pick at least one direct report.' });
+      return;
+    }
+    setBulkSending(true);
+    setBulkStatus(null);
+
+    // Cooldown gating per recipient. Skipped recipients are surfaced in the
+    // status banner so the manager knows who wasn't actually reminded.
+    const sendable = [];
+    const cooldownNames = [];
+    for (const report of targets) {
+      const state = getReminderState(report['Employee Code']);
+      if (state.blocked) {
+        cooldownNames.push(String(report['Employee Name'] || report['Employee Code'] || 'unknown').trim());
+      } else {
+        sendable.push(report);
+      }
+    }
+
+    // In-app notifications fire first for every sendable target so the bell
+    // updates even if email delivery fails for the org.
+    sendable.forEach((report) => {
+      addNotification(createNotification({
+        type: 'goal-reminder',
+        recipientCode: report['Employee Code'],
+        senderCode: session.empCode,
+        submissionCode: report['Employee Code'],
+        title: bulkTemplateId === 'self-evaluation' ? 'Self-evaluation reminder' : (bulkTemplateId === 'custom' ? 'Message from your manager' : 'Goal-setting reminder'),
+        message: subjectTrim,
+      }));
+    });
+
+    // Group recipients by whether we have an email. Email-less rows still got
+    // the in-app notification above; we just can't email them.
+    const withEmail = sendable.filter((r) => String(r['Email ID'] || r.Email || '').trim());
+    const withoutEmail = sendable.length - withEmail.length;
+
+    let emailSent = 0;
+    let emailFailed = 0;
+    let emailError = '';
+    if (withEmail.length > 0) {
+      try {
+        const org = (appData?.organizationsData || []).find((item) => item.key === (session?.orgKey || '')) || null;
+        if (!org?.key) {
+          emailError = 'org not loaded';
+          emailFailed = withEmail.length;
+        } else {
+          const result = await sendCustomBroadcast({
+            org,
+            recipients: withEmail,
+            template: { subject: subjectTrim, body: bodyTrim },
+            tokensFor: () => ({ manager_name: employeeName || '' }),
+            plain: true,
+          });
+          if (result?.ok) {
+            emailSent = result.sent ?? withEmail.length;
+            emailFailed = result.failed ?? 0;
+          } else {
+            emailFailed = withEmail.length;
+            emailError = result?.error || 'email delivery failed';
+          }
+        }
+      } catch (err) {
+        emailFailed = withEmail.length;
+        emailError = err?.message || 'email delivery failed';
+      }
+    }
+
+    setBulkSending(false);
+    const parts = [];
+    parts.push(`Sent to ${sendable.length} direct ${sendable.length === 1 ? 'report' : 'reports'}`);
+    if (emailSent > 0) parts.push(`${emailSent} email${emailSent === 1 ? '' : 's'} delivered`);
+    if (withoutEmail > 0) parts.push(`${withoutEmail} without email on file`);
+    if (emailFailed > 0) parts.push(`${emailFailed} email${emailFailed === 1 ? '' : 's'} failed${emailError ? `: ${emailError}` : ''}`);
+    if (cooldownNames.length > 0) parts.push(`${cooldownNames.length} skipped (recently reminded): ${cooldownNames.join(', ')}`);
+    setBulkStatus({ tone: emailFailed > 0 || cooldownNames.length > 0 ? 'warn' : 'ok', text: parts.join(' · ') });
+    if (emailFailed === 0) setBulkSelected(new Set());
   }
 
   function sendMessage(toCode, content) {
@@ -2206,6 +2655,7 @@ export default function EmployeePage() {
         { id: 'goals', label: 'My Goals' },
         ...(directReports.length > 0 ? [{ id: 'team', label: `My Team (${directReports.length})` }] : []),
         ...(directReports.length > 0 ? [{ id: 'approvals', label: `Approvals (${pendingApprovals.length})` }] : []),
+        ...(directReports.length > 0 ? [{ id: 'send-mail', label: 'Send Mail' }] : []),
         { id: 'messages', label: unreadMsgCount > 0 ? `Messages (${unreadMsgCount})` : 'Messages' },
         { id: 'notifications', label: `Notifications (${notifications.length})` },
         { id: 'profile', label: 'My Profile' },
@@ -2213,6 +2663,7 @@ export default function EmployeePage() {
     : [
         { id: 'goals', label: 'My Goals' },
         ...(currentPhase === 'self-evaluation' ? [{ id: 'scale', label: 'Rating Scale' }] : []),
+        ...(directReports.length > 0 ? [{ id: 'send-mail', label: 'Send Mail' }] : []),
         { id: 'messages', label: unreadMsgCount > 0 ? `Messages (${unreadMsgCount})` : 'Messages' },
         { id: 'notifications', label: `Notifications (${notifications.length})` },
         { id: 'profile', label: 'My Profile' },
@@ -2221,6 +2672,16 @@ export default function EmployeePage() {
   function renderGoalSetting() {
     if (!mySubmission) {
       return <EmptyState title="Preparing your goal plan" subtitle="Your assigned library and permissions are loading." />;
+    }
+    // No submittable RM → no path to approval. If they have no goals, just
+    // explain why. If they already have goals from a prior state (e.g. RM
+    // removed mid-cycle), fall through and render them read-only — we don't
+    // want a manager-change to nuke visibility of an existing plan.
+    if (!canSetOwnGoals && myGoals.length === 0) {
+      const subtitle = goalSelfAccess.reason === 'rm-missing'
+        ? 'Your reporting manager is no longer in the roster, so goal-setting is paused. Please contact HR.'
+        : 'You don\'t have a reporting manager assigned, so goal-setting is disabled for your account. Please contact HR if this is incorrect.';
+      return <EmptyState title="Goal-setting unavailable" subtitle={subtitle} />;
     }
 
     // Determine goal library — try new multi-group model first, then legacy
@@ -2234,12 +2695,84 @@ export default function EmployeePage() {
         }));
     const groupLibType = empGroupLib?.group?.libraryType || 'kra-kpi';
 
+    function resolveBaseGoalColor(goal, fallbackIndex = 0) {
+      if (activePerspectives.length > 0) return getPerspectiveColor(goal, activePerspectives, fallbackIndex);
+      if (goal?.displayColor && !SEMANTIC_RESERVED_HEXES.has(String(goal.displayColor).toUpperCase())) {
+        return goal.displayColor;
+      }
+      const libraryIndex = libraryKras.findIndex((kra) =>
+        (goal?.libraryKraId && (kra.id === goal.libraryKraId || kra.name === goal.libraryKraId))
+        || sanitizeText(kra.name) === sanitizeText(goal?.name)
+      );
+      if (libraryIndex >= 0) return KRA_GOAL_COLORS[libraryIndex % KRA_GOAL_COLORS.length];
+      return getKraGoalColor(goal, fallbackIndex);
+    }
+
+    // Pick a color for each visible goal by walking the on-screen order and
+    // stepping through the interleaved palette. This deliberately bypasses
+    // each goal's stored displayColor so the grid is shuffled by visible
+    // position, not by library order — that prevents two pinks landing side
+    // by side just because two pink-family library items happened to be
+    // added consecutively. Goals whose perspective color is meaningful
+    // (matched against active perspectives) keep their perspective hue.
+    const visibleGoalColorById = (() => {
+      const map = {};
+      const goalHasMatchedPerspective = (goal) => {
+        if (activePerspectives.length === 0) return false;
+        if (!goal?.perspName || goal.perspName === 'All KRAs') return false;
+        return activePerspectives.some((p) => p.name === goal.perspName);
+      };
+      const usedIndices = new Set();
+      let prevFamily = null;
+      (myGoals || []).forEach((goal, idx) => {
+        if (goalHasMatchedPerspective(goal)) {
+          const chosen = resolveBaseGoalColor(goal, idx);
+          map[goal.id] = chosen;
+          prevFamily = goalHueFamily(chosen);
+          return;
+        }
+        let chosen = null;
+        for (let step = 0; step < KRA_GOAL_COLORS.length; step += 1) {
+          const paletteIdx = (idx + step) % KRA_GOAL_COLORS.length;
+          if (usedIndices.has(paletteIdx) && step < KRA_GOAL_COLORS.length) continue;
+          const candidate = KRA_GOAL_COLORS[paletteIdx];
+          if (prevFamily && goalHueFamily(candidate) === prevFamily) continue;
+          chosen = candidate;
+          usedIndices.add(paletteIdx);
+          break;
+        }
+        if (!chosen) chosen = KRA_GOAL_COLORS[idx % KRA_GOAL_COLORS.length];
+        map[goal.id] = chosen;
+        prevFamily = goalHueFamily(chosen);
+      });
+      return map;
+    })();
+
+    function getVisibleGoalColor(goal, fallbackIndex = 0) {
+      if (goal?.id && visibleGoalColorById[goal.id]) return visibleGoalColorById[goal.id];
+      return resolveBaseGoalColor(goal, fallbackIndex);
+    }
+
     function addFromLibrary(kra) {
+      if (!canEditGoalPlan || !kra) return;
       const libKpis = groupLibType === 'kra-only' ? [] : (kra.kpis || []);
+      const libraryIndex = libraryKras.findIndex((item) =>
+        (item.id && kra.id && item.id === kra.id) || sanitizeText(item.name) === sanitizeText(kra.name)
+      );
+      const displayColor = KRA_GOAL_COLORS[(libraryIndex >= 0 ? libraryIndex : stableColorIndex(kra.name || kra.id)) % KRA_GOAL_COLORS.length];
       updateMySubmission((record) => {
+        const nextKey = sanitizeText(kra.id || kra.name);
+        const nextName = sanitizeText(kra.name);
+        const alreadyAdded = (record.goals || []).some((goal) => {
+          const goalKey = sanitizeText(goal.libraryKraId || goal.sourceKraId || goal.originalKraId || '');
+          const goalName = sanitizeText(goal.name);
+          return (nextKey && goalKey === nextKey) || (nextName && goalName === nextName);
+        });
+        if (alreadyAdded) return record;
         const newKra = createKra({ ...kra, id: uid('kra'), kpis: libKpis.map((kpi) => createKpi(kpi, 'library')) });
         // Stamp origin so the library can hide this card once added
         newKra.libraryKraId = kra.id || kra.name;
+        newKra.displayColor = displayColor;
         record.goals = [...(record.goals || []), newKra];
         return record;
       });
@@ -2368,7 +2901,7 @@ export default function EmployeePage() {
         ) : (
           <div
             onDragOver={(e) => {
-              if (e.dataTransfer.types.includes('application/kra')) {
+              if (hasDragType(e.dataTransfer, 'application/kra')) {
                 e.preventDefault();
                 e.dataTransfer.dropEffect = 'copy';
                 setLibDropActive(true);
@@ -2379,7 +2912,7 @@ export default function EmployeePage() {
             }}
             onDrop={(e) => {
               setLibDropActive(false);
-              if (!e.dataTransfer.types.includes('application/kra')) return;
+              if (!hasDragType(e.dataTransfer, 'application/kra')) return;
               e.preventDefault();
               try {
                 const kra = JSON.parse(e.dataTransfer.getData('application/kra'));
@@ -2407,7 +2940,7 @@ export default function EmployeePage() {
             {myGoals.length > 0 && (
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(300px, 1fr))', gap: 16, marginBottom: 16 }}>
                 {myGoals.map((goal, goalIndex) => {
-                  const color = getPerspectiveColor(goal, perspectives);
+                  const color = getVisibleGoalColor(goal, goalIndex);
                   const initial = (goal.name || '?').trim().charAt(0).toUpperCase();
                   const isDragging = dragGoalId === goal.id;
                   const isDragOver = dragOverGoalId === goal.id && dragGoalId !== goal.id;
@@ -2473,9 +3006,31 @@ export default function EmployeePage() {
 	                        e.dataTransfer.setData('application/goal-id', goal.id);
 	                        e.dataTransfer.effectAllowed = canReturnGoalToLibrary(goal.id) ? 'move' : 'copyMove';
 	                      }}
-                      onDragOver={(e) => { e.preventDefault(); setDragOverGoalId(goal.id); }}
+                      onDragOver={(e) => {
+                        if (hasDragType(e.dataTransfer, 'application/kra')) {
+                          e.preventDefault();
+                          e.dataTransfer.dropEffect = 'copy';
+                          setLibDropActive(true);
+                          return;
+                        }
+                        if (hasDragType(e.dataTransfer, 'application/goal-id')) {
+                          e.preventDefault();
+                          e.dataTransfer.dropEffect = 'move';
+                          setDragOverGoalId(goal.id);
+                        }
+                      }}
                       onDragEnd={() => { setDragGoalId(null); setDragOverGoalId(null); }}
-                      onDrop={() => {
+                      onDrop={(e) => {
+                        if (hasDragType(e.dataTransfer, 'application/kra')) {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          setLibDropActive(false);
+                          try {
+                            const kra = JSON.parse(e.dataTransfer.getData('application/kra'));
+                            if (kra) addFromLibrary(kra);
+                          } catch (_) {}
+                          return;
+                        }
                         if (dragGoalId && dragGoalId !== goal.id) reorderGoals(dragGoalId, goal.id);
                         setDragGoalId(null);
                         setDragOverGoalId(null);
@@ -2514,7 +3069,7 @@ export default function EmployeePage() {
                             {goal.name || <span style={{ color: '#94A3B8', fontStyle: 'italic' }}>Untitled goal</span>}
                           </div>
                           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 5, marginTop: 5 }}>
-                            {goal.perspName && goal.perspName !== 'All KRAs' && (
+                            {!isFlatFramework && goal.perspName && goal.perspName !== 'All KRAs' && (
                               <span style={{ maxWidth: '100%', fontSize: 11, fontWeight: 700, color, background: `${color}14`, padding: '2px 8px', borderRadius: 999, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{goal.perspName}</span>
                             )}
                             <span style={{ fontSize: 11.5, color: '#64748B' }}>{goalKpis.length} KPI{goalKpis.length !== 1 ? 's' : ''}</span>
@@ -2600,7 +3155,7 @@ export default function EmployeePage() {
               const goal = myGoals.find((g) => g.id === editingGoalId);
               if (!goal) return null;
               const goalIndex = myGoals.findIndex((g) => g.id === editingGoalId);
-              const color = getPerspectiveColor(goal, perspectives);
+              const color = getVisibleGoalColor(goal, goalIndex);
               const isRewriting = rewritingGoalId === goal.id;
               const goalReviewStatus = getGoalReviewStatus(goal, mySubmission);
               const goalIsLocked = goalReviewStatus === 'approved' && mySubmission?.status !== 'draft';
@@ -2609,9 +3164,28 @@ export default function EmployeePage() {
               const canEditKraFieldsNow = canEditKraFields && !goalIsLocked;
               const canEditExistingKpiNow = canEditExistingKpi && !goalIsLocked;
               const canAddKpiNow = canAddKpi && !goalIsLocked;
-              const showPerspectiveField = perspectives.length > 0 && canEditKraFieldsNow && config?.frameworkId !== 'kra-kpi';
+              const showPerspectiveField = activePerspectives.length > 0 && canEditKraFieldsNow && !isFlatFramework;
               const modalIssues = goalIssuesById[goal.id || `goal_${goalIndex}`] || [];
-              const closeModal = () => { setEditingGoalId(null); setRewritingGoalId(null); };
+              const hasAttemptedDone = attemptedDoneIds.has(goal.id);
+              const hasBlockingErrors = modalIssues.some((i) => i.kind === 'error');
+              const closeModal = () => {
+                setAttemptedDoneIds((prev) => {
+                  if (!prev.has(goal.id)) return prev;
+                  const next = new Set(prev); next.delete(goal.id); return next;
+                });
+                setEditingGoalId(null);
+                setRewritingGoalId(null);
+              };
+              function handleDone() {
+                if (hasBlockingErrors) {
+                  setAttemptedDoneIds((prev) => {
+                    if (prev.has(goal.id)) return prev;
+                    const next = new Set(prev); next.add(goal.id); return next;
+                  });
+                  return;
+                }
+                closeModal();
+              }
               return (
                 <div
                   role="dialog"
@@ -2671,13 +3245,13 @@ export default function EmployeePage() {
                           </div>
                         </div>
                       )}
-                      {modalIssues.length > 0 && (
-                        <div style={{ marginBottom: 14, display: 'flex', flexDirection: 'column', gap: 6 }}>
+                      {hasAttemptedDone && modalIssues.length > 0 && (
+                        <div style={{ marginBottom: 14, display: 'flex', flexWrap: 'wrap', gap: 6, fontSize: 11.5 }}>
                           {modalIssues.map((issue, index) => (
-                            <div key={`${issue.text}-${index}`} style={{ display: 'flex', alignItems: 'center', gap: 7, padding: '6px 10px', borderRadius: 999, background: issue.kind === 'error' ? '#FEF2F2' : '#FFFBEB', border: `1px solid ${issue.kind === 'error' ? '#FECACA' : '#FDE68A'}`, color: issue.kind === 'error' ? '#991B1B' : '#92400E', fontSize: 12, fontWeight: 700, width: 'fit-content', maxWidth: '100%' }}>
-                              <span style={{ width: 6, height: 6, borderRadius: '50%', background: issue.kind === 'error' ? '#DC2626' : '#D97706', flexShrink: 0 }} />
-                              <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{issue.text}</span>
-                            </div>
+                            <span key={`${issue.text}-${index}`} style={{ display: 'inline-flex', alignItems: 'center', gap: 5, color: issue.kind === 'error' ? '#B91C1C' : '#B45309' }}>
+                              <span style={{ width: 5, height: 5, borderRadius: '50%', background: issue.kind === 'error' ? '#DC2626' : '#D97706', flexShrink: 0 }} />
+                              {issue.text}
+                            </span>
                           ))}
                         </div>
                       )}
@@ -2762,7 +3336,7 @@ export default function EmployeePage() {
                         </div>
                       ) : (
                         <div style={{ marginBottom: 14, padding: '12px 14px', borderRadius: 12, background: '#F8FAFC', border: '1px solid #E9EDF2' }}>
-                          {goal.perspName && goal.perspName !== 'All KRAs' && <div style={{ fontSize: 10.5, fontWeight: 700, color, textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 4 }}>{goal.perspName}</div>}
+                          {!isFlatFramework && goal.perspName && goal.perspName !== 'All KRAs' && <div style={{ fontSize: 10.5, fontWeight: 700, color, textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 4 }}>{goal.perspName}</div>}
                           <div style={{ fontSize: 15, fontWeight: 800, color: '#0D1117' }}>{goal.name}</div>
                           <span style={{ fontSize: 12, fontWeight: 700, color, background: `${color}14`, padding: '4px 10px', borderRadius: 999, display: 'inline-block', marginTop: 6 }}>Weight: {goal.weight || 0}%</span>
                         </div>
@@ -2812,7 +3386,8 @@ export default function EmployeePage() {
                                         </div>
                                       )}
                                     </div>
-                                    <div style={{ marginTop: 8 }}>
+                                    <div style={{ marginTop: 10 }}>
+                                      <div style={{ fontSize: 10.5, fontWeight: 700, color: '#94A3B8', textTransform: 'uppercase', letterSpacing: '.07em', marginBottom: 5 }}>Target</div>
                                       <TargetField
                                         value={kpi.target || ''}
                                         onValueChange={(v) => updateKpi(goal.id, kpi.id, 'target', v)}
@@ -2880,7 +3455,7 @@ export default function EmployeePage() {
                       ) : (
                         <>
 	                          <div>
-	                            {goalCanEdit && canAddKra && (!goalIsLocked || !isGoalStructurallyValid(goal)) && (
+	                            {goalCanEdit && (canAddKra || goal.libraryKraId || !isGoalStructurallyValid(goal)) && (
                               <button
                                 type="button"
                                 onClick={() => setConfirmDeleteGoal(true)}
@@ -2902,7 +3477,7 @@ export default function EmployeePage() {
 	                            {goalCanEdit && (
 	                              <button
 	                                type="button"
-	                                onClick={closeModal}
+	                                onClick={handleDone}
 	                                style={{ padding: '10px 22px', borderRadius: 10, border: 'none', background: color, color: '#fff', cursor: 'pointer', fontFamily: 'inherit', fontSize: 13.5, fontWeight: 700, boxShadow: `0 4px 12px ${color}3D` }}
 	                              >
 	                                ✓ Done
@@ -2924,6 +3499,7 @@ export default function EmployeePage() {
             )}
 
 
+            {canSetOwnGoals && (
             <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, marginTop: 10, flexWrap: 'wrap', alignItems: 'center' }}>
               <div style={{ fontSize: 13.5, color: '#64748B' }}>
                 {!canEditGoalPlan && mySubmission.status === 'approved'
@@ -2953,8 +3529,156 @@ export default function EmployeePage() {
                 {mySubmission.status === 'sent-back' ? 'Resubmit Goals' : 'Submit Goals for Approval'}
               </button>
             </div>
+            )}
           </div>
         )}
+      </div>
+    );
+  }
+
+  function renderSendMail() {
+    if (directReports.length === 0) {
+      return <EmptyState title="No direct reports" subtitle="You'll be able to send team emails once reports are assigned to you." />;
+    }
+    // Applicable recipients = those whose stage matches the selected template.
+    // Greyed-out rows can't be ticked, so a manager picking "Self-evaluation
+    // reminder" during goal-setting sees the template but no checkable rows.
+    const applicableCodes = directReports
+      .filter((r) => recipientApplicable(r, bulkTemplateId).ok)
+      .map((r) => String(r['Employee Code'] || '').trim())
+      .filter(Boolean);
+    const allPicked = applicableCodes.length > 0 && applicableCodes.every((code) => bulkSelected.has(code));
+    const visibleTemplates = MANAGER_REMINDER_TEMPLATES;
+
+    // Use the org's resolved brand palette (same source as the rest of the
+    // page) for accents, ties, and active state — keeps Reminders consistent
+    // with My Goals / My Team Goals instead of hardcoding a generic blue.
+    const accent = brandPalette.primary;
+    const accentDark = brandPalette.primaryDark;
+    const accentSoftBg = `${accent}14`;     // ~8% opacity tint
+    const accentSoftBorder = `${accent}40`; // ~25% opacity border
+    const sendDisabled = bulkSending || bulkSelected.size === 0 || !bulkSubject.trim() || !bulkBody.trim();
+
+    return (
+      <div style={{ display: 'grid', gridTemplateColumns: '240px minmax(0, 1fr) 300px', gap: 16, alignItems: 'flex-start' }}>
+        {/* Left: templates */}
+        <div style={{ background: '#fff', border: '1px solid #EAEEF3', borderRadius: 12, padding: '14px 14px', display: 'flex', flexDirection: 'column', gap: 8, boxShadow: '0 8px 24px rgba(15,23,42,.05)' }}>
+          <div style={{ fontSize: 11.5, fontWeight: 800, color: '#64748B', textTransform: 'uppercase', letterSpacing: '.05em', marginBottom: 2 }}>Templates</div>
+          {visibleTemplates.map((tpl) => {
+            const active = bulkTemplateId === tpl.id;
+            return (
+              <button key={tpl.id} type="button" onClick={() => pickBulkTemplate(tpl.id)}
+                style={{
+                  textAlign: 'left',
+                  border: `1px solid ${active ? accent : '#E2E8F0'}`,
+                  background: active ? accentSoftBg : '#fff',
+                  color: active ? accentDark : '#0F172A',
+                  borderRadius: 10, padding: '10px 12px', fontFamily: 'inherit',
+                  fontSize: 13, fontWeight: 700, cursor: 'pointer',
+                  transition: 'all 160ms ease',
+                }}>{tpl.label}</button>
+            );
+          })}
+        </div>
+
+        {/* Middle: editor */}
+        <div style={{ background: '#fff', border: '1px solid #EAEEF3', borderRadius: 12, padding: '16px 18px', display: 'flex', flexDirection: 'column', gap: 12, boxShadow: '0 8px 24px rgba(15,23,42,.05)' }}>
+          <div>
+            <div style={{ fontSize: 14, fontWeight: 800, color: '#0F172A' }}>Compose reminder</div>
+            <div style={{ fontSize: 12, color: '#64748B', marginTop: 2 }}>Pick a template, edit the copy if you like, then tick the reports who should receive it.</div>
+          </div>
+          <div>
+            <label style={{ fontSize: 11, fontWeight: 700, color: '#64748B', display: 'block', marginBottom: 4, textTransform: 'uppercase', letterSpacing: '.05em' }}>Subject</label>
+            <input value={bulkSubject}
+              onChange={(e) => { setBulkSubject(e.target.value); setBulkStatus(null); }}
+              placeholder="Subject line"
+              style={{ width: '100%', border: '1px solid #E2E8F0', borderRadius: 8, padding: '8px 10px', fontSize: 13, fontFamily: 'inherit', outline: 'none' }} />
+          </div>
+          <div>
+            <label style={{ fontSize: 11, fontWeight: 700, color: '#64748B', display: 'block', marginBottom: 4, textTransform: 'uppercase', letterSpacing: '.05em' }}>Message</label>
+            <textarea value={bulkBody}
+              onChange={(e) => { setBulkBody(e.target.value); setBulkStatus(null); }}
+              rows={12}
+              placeholder="Message body"
+              style={{ width: '100%', border: '1px solid #E2E8F0', borderRadius: 8, padding: '8px 10px', fontSize: 13, fontFamily: 'inherit', outline: 'none', resize: 'vertical' }} />
+            <div style={{ fontSize: 10.5, color: '#94A3B8', marginTop: 4 }}>
+              Tokens: {'{employee_name}'}, {'{manager_name}'}, {'{login_url}'}, {'{organization_name}'}
+            </div>
+          </div>
+          {bulkStatus && (
+            <div style={{
+              background: bulkStatus.tone === 'warn' ? '#FFFBEB' : '#F0FDF4',
+              border: `1px solid ${bulkStatus.tone === 'warn' ? '#FDE68A' : '#BBF7D0'}`,
+              color: bulkStatus.tone === 'warn' ? '#92400E' : '#166534',
+              borderRadius: 8, padding: '8px 10px', fontSize: 12, fontWeight: 700,
+            }}>{bulkStatus.text}</div>
+          )}
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+            <div style={{ fontSize: 12, color: '#64748B' }}>{bulkSelected.size} of {applicableCodes.length} selected{applicableCodes.length !== directReports.length ? ` · ${directReports.length - applicableCodes.length} unavailable for this template` : ''}</div>
+            <button type="button" onClick={commitBulkReminder} disabled={sendDisabled}
+              style={{
+                border: 'none',
+                background: sendDisabled ? `${accent}55` : accent,
+                color: '#fff', borderRadius: 8, padding: '9px 18px', fontSize: 13, fontWeight: 800,
+                cursor: sendDisabled ? 'not-allowed' : 'pointer', fontFamily: 'inherit',
+                boxShadow: sendDisabled ? 'none' : `0 8px 20px ${accent}38`,
+                transition: 'all 160ms ease',
+              }}>{bulkSending ? 'Sending…' : `Send reminder${bulkSelected.size ? ` to ${bulkSelected.size}` : ''}`}</button>
+          </div>
+        </div>
+
+        {/* Right: recipients */}
+        <div style={{ background: '#fff', border: '1px solid #EAEEF3', borderRadius: 12, padding: '14px 14px', display: 'flex', flexDirection: 'column', gap: 8, boxShadow: '0 8px 24px rgba(15,23,42,.05)', maxHeight: 'calc(100vh - 220px)', overflow: 'hidden' }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+            <div style={{ fontSize: 11.5, fontWeight: 800, color: '#64748B', textTransform: 'uppercase', letterSpacing: '.05em' }}>Recipients</div>
+            <button type="button" onClick={toggleBulkSelectAll}
+              style={{ background: 'transparent', border: 'none', color: accentDark, fontSize: 11.5, fontWeight: 800, cursor: 'pointer', padding: 2, fontFamily: 'inherit' }}>
+              {allPicked ? 'Clear all' : 'Select all'}
+            </button>
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6, overflowY: 'auto' }}>
+            {directReports.map((report) => {
+              const code = String(report['Employee Code'] || '').trim();
+              const name = String(report['Employee Name'] || code || 'Employee').trim();
+              const email = String(report['Email ID'] || report.Email || '').trim();
+              const checked = bulkSelected.has(code);
+              const state = getReminderState(code);
+              const applicability = recipientApplicable(report, bulkTemplateId);
+              const disabled = !applicability.ok;
+              return (
+                <label key={code || name} style={{
+                  display: 'flex', alignItems: 'flex-start', gap: 9,
+                  padding: '9px 10px', borderRadius: 8,
+                  background: disabled ? '#F1F5F9' : (checked ? accentSoftBg : '#F8FAFC'),
+                  border: `1px solid ${disabled ? '#E2E8F0' : (checked ? accentSoftBorder : '#E2E8F0')}`,
+                  cursor: disabled ? 'not-allowed' : 'pointer',
+                  opacity: disabled ? 0.55 : 1,
+                  transition: 'all 160ms ease',
+                }}>
+                  <input type="checkbox" checked={checked && !disabled} disabled={disabled}
+                    onChange={() => { if (!disabled) toggleBulkRecipient(code); }}
+                    style={{ marginTop: 2, accentColor: accent, cursor: disabled ? 'not-allowed' : 'pointer' }} />
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 12.5, fontWeight: 700, color: disabled ? '#64748B' : '#0F172A', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{name}</div>
+                    <div style={{ fontSize: 11, color: '#64748B', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                      {email || 'no email on file'}
+                    </div>
+                    {disabled && (
+                      <div style={{ fontSize: 10.5, color: '#64748B', marginTop: 2, fontStyle: 'italic' }}>
+                        {applicability.reason}
+                      </div>
+                    )}
+                    {!disabled && state.lastSentLabel && (
+                      <div style={{ fontSize: 10.5, color: state.blocked ? '#92400E' : '#64748B', marginTop: 2, fontWeight: 700 }}>
+                        Last sent {state.lastSentLabel}{state.blocked ? ' · in cooldown' : ''}
+                      </div>
+                    )}
+                  </div>
+                </label>
+              );
+            })}
+          </div>
+        </div>
       </div>
     );
   }
@@ -3020,10 +3744,10 @@ export default function EmployeePage() {
 	              style={{
 	                width: '100%', textAlign: 'left',
 	                padding: '9px 12px',
-	                background: isActive ? '#FFFFFF' : unread > 0 ? 'linear-gradient(135deg,#EFF6FF 0%, #ffffff 72%)' : 'rgba(255,255,255,0.92)',
-	                border: `1.5px solid ${isActive ? '#93C5FD' : unread > 0 ? '#BFDBFE' : '#E9EEF5'}`,
+	                background: isActive ? '#FFFFFF' : unread > 0 ? `linear-gradient(135deg, ${brandPalette.primary}12 0%, #ffffff 72%)` : 'rgba(255,255,255,0.92)',
+	                border: `1.5px solid ${isActive ? brandPalette.primary : unread > 0 ? `${brandPalette.primary}55` : '#E9EEF5'}`,
 	                borderRadius: 16,
-	                boxShadow: isActive ? '0 10px 28px rgba(37,99,235,.14)' : unread > 0 ? '0 8px 22px rgba(37,99,235,.10)' : '0 3px 12px rgba(15,23,42,.04)',
+	                boxShadow: isActive ? `0 10px 28px ${brandPalette.primary}26` : unread > 0 ? `0 8px 22px ${brandPalette.primary}1A` : '0 3px 12px rgba(15,23,42,.04)',
 	                cursor: 'pointer', fontFamily: 'inherit',
 	                display: 'flex', alignItems: 'center', gap: 11,
 	              }}
@@ -3033,7 +3757,7 @@ export default function EmployeePage() {
 	                  {initials(contact.name)}
 	                </div>
 	                {unread > 0 && (
-	                  <span style={{ position: 'absolute', top: -2, right: -2, minWidth: 16, height: 16, padding: '0 4px', borderRadius: 999, background: '#2563EB', color: '#fff', fontSize: 10, fontWeight: 800, display: 'flex', alignItems: 'center', justifyContent: 'center', border: '2px solid #fff', boxSizing: 'content-box' }}>
+	                  <span style={{ position: 'absolute', top: -2, right: -2, minWidth: 16, height: 16, padding: '0 4px', borderRadius: 999, background: brandPalette.primary, color: '#fff', fontSize: 10, fontWeight: 800, display: 'flex', alignItems: 'center', justifyContent: 'center', border: '2px solid #fff', boxSizing: 'content-box' }}>
 	                    {unread > 9 ? '9+' : unread}
 	                  </span>
 	                )}
@@ -3205,18 +3929,41 @@ export default function EmployeePage() {
           })}
         </div>
 
-        <div style={{ padding: '10px 12px 12px', borderTop: '1px solid #F1F5F9', background: '#fff', flexShrink: 0 }}>
+        <div style={{
+          padding: '10px 12px 12px',
+          borderTop: '1px solid #F1F5F9',
+          background: '#fff',
+          flexShrink: 0,
+          display: 'flex',
+          alignItems: 'flex-end',
+          gap: 10,
+        }}>
+          {/* Message input — send button intentionally lives OUTSIDE this
+              wrapper (as a separate flex child below) so the box stays a
+              clean pill. Wrapper uses alignItems: center so the placeholder
+              and typed text sit vertically centered, not anchored to the top. */}
           <div style={{
-            display: 'flex',
-            alignItems: 'flex-end',
-            gap: 8,
-            background: '#F1F5F9',
+            flex: 1,
+            minWidth: 0,
+            background: '#F8FAFC',
+            border: '1px solid #E2E8F0',
             borderRadius: 22,
-            padding: '6px 6px 6px 16px',
-            transition: 'box-shadow 180ms ease, background 180ms ease',
+            padding: '0 18px',
+            minHeight: 44,
+            display: 'flex',
+            alignItems: 'center',
+            transition: 'border-color 180ms ease, box-shadow 180ms ease, background 180ms ease',
           }}
-            onFocus={(e) => { e.currentTarget.style.background = '#fff'; e.currentTarget.style.boxShadow = '0 0 0 2px #DBEAFE inset, 0 1px 3px rgba(15,23,42,.06)'; }}
-            onBlur={(e) => { e.currentTarget.style.background = '#F1F5F9'; e.currentTarget.style.boxShadow = 'none'; }}
+            onFocus={(e) => {
+              e.currentTarget.style.background = '#FFFFFF';
+              e.currentTarget.style.borderColor = brandPalette.primary;
+              e.currentTarget.style.boxShadow = `0 0 0 3px ${brandPalette.primary}1A, 0 1px 2px rgba(15,23,42,.04)`;
+            }}
+            onBlur={(e) => {
+              e.currentTarget.style.background = '#F8FAFC';
+              e.currentTarget.style.borderColor = '#E2E8F0';
+              e.currentTarget.style.boxShadow = 'none';
+            }}
           >
             <textarea
               value={messageInput}
@@ -3233,32 +3980,37 @@ export default function EmployeePage() {
               rows={1}
               placeholder="Message…"
               style={{
-                flex: 1, minWidth: 0,
-                padding: '8px 0', border: 'none', outline: 'none',
+                width: '100%',
+                padding: 0, margin: 0, border: 'none', outline: 'none',
                 fontFamily: 'inherit', fontSize: 14, resize: 'none',
                 background: 'transparent', color: '#0F172A',
-                lineHeight: 1.5, maxHeight: 110,
+                lineHeight: '20px',
+                // Override the global `textarea { min-height: 88px }` rule in
+                // admin.css — without this the input balloons to ~130px tall
+                // and the placeholder sticks to the top.
+                minHeight: 20, height: 20, maxHeight: 110, boxSizing: 'border-box',
+                display: 'block',
               }}
             />
-            <button
-              type="button"
-              className="msg-send-btn"
-              onClick={() => { if (messageInput.trim()) { sendMessage(activeConversation, messageInput); setMessageInput(''); } }}
-              disabled={!messageInput.trim()}
-              aria-label="Send"
-              style={{
-                width: 36, height: 36, flexShrink: 0,
-                display: 'flex', alignItems: 'center', justifyContent: 'center',
-                borderRadius: '50%', border: 'none',
-                background: messageInput.trim() ? accentFill : '#CBD5E1',
-                color: '#fff',
-                cursor: messageInput.trim() ? 'pointer' : 'not-allowed',
-                boxShadow: messageInput.trim() ? `0 4px 12px ${brandPalette.primary}59` : 'none',
-              }}
-            >
-              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><path d="M22 2 11 13"/><path d="M22 2 15 22l-4-9-9-4z"/></svg>
-            </button>
           </div>
+          <button
+            type="button"
+            className="msg-send-btn"
+            onClick={() => { if (messageInput.trim()) { sendMessage(activeConversation, messageInput); setMessageInput(''); } }}
+            disabled={!messageInput.trim()}
+            aria-label="Send"
+            style={{
+              width: 44, height: 44, flexShrink: 0,
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              borderRadius: '50%', border: 'none',
+              background: messageInput.trim() ? accentFill : '#E2E8F0',
+              color: messageInput.trim() ? '#fff' : '#94A3B8',
+              cursor: messageInput.trim() ? 'pointer' : 'not-allowed',
+              boxShadow: messageInput.trim() ? `0 6px 16px ${brandPalette.primary}45` : 'none',
+            }}
+          >
+            <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><path d="M22 2 11 13"/><path d="M22 2 15 22l-4-9-9-4z"/></svg>
+          </button>
         </div>
       </div>
     ) : (
@@ -3443,7 +4195,6 @@ export default function EmployeePage() {
           const metrics = getGoalPlanMetrics(reportGoals, reportEffectiveConfig, getGoalAccessMode(reportEffectiveConfig));
           const statusMeta = getSubmissionStatusMeta(submission);
           const normalizedCode = normalizeCode(reportCode);
-          const reminderState = getReminderState(reportCode);
           const canReview = bucket === 'pending' || bucket === 'approved' || bucket === 'sent-back';
           const expanded = canReview && expandedReviewCode === normalizedCode;
           const isFocused = focusApprovalCode === normalizedCode;
@@ -3472,28 +4223,6 @@ export default function EmployeePage() {
 	                  <div style={{ padding: '5px 10px', borderRadius: 999, background: statusMeta.bg, border: `1px solid ${statusMeta.border}`, color: statusMeta.color, fontSize: 12, fontWeight: 800 }}>
 	                    {statusMeta.label}
 	                  </div>
-	                  {bucket === 'not-submitted' && (
-	                    <button
-	                      type="button"
-	                      onClick={(e) => { e.stopPropagation(); sendReminder(report); }}
-	                      disabled={reminderState.blocked}
-	                      title={reminderState.blocked ? `Reminder available in ${reminderState.label}` : 'Send reminder'}
-	                      style={{ padding: '5px 10px', borderRadius: 999, border: '1px solid #BFDBFE', background: reminderState.blocked ? '#F8FAFC' : '#EFF6FF', color: reminderState.blocked ? '#94A3B8' : '#2563EB', cursor: reminderState.blocked ? 'not-allowed' : 'pointer', fontFamily: 'inherit', fontSize: 12, fontWeight: 800 }}
-	                    >
-	                      {reminderState.blocked ? 'Reminder sent' : 'Send reminder'}
-	                    </button>
-	                  )}
-	                  {bucket === 'sent-back' && (
-	                    <button
-	                      type="button"
-	                      onClick={(e) => { e.stopPropagation(); sendReminder(report); }}
-	                      disabled={reminderState.blocked}
-	                      title={reminderState.blocked ? `Reminder available in ${reminderState.label}` : 'Send reminder'}
-	                      style={{ padding: '5px 10px', borderRadius: 999, border: '1px solid #FECACA', background: reminderState.blocked ? '#F8FAFC' : '#FEF2F2', color: reminderState.blocked ? '#94A3B8' : '#DC2626', cursor: reminderState.blocked ? 'not-allowed' : 'pointer', fontFamily: 'inherit', fontSize: 12, fontWeight: 800 }}
-	                    >
-	                      {reminderState.blocked ? 'Reminder sent' : 'Send reminder'}
-	                    </button>
-	                  )}
 	                </div>
 	              </div>
 	              <div style={{ display: 'grid', gridTemplateColumns: '76px minmax(180px,1fr) auto', gap: 12, alignItems: 'center' }}>
@@ -3589,8 +4318,8 @@ export default function EmployeePage() {
           </div>
         )}
 
-        {(submission.goals || []).map((goal) => {
-          const color = getPerspectiveColor(goal, perspectives);
+        {(submission.goals || []).map((goal, goalIndex) => {
+          const color = getPerspectiveColor(goal, activePerspectives, goalIndex);
           const locked = goal.reviewStatus === 'approved';
           const broken = !isGoalStructurallyValid(goal, reviewEffectiveConfig);
           const pick = picks[goal.id];
@@ -3607,7 +4336,7 @@ export default function EmployeePage() {
             }}>
               <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap', marginBottom: 10 }}>
                 <div style={{ minWidth: 0, flex: 1 }}>
-                  {goal.perspName && goal.perspName !== 'All KRAs' && (
+                  {!isFlatFramework && goal.perspName && goal.perspName !== 'All KRAs' && (
                     <div style={{ fontSize: 11, fontWeight: 700, color, textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 4 }}>{goal.perspName}</div>
                   )}
                   <div style={{ fontSize: 14.5, fontWeight: 700, color: '#0D1117' }}>{goal.name || <span style={{ color: '#94A3B8', fontStyle: 'italic' }}>Untitled goal</span>}</div>
@@ -3979,15 +4708,15 @@ export default function EmployeePage() {
           </div>
         </div>
 
-        {myGoals.map((goal) => {
-          const color = getPerspectiveColor(goal, perspectives);
+        {myGoals.map((goal, goalIndex) => {
+          const color = getPerspectiveColor(goal, activePerspectives, goalIndex);
           const goalHasKpis = (goal.kpis || []).length > 0;
           const goalRatedAtKraLevel = effectiveConfig?.kpiRatingMode === 'free-text' || !goalHasKpis;
           return (
             <div key={goal.id} style={{ background: '#fff', border: '1.5px solid #E9EDF2', borderRadius: 12, marginBottom: 14, overflow: 'hidden' }}>
               <div style={{ padding: '13px 18px', borderLeft: `4px solid ${color}`, display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
                 <div style={{ flex: 1, minWidth: 180 }}>
-                  {goal.perspName && goal.perspName !== 'All KRAs' ? <div style={{ fontSize: 10.5, fontWeight: 700, color, textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 3 }}>{goal.perspName}</div> : null}
+                  {!isFlatFramework && goal.perspName && goal.perspName !== 'All KRAs' ? <div style={{ fontSize: 10.5, fontWeight: 700, color, textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 3 }}>{goal.perspName}</div> : null}
                   <div style={{ fontSize: 14, fontWeight: 700, color: '#0D1117' }}>{goal.name}</div>
                 </div>
                 <span style={{ fontSize: 12, fontWeight: 700, color, background: `${color}14`, padding: '3px 10px', borderRadius: 6 }}>Weight: {goal.weight}%</span>
@@ -4194,7 +4923,7 @@ export default function EmployeePage() {
     };
 
     let rightPanel = null;
-    if (section === 'goals' && !isExternalManager) {
+    if (section === 'goals' && canSetOwnGoals) {
       if (currentPhase === 'self-evaluation') {
         const pct = selfEvalPct;
         const tone = '#FFFFFF';
@@ -4321,12 +5050,14 @@ export default function EmployeePage() {
             <span style={{ fontSize: 20 }}>👋</span>
           </div>
           <div style={{ fontSize: 15, marginTop: 10, color: 'rgba(255,255,255,0.92)' }}>
-            {isExternalManager
-              ? `You manage ${directReports.length} team member${directReports.length !== 1 ? 's' : ''} on this cycle.`
+            {!canSetOwnGoals
+              ? (directReports.length > 0
+                ? `You manage ${directReports.length} team member${directReports.length !== 1 ? 's' : ''} on this cycle.`
+                : 'Welcome to your dashboard.')
               : (myGoals.length > 0
                 ? `You have ${myGoals.length} active goal${myGoals.length !== 1 ? 's' : ''} this cycle.`
                 : 'Start setting your goals for this cycle.')}
-            {!isExternalManager && totalGoalsWithIssues > 0 && <span style={{ marginLeft: 8, fontWeight: 700, background: 'rgba(220,38,38,0.92)', padding: '2px 9px', borderRadius: 999, fontSize: 11.5 }}>{totalGoalsWithIssues} need attention</span>}
+            {canSetOwnGoals && totalGoalsWithIssues > 0 && <span style={{ marginLeft: 8, fontWeight: 700, background: 'rgba(220,38,38,0.92)', padding: '2px 9px', borderRadius: 999, fontSize: 11.5 }}>{totalGoalsWithIssues} need attention</span>}
           </div>
           {!isExternalManager && (
             <div style={{ fontSize: 13, color: 'rgba(255,255,255,0.76)', display: 'flex', gap: 10, flexWrap: 'wrap', marginTop: 12 }}>
@@ -4343,7 +5074,7 @@ export default function EmployeePage() {
 
   // ── Top-level tabs (replace the old sidebar nav) ─────────────────────────────
   const tabs = [];
-  if (!isExternalManager) {
+  if (!isExternalManager && canSetOwnGoals) {
     tabs.push({
       id: 'goals',
       label: currentPhase === 'self-evaluation' ? 'Self-Eval' : 'My Goals',
@@ -4356,6 +5087,10 @@ export default function EmployeePage() {
 	      label: 'My Team Goals',
 	      count: directReports.length,
 	    });
+	    tabs.push({
+	      id: 'send-mail',
+	      label: 'Reminders',
+	    });
   }
   tabs.push({
     id: 'messages',
@@ -4364,17 +5099,9 @@ export default function EmployeePage() {
   });
 
   // Primary CTA per tab — rendered on the right side of the tab row.
-  const reminderPool = directReports.filter((r) => {
-    const sub = workflow?.submissions?.[normalizeCode(r['Employee Code'])];
-    const canRemind = !sub || sub.status === 'draft' || sub.status === 'sent-back';
-    return canRemind && !getReminderState(r['Employee Code']).blocked;
-  });
   const tabCTA = (() => {
     if (activeSection === 'goals' && canAddKra) {
       return { label: '+ Create Goal', onClick: addGoalAndEdit, primary: true };
-    }
-    if (activeSection === 'team' && reminderPool.length > 0) {
-      return { label: `Send reminder to all (${reminderPool.length})`, onClick: () => reminderPool.forEach((r) => sendReminder(r)), primary: true };
     }
     return null;
   })();
@@ -4668,10 +5395,88 @@ export default function EmployeePage() {
               : <EmptyState title={`${PHASES[phaseIndex]?.label || 'Current phase'} in progress`} subtitle="This page will unlock the relevant workflow for the active appraisal phase." />
           )}
           {activeSection === 'team' && renderTeam()}
+          {activeSection === 'send-mail' && renderSendMail()}
           {activeSection === 'messages' && renderMessages()}
           {activeSection === 'profile' && renderProfile()}
         </div>
       </div>
+      {reminderToast && (
+        <div style={{
+          position: 'fixed', bottom: 24, right: 24, zIndex: 1100,
+          background: reminderToast.tone === 'warn' ? '#FFFBEB' : '#F0FDF4',
+          border: `1px solid ${reminderToast.tone === 'warn' ? '#FDE68A' : '#BBF7D0'}`,
+          color: reminderToast.tone === 'warn' ? '#92400E' : '#166534',
+          padding: '10px 14px', borderRadius: 10, fontSize: 12.5, fontWeight: 700,
+          boxShadow: '0 12px 32px rgba(15,23,42,.14)', maxWidth: 360,
+        }}>
+          {reminderToast.text}
+        </div>
+      )}
+      {reminderComposer && createPortal((
+        <div onClick={closeReminderComposer}
+          style={{ position: 'fixed', inset: 0, background: 'rgba(15,23,42,.45)', zIndex: 1200, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24 }}>
+          <div onClick={(e) => e.stopPropagation()}
+            style={{ background: '#fff', borderRadius: 14, width: '100%', maxWidth: 560, boxShadow: '0 30px 60px rgba(15,23,42,.25)', overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+            <div style={{ padding: '16px 20px', borderBottom: '1px solid #E2E8F0', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+              <div>
+                <div style={{ fontSize: 14.5, fontWeight: 800, color: '#0F172A' }}>Send reminder</div>
+                <div style={{ fontSize: 12, color: '#64748B', marginTop: 2 }}>
+                  To {String(reminderComposer.target['Employee Name'] || reminderComposer.target['Employee Code'] || 'employee')}
+                  {(reminderComposer.target['Email ID'] || reminderComposer.target.Email) ? ` · ${reminderComposer.target['Email ID'] || reminderComposer.target.Email}` : ' · no email on file'}
+                </div>
+              </div>
+              <button type="button" onClick={closeReminderComposer} disabled={reminderSending}
+                style={{ background: 'transparent', border: 'none', color: '#64748B', fontSize: 18, cursor: reminderSending ? 'not-allowed' : 'pointer', padding: 4 }}>×</button>
+            </div>
+            <div style={{ padding: '14px 20px', display: 'flex', flexDirection: 'column', gap: 12 }}>
+              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                {MANAGER_REMINDER_TEMPLATES.map((tpl) => {
+                  const active = reminderComposer.templateId === tpl.id;
+                  return (
+                    <button key={tpl.id} type="button" onClick={() => pickReminderTemplate(tpl.id)}
+                      style={{
+                        border: `1px solid ${active ? '#2563EB' : '#E2E8F0'}`,
+                        background: active ? '#EFF6FF' : '#fff',
+                        color: active ? '#1D4ED8' : '#475569',
+                        borderRadius: 999, padding: '5px 12px', fontSize: 11.5, fontWeight: 700,
+                        cursor: 'pointer', fontFamily: 'inherit',
+                      }}>{tpl.label}</button>
+                  );
+                })}
+              </div>
+              <div>
+                <label style={{ fontSize: 11, fontWeight: 700, color: '#64748B', display: 'block', marginBottom: 4, textTransform: 'uppercase', letterSpacing: '.05em' }}>Subject</label>
+                <input value={reminderComposer.subject}
+                  onChange={(e) => setReminderComposer((prev) => prev ? { ...prev, subject: e.target.value } : prev)}
+                  style={{ width: '100%', border: '1px solid #E2E8F0', borderRadius: 8, padding: '8px 10px', fontSize: 13, fontFamily: 'inherit', outline: 'none', background: '#fff' }}
+                  placeholder="Subject line" />
+              </div>
+              <div>
+                <label style={{ fontSize: 11, fontWeight: 700, color: '#64748B', display: 'block', marginBottom: 4, textTransform: 'uppercase', letterSpacing: '.05em' }}>Message</label>
+                <textarea value={reminderComposer.body}
+                  onChange={(e) => setReminderComposer((prev) => prev ? { ...prev, body: e.target.value } : prev)}
+                  rows={9}
+                  style={{ width: '100%', border: '1px solid #E2E8F0', borderRadius: 8, padding: '8px 10px', fontSize: 13, fontFamily: 'inherit', outline: 'none', background: '#fff', resize: 'vertical' }}
+                  placeholder="Message body" />
+                <div style={{ fontSize: 10.5, color: '#94A3B8', marginTop: 4 }}>
+                  Tokens you can use: {'{employee_name}'}, {'{manager_name}'}, {'{login_url}'}, {'{organization_name}'}
+                </div>
+              </div>
+              {reminderError && (
+                <div style={{ background: '#FEF2F2', border: '1px solid #FECACA', color: '#991B1B', borderRadius: 8, padding: '8px 10px', fontSize: 12, fontWeight: 600 }}>
+                  {reminderError}
+                </div>
+              )}
+            </div>
+            <div style={{ padding: '12px 20px', borderTop: '1px solid #E2E8F0', display: 'flex', justifyContent: 'flex-end', gap: 8, background: '#F8FAFC' }}>
+              <button type="button" onClick={closeReminderComposer} disabled={reminderSending}
+                style={{ border: '1px solid #E2E8F0', background: '#fff', color: '#475569', borderRadius: 8, padding: '7px 14px', fontSize: 12.5, fontWeight: 700, cursor: reminderSending ? 'not-allowed' : 'pointer', fontFamily: 'inherit' }}>Cancel</button>
+              <button type="button" onClick={commitReminder} disabled={reminderSending}
+                style={{ border: 'none', background: reminderSending ? '#93C5FD' : '#2563EB', color: '#fff', borderRadius: 8, padding: '7px 14px', fontSize: 12.5, fontWeight: 800, cursor: reminderSending ? 'not-allowed' : 'pointer', fontFamily: 'inherit' }}>{reminderSending ? 'Sending…' : 'Send'}</button>
+            </div>
+          </div>
+        </div>
+      ), document.body)}
     </div>
   );
 }

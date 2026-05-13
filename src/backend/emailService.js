@@ -3,6 +3,7 @@ import { readAuthSessionSync } from './stateStore';
 import {
   renderThemedEmailHtml,
   renderThemedEmailText,
+  renderPlainEmailHtml,
   resolveTokens,
 } from './emailRenderer';
 
@@ -388,13 +389,17 @@ function escapeHtml(value) {
 // Custom broadcast — used by the Communications page Send button. Renders the
 // chosen template (subject + body + theme) per recipient, resolving employee
 // tokens, and delegates to the Edge Function with htmlOverride.
-export async function sendCustomBroadcast({ org, recipients = [], theme, template, tokensFor } = {}) {
+// `plain: true` switches to a no-chrome renderer (no header banner, no logo,
+// no CTA button, no footer) so manager-to-report reminders read like normal
+// person-to-person email instead of branded marketing chrome.
+export async function sendCustomBroadcast({ org, recipients = [], theme, template, tokensFor, plain = false } = {}) {
   if (!org?.key) return { ok: false, error: 'Organization key is missing.' };
-  if (!theme || !template) return { ok: false, error: 'Theme and template are required.' };
+  if (!plain && (!theme || !template)) return { ok: false, error: 'Theme and template are required.' };
+  if (plain && !template) return { ok: false, error: 'Template is required.' };
   if (!template.subject || !template.body) return { ok: false, error: 'Subject and body are required.' };
 
   const temporaryPassword = String(org?.temporaryPassword || '');
-  const effectiveTheme = getOrgBrandedTheme(org, theme);
+  const effectiveTheme = plain ? null : getOrgBrandedTheme(org, theme);
 
   const messages = (Array.isArray(recipients) ? recipients : [])
     .map((rcpt) => {
@@ -417,20 +422,36 @@ export async function sendCustomBroadcast({ org, recipients = [], theme, templat
       };
       const extra = typeof tokensFor === 'function' ? (tokensFor(rcpt) || {}) : {};
       const tokens = { ...baseTokens, ...extra };
+      const html = plain
+        ? renderPlainEmailHtml({
+            subject: template.subject,
+            body: template.body,
+            tokens,
+            // Footer carries ONLY the org name. The manager's name already
+            // appears in the body signature ("Thanks, {manager_name}"); we
+            // don't want to repeat it under the divider as well.
+            signature: org?.name || '',
+            // CTA button picks up the org's brand primary so the button color
+            // matches the rest of the app subtly. Falls back to renderer's
+            // default indigo if the org hasn't configured a palette.
+            accent: (org?.brandPalette && typeof org.brandPalette === 'object'
+              && (org.brandPalette.primary || org.brandPalette.brand || org.brandPalette.accent)) || undefined,
+          })
+        : renderThemedEmailHtml({
+            theme: effectiveTheme,
+            subject: template.subject,
+            body: template.body,
+            orgName: org?.name || '',
+            tokens,
+            loginUrl,
+          });
       return {
         type: 'custom-broadcast',
         recipientEmail,
         recipientCode: employeeCode || null,
         payload: { organizationName: org?.name || 'Your organization' },
         subjectOverride: resolveTokens(template.subject, tokens),
-        htmlOverride: renderThemedEmailHtml({
-          theme: effectiveTheme,
-          subject: template.subject,
-          body: template.body,
-          orgName: org?.name || '',
-          tokens,
-          loginUrl,
-        }),
+        htmlOverride: html,
         textOverride: renderThemedEmailText({
           subject: template.subject,
           body: template.body,

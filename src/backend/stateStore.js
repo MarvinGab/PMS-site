@@ -580,8 +580,16 @@ function writeLocalJson(key, value, { session = false, emit = false } = {}) {
   if (typeof window === 'undefined') return;
   try {
     const raw = JSON.stringify(value);
-    if (session) window.sessionStorage.setItem(key, raw);
-    else window.localStorage.setItem(key, raw);
+    const store = session ? window.sessionStorage : window.localStorage;
+    // Dedupe: if the serialised value is byte-identical to what's already
+    // in storage, skip both the write AND the synthetic storage event.
+    // Without this guard, every emit-enabled write triggers a same-tab
+    // listener that calls setState with a fresh object reference, which
+    // re-renders, which re-saves, which re-emits — an infinite cycle that
+    // burns a frame on every iteration and can starve user interactions
+    // (e.g. add/delete/drag actions appear to do nothing or stutter).
+    if (store.getItem(key) === raw) return;
+    store.setItem(key, raw);
     if (emit) {
       window.dispatchEvent(new StorageEvent('storage', { key, newValue: raw }));
     }

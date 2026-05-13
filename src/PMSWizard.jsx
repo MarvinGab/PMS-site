@@ -65,11 +65,11 @@ function getNavSteps(config) {
 const FRAMEWORKS = [
   { id: 'bsc',     name: 'BSC — Balanced Scorecard',       desc: 'Perspectives → KRAs → KPIs. Strategy-driven. Rating weighted across perspectives.', tags: ['BFSI', 'PSU', 'Manufacturing', 'Pharma'], color: '#2563EB',
     flow: ['Perspectives', 'KRAs', 'KPIs', 'Targets', 'Rating'] },
-  { id: 'kra-kpi', name: 'KRA → KPI (flat)',               desc: 'No perspectives. KRAs directly hold KPIs. Simple and widely adopted.', tags: ['IT/Software', 'Startups', 'Retail'],      color: '#16A34A',
+  { id: 'kra-kpi', name: 'KRA → KPI (flat)',               desc: 'No perspectives. KRAs directly hold KPIs. Simple and widely adopted.', tags: ['IT/Software', 'Startups', 'Retail'],      color: '#7C3AED',
     flow: ['KRAs', 'KPIs', 'Targets', 'Rating'] },
-  { id: 'kra',     name: 'KRA only (no KPI)',              desc: 'KRAs rated directly by manager. No sub-KPIs. Fast, qualitative approach.', tags: ['SMBs', 'NGOs', 'Education'],              color: '#D97706',
+  { id: 'kra',     name: 'KRA only (no KPI)',              desc: 'KRAs rated directly by manager. No sub-KPIs. Fast, qualitative approach.', tags: ['SMBs', 'NGOs', 'Education'],              color: '#F59E0B',
     flow: ['KRAs', 'Weightage', 'Direct Rating'] },
-  { id: 'custom',  name: 'Custom Hybrid',                  desc: 'Mix any structure — e.g. BSC perspectives + KRAs only, or KRA + competencies only.', tags: ['Advanced', 'Enterprise'], color: '#DC2626',
+  { id: 'custom',  name: 'Custom Hybrid',                  desc: 'Mix any structure — e.g. BSC perspectives + KRAs only, or KRA + competencies only.', tags: ['Advanced', 'Enterprise'], color: '#C026D3',
     flow: ['Custom Mix', 'Configure Each Layer'] },
 ];
 
@@ -378,6 +378,21 @@ function attachGoalLibraryToEmployees(employeeResult, config) {
     );
 
     const employees = sourceEmployees.map((employee, index) => {
+      // Outside-PMS rows (Group Name = "NONE") intentionally don't map to any
+      // configured goal group or library — they live in the roster only as
+      // reporting-manager references. Short-circuit so they neither produce
+      // "unmatched group" warnings nor count against the mapping denominator.
+      if (employee?._outsidePms) {
+        return {
+          ...employee,
+          assignedGoalGroupName: null,
+          assignedGoalGroupAttr: null,
+          assignedGoalGroupValue: null,
+          assignedGoalLibraryKey: null,
+          assignedGoalLibraryName: null,
+          assignedGoalLibraryCount: 0,
+        };
+      }
       const groupMatch = getGoalGroupMatchForEmployee(employee, config);
       const libraryMatch = getAssignedLibraryForGroup(employee, groupMatch.group, config);
 
@@ -416,6 +431,9 @@ function attachGoalLibraryToEmployees(employeeResult, config) {
       };
     });
 
+    // Mapping totals are over PMS-tracked rows only; outside-PMS rows are not
+    // expected to map and would otherwise dilute the "20/25" coverage display.
+    const pmsTrackedCount = employees.filter(employee => !employee?._outsidePms).length;
     const assignedGroupCount = employees.filter(employee => !!employee.assignedGoalGroupName).length;
     const assignedLibraryCount = employees.filter(employee => !!employee.assignedGoalLibraryName).length;
     const missingGoalGroupNames = goalGroups
@@ -438,9 +456,11 @@ function attachGoalLibraryToEmployees(employeeResult, config) {
       groupLinked: true,
       libraryLinked: hasGroupLibraries,
       assignedGroupCount,
-      unassignedGroupCount: totalEmployees - assignedGroupCount,
+      // Denominator for the "20/25 mapped" display uses PMS-tracked rows only.
+      pmsTrackedCount,
+      unassignedGroupCount: pmsTrackedCount - assignedGroupCount,
       assignedCount: assignedLibraryCount,
-      unassignedCount: totalEmployees - assignedLibraryCount,
+      unassignedCount: pmsTrackedCount - assignedLibraryCount,
       goalRoutingColumns: routingColumns.map(column => column.label),
       missingGoalGroupNames,
       deferredGoalGroupNames,
@@ -477,17 +497,24 @@ function attachGoalLibraryToEmployees(employeeResult, config) {
 
 function getEmployeeUploadMessage(result) {
   const count = result?.count ?? result?.employees?.length ?? 0;
+  // Outside-PMS rows (Group Name = "NONE") are not expected to map to a group
+  // or library, so the mapping denominator counts only PMS-tracked rows.
+  const mapDenom = result?.pmsTrackedCount ?? count;
+  const outsidePmsCount = Math.max(0, count - mapDenom);
+  const outsideSuffix = outsidePmsCount > 0
+    ? ` (${outsidePmsCount} NONE row${outsidePmsCount !== 1 ? 's' : ''} excluded from mapping)`
+    : '';
   const base = `${count} employee${count !== 1 ? 's' : ''} found in the file.`;
   const deferredSuffix = result?.deferredGoalGroupNames?.length
     ? ` Deferred groups: ${result.deferredGoalGroupNames.join(', ')}.`
     : '';
 
   if (result?.groupLinked && result?.libraryLinked) {
-    return `${base} Group mapping: ${result.assignedGroupCount || 0}/${count}. Library mapping: ${result.assignedCount || 0}/${count}.${deferredSuffix}`;
+    return `${base} Group mapping: ${result.assignedGroupCount || 0}/${mapDenom}. Library mapping: ${result.assignedCount || 0}/${mapDenom}.${outsideSuffix}${deferredSuffix}`;
   }
 
   if (result?.groupLinked) {
-    return `${base} Group mapping: ${result.assignedGroupCount || 0}/${count}.${deferredSuffix}`;
+    return `${base} Group mapping: ${result.assignedGroupCount || 0}/${mapDenom}.${outsideSuffix}${deferredSuffix}`;
   }
 
   if (!result?.libraryLinked) return `${base}${deferredSuffix}`;
@@ -3379,10 +3406,10 @@ function getGroupResult(group) {
   const edit    = group.canEditOwn !== false;
   const lib     = !!group.hasLibrary;
   if (!prefill && !edit) return null;
-  if (!prefill && edit && !lib)  return { title: 'Open Canvas',            desc: 'Employees start from a blank page and build their own KRAs and KPIs freely within each perspective.', chips: ['✏️ Edit Own'],                              color: '#16A34A', bg: '#F0FDF4', border: '#86EFAC' };
+  if (!prefill && edit && !lib)  return { title: 'Open Canvas',            desc: 'Employees start from a blank page and build their own KRAs and KPIs freely within each perspective.', chips: ['✏️ Edit Own'],                              color: '#7C3AED', bg: '#F5F3FF', border: '#C4B5FD' };
   if (!prefill && edit &&  lib)  return { title: 'Guided Scratch',          desc: 'Employees build freely from scratch with a curated goal library available as reference and inspiration.', chips: ['✏️ Edit Own', '📚 Library'],                color: '#2563EB', bg: '#EFF6FF', border: '#93C5FD' };
-  if (prefill === 'kra-kpi' && !edit && !lib) return { title: 'Fully Locked Prefill', desc: 'Admin pre-assigns the complete KRA + KPI structure. Employees view their goals — no edits allowed.', chips: ['📋 Prefill (KRA+KPI)', '🔒 Locked'],   color: '#DC2626', bg: '#FEF2F2', border: '#FCA5A5' };
-  if (prefill === 'kra-only' && !edit && !lib) return { title: 'Prefill — KRAs Locked', desc: 'KRAs are pre-assigned. Employees create their own KPIs under each locked KRA.', chips: ['📋 Prefill (KRAs only)', '🔒 KRAs locked'],             color: '#D97706', bg: '#FFFBEB', border: '#FCD34D' };
+  if (prefill === 'kra-kpi' && !edit && !lib) return { title: 'Fully Locked Prefill', desc: 'Admin pre-assigns the complete KRA + KPI structure. Employees view their goals — no edits allowed.', chips: ['📋 Prefill (KRA+KPI)', '🔒 Locked'],   color: '#C026D3', bg: '#FDF4FF', border: '#F5D0FE' };
+  if (prefill === 'kra-only' && !edit && !lib) return { title: 'Prefill — KRAs Locked', desc: 'KRAs are pre-assigned. Employees create their own KPIs under each locked KRA.', chips: ['📋 Prefill (KRAs only)', '🔒 KRAs locked'],             color: '#F59E0B', bg: '#FFFBEB', border: '#FCD34D' };
   if (prefill === 'kra-only' && !edit &&  lib) return { title: 'Locked Prefill + Library', desc: 'KRAs are locked by admin. Employees pull KPIs from the goal library to complete their goals.', chips: ['📋 Prefill (KRAs only)', '🔒 Locked', '📚 Library'], color: '#7C3AED', bg: '#F5F3FF', border: '#C4B5FD' };
   if (prefill && edit && !lib) return { title: 'Partial Prefill + Edit',   desc: 'Admin sets the foundation. Employees can adjust pre-filled goals and add their own on top.', chips: ['📋 Prefill', '✏️ Edit Own'],                         color: '#0891B2', bg: '#ECFEFF', border: '#67E8F9' };
   if (prefill && edit &&  lib) return { title: 'Full Flexibility',          desc: 'Admin sets a foundation. Employees can edit, add their own goals, and browse the library for inspiration.', chips: ['📋 Prefill', '✏️ Edit Own', '📚 Library'], color: '#2563EB', bg: '#EFF6FF', border: '#93C5FD' };
@@ -5407,7 +5434,12 @@ function StepSummary({ config, onLaunched }) {
   const missingGoalGroupNames = config.employeeUploadData?.missingGoalGroupNames || [];
   const deferredGoalGroupNames = normalizeDeferredGoalGroups(config.deferredGoalGroupNames || []);
   const employeeWarnings = config.employeeUploadData?.validationWarnings || [];
-  const perspectives = (config.perspectives || []).filter(p => p.name && p.weight);
+  // Perspectives only apply to BSC. Flat (kra-kpi) configs can still carry
+  // perspective data left over from an earlier BSC selection — exclude it
+  // from the summary so HR isn't shown weights that don't actually score.
+  const perspectives = config.frameworkId === 'bsc'
+    ? (config.perspectives || []).filter(p => p.name && p.weight)
+    : [];
   const fw = FRAMEWORKS.find(f => f.id === config.frameworkId);
   const employeeCodeSet = new Set(
     employees.map((employee) => String(employee['Employee Code'] || '').trim().toLowerCase()).filter(Boolean)
@@ -5619,6 +5651,53 @@ function StepSummary({ config, onLaunched }) {
               </div>
             );
           })}
+          {(() => {
+            const outsideRows = employees.filter((emp) => emp?._outsidePms);
+            if (outsideRows.length === 0) return null;
+            const isExpanded = expandedGroupIds.includes('__none__');
+            return (
+              <div style={{ padding: '10px 14px', background: '#FFFFFF', borderRadius: 10, border: '1px solid #E4ECF4', boxShadow: '0 6px 14px rgba(15,23,42,.03)' }}>
+                <button
+                  type="button"
+                  onClick={() => toggleGroupDetails('__none__')}
+                  aria-label={isExpanded ? 'Collapse NONE' : 'Expand NONE'}
+                  style={{
+                    width: '100%',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    gap: 10,
+                    marginBottom: isExpanded ? 10 : 0,
+                    background: 'none',
+                    border: 'none',
+                    padding: 0,
+                    cursor: 'pointer',
+                    textAlign: 'left',
+                    fontFamily: 'inherit',
+                  }}
+                >
+                  <div style={{ fontSize: 13, fontWeight: 700, color: '#1E293B' }}>NONE</div>
+                  <div style={{ fontSize: 11.5, fontWeight: 700, color: '#2563EB', background: '#EFF6FF', border: '1px solid #BFDBFE', borderRadius: 999, padding: '3px 9px' }}>
+                    {outsideRows.length}
+                  </div>
+                </button>
+                {isExpanded && (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                    {outsideRows.map((emp) => {
+                      const empCode = String(emp['Employee Code'] || '').trim();
+                      const empName = String(emp['Employee Name'] || '').trim() || empCode || '—';
+                      return (
+                        <div key={empCode || empName} style={{ padding: '8px 10px', borderRadius: 8, background: '#fff', border: '1px solid #E2E8F0', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
+                          <div style={{ fontSize: 12.5, fontWeight: 700, color: '#0F172A' }}>{empName}</div>
+                          <div style={{ fontSize: 11.5, fontWeight: 600, color: '#64748B' }}>{empCode || '—'}</div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            );
+          })()}
         </div>
       </div>
 
@@ -5641,7 +5720,7 @@ function StepSummary({ config, onLaunched }) {
 
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 10, marginBottom: 16 }}>
           {[
-            { label: 'Employees In PMS', value: employees.length, color: '#2563EB', bg: '#EFF6FF' },
+            { label: 'Employees In PMS', value: employees.filter((emp) => !emp?._outsidePms).length, color: '#2563EB', bg: '#EFF6FF' },
             { label: 'Groups In Rollout', value: `${coverageByGroup.filter((group) => group.members.length > 0).length}/${groups.length || 0}`, color: '#16A34A', bg: '#F0FDF4' },
             { label: 'Deferred Groups', value: deferredGoalGroupNames.length, color: '#D97706', bg: '#FFFBEB' },
           ].map((item) => (
@@ -7560,13 +7639,18 @@ function StepEmployeeUpload({ config, update, orgKey }) {
                       )}
                     </div>
                   )}
-                  {uploadState.status === 'done' && (uploadState.result?.groupLinked || uploadState.result?.libraryLinked) && (
-                    <div style={{ marginTop: 10, fontSize: 12, color: '#166534' }}>
-                      {uploadState.result.groupLinked ? `Group matches: ${uploadState.result.assignedGroupCount || 0}/${uploadState.result.count}. ` : ''}
-                      {uploadState.result.libraryLinked ? `Library matches: ${uploadState.result.assignedCount || 0}/${uploadState.result.count}. ` : ''}
-                      {routingColumns.length > 0 ? `Routing is based on ${routingLabelText}.` : 'Routing uses your current group setup.'}
-                    </div>
-                  )}
+                  {uploadState.status === 'done' && (uploadState.result?.groupLinked || uploadState.result?.libraryLinked) && (() => {
+                    // Mapping denominator excludes outside-PMS rows (Group Name = "NONE"),
+                    // which are never expected to land in a goal group or library.
+                    const mapDenom = uploadState.result?.pmsTrackedCount ?? uploadState.result.count;
+                    return (
+                      <div style={{ marginTop: 10, fontSize: 12, color: '#166534' }}>
+                        {uploadState.result.groupLinked ? `Group matches: ${uploadState.result.assignedGroupCount || 0}/${mapDenom}. ` : ''}
+                        {uploadState.result.libraryLinked ? `Library matches: ${uploadState.result.assignedCount || 0}/${mapDenom}. ` : ''}
+                        {routingColumns.length > 0 ? `Routing is based on ${routingLabelText}.` : 'Routing uses your current group setup.'}
+                      </div>
+                    );
+                  })()}
                 </div>
               )}
 
@@ -9939,13 +10023,17 @@ function OrgNodeChildren({ kids, depth, gid, expanded, expandedOrgNodeIds, toggl
   );
 }
 
+// Red and green (and their near-neighbors lime / teal-green / dark-pink /
+// rose) are reserved for validation states (errors / approved). This palette
+// cycles through hues that are clearly far from both: blues, indigos,
+// violets, fuchsias, yellows, and oranges.
 const ORG_GROUP_PALETTE = [
   { dot: '#4F46E5', bg: '#EEF2FF', border: '#C7D2FE', text: '#3730A3', avatarFrom: '#4F46E5', avatarTo: '#7C3AED' },
   { dot: '#0891B2', bg: '#ECFEFF', border: '#A5F3FC', text: '#0E7490', avatarFrom: '#0891B2', avatarTo: '#0284C7' },
-  { dot: '#16A34A', bg: '#F0FDF4', border: '#BBF7D0', text: '#15803D', avatarFrom: '#16A34A', avatarTo: '#059669' },
-  { dot: '#D97706', bg: '#FFFBEB', border: '#FDE68A', text: '#92400E', avatarFrom: '#D97706', avatarTo: '#F59E0B' },
-  { dot: '#DC2626', bg: '#FEF2F2', border: '#FECACA', text: '#991B1B', avatarFrom: '#DC2626', avatarTo: '#E11D48' },
   { dot: '#7C3AED', bg: '#F5F3FF', border: '#DDD6FE', text: '#5B21B6', avatarFrom: '#7C3AED', avatarTo: '#A855F7' },
+  { dot: '#C026D3', bg: '#FDF4FF', border: '#F5D0FE', text: '#86198F', avatarFrom: '#C026D3', avatarTo: '#D946EF' },
+  { dot: '#F59E0B', bg: '#FFFBEB', border: '#FDE68A', text: '#92400E', avatarFrom: '#F59E0B', avatarTo: '#F97316' },
+  { dot: '#6366F1', bg: '#EEF2FF', border: '#C7D2FE', text: '#3730A3', avatarFrom: '#6366F1', avatarTo: '#818CF8' },
 ];
 
 function LegacyOrgChartPanel({ employees, groups }) {
@@ -10376,6 +10464,11 @@ function orgMapCardMeta(emp, group) {
 
 function buildOrgMapGroups(employees, groups) {
   const allEmployees = Array.isArray(employees) ? employees : [];
+  // PMS-tracked employees are the only rows that belong inside a group bucket;
+  // outside-PMS rows live in byCode so they can still be resolved as a
+  // reporting manager (they surface as a cross/external root for their
+  // reports rather than as a group member).
+  const pmsEmployees = allEmployees.filter((emp) => !emp?._outsidePms);
   const byCode = new Map();
   allEmployees.forEach((emp) => {
     const code = orgMapCode(emp).toLowerCase();
@@ -10391,10 +10484,10 @@ function buildOrgMapGroups(employees, groups) {
       id: group?.id || lower || String(gi),
       name,
       pal: ORG_GROUP_PALETTE[gi % ORG_GROUP_PALETTE.length],
-      members: allEmployees.filter((emp) => orgMapGroup(emp).toLowerCase() === lower),
+      members: pmsEmployees.filter((emp) => orgMapGroup(emp).toLowerCase() === lower),
     };
   });
-  const unassigned = allEmployees.filter((emp) => {
+  const unassigned = pmsEmployees.filter((emp) => {
     const g = orgMapGroup(emp).toLowerCase();
     return !knownNames.has(g);
   });
@@ -10412,6 +10505,11 @@ function buildOrgMapGroups(employees, groups) {
     const reportsByManager = new Map();
     const externalManagers = new Map();
     const crossGroupManagers = new Map();
+    // Outside-PMS managers are roster rows flagged with Group Name = "NONE".
+    // They are NOT cross-group (they belong to no group at all) and NOT
+    // external (their record exists in the upload). They get their own bucket
+    // so the UI can label them distinctly from cross-group managers.
+    const outsidePmsManagers = new Map();
     let noManagerCount = 0;
 
     group.members.forEach((emp) => {
@@ -10428,7 +10526,9 @@ function buildOrgMapGroups(employees, groups) {
       if (!memberByCode.has(managerCode)) {
         const managerEmp = byCode.get(managerCode);
         const managerName = String(emp['Reporting Manager Name'] || '').trim();
-        if (managerEmp) {
+        if (managerEmp?._outsidePms) {
+          outsidePmsManagers.set(managerCode, managerEmp);
+        } else if (managerEmp) {
           crossGroupManagers.set(managerCode, managerEmp);
         } else {
           externalManagers.set(managerCode, {
@@ -10476,8 +10576,17 @@ function buildOrgMapGroups(employees, groups) {
       roots.push({ employee: { ...managerEmp, _crossGroupManager: true }, reports, reportCount: reports.length, crossGroupRoot: true });
     });
 
+    outsidePmsManagers.forEach((managerEmp, managerCode) => {
+      const reports = (reportsByManager.get(managerCode) || [])
+        .slice()
+        .sort((a, b) => orgMapName(a).localeCompare(orgMapName(b)))
+        .map((emp) => buildNode(emp, new Set([managerCode])));
+      roots.push({ employee: { ...managerEmp, _outsidePmsManager: true }, reports, reportCount: reports.length, outsidePmsRoot: true });
+    });
+
     roots.sort((a, b) => {
       if (a.externalRoot !== b.externalRoot) return a.externalRoot ? 1 : -1;
+      if (a.outsidePmsRoot !== b.outsidePmsRoot) return a.outsidePmsRoot ? 1 : -1;
       if (a.crossGroupRoot !== b.crossGroupRoot) return a.crossGroupRoot ? 1 : -1;
       return orgMapName(a.employee).localeCompare(orgMapName(b.employee));
     });
@@ -10488,6 +10597,7 @@ function buildOrgMapGroups(employees, groups) {
       noManagerCount,
       externalManagerCount: externalManagers.size,
       crossGroupCount: crossGroupManagers.size,
+      outsidePmsManagerCount: outsidePmsManagers.size,
     };
   }
 
@@ -10503,25 +10613,39 @@ function OrgMapCard({ node, selectedCode, onSelect, compact = false, viewMode = 
   // entry or a phased rollout. Card renders as a normal employee card.
   const isExternal = false;
   const isCross = !!emp._crossGroupManager || !!node.crossGroupRoot;
+  // Outside-PMS managers (Group Name = "NONE") sit in the roster only to be
+  // referenced as managers — they have no goal plan, stage, or completion %.
+  // Render them with their own muted chip and skip every goal-related row.
+  const isOutsidePms = !!emp._outsidePmsManager || !!node.outsidePmsRoot;
   const stage = orgMapStageMeta(emp);
   const goalPct = orgMapGoalPct(emp);
   const flags = orgMapFlags(emp);
   const meta = orgMapCardMeta(emp, group);
   const stats = node.reportCount > 0 ? orgMapNodeStats(node) : null;
-  const avatarBg = isExternal ? 'linear-gradient(135deg,#F97316,#C2410C)' : isCross ? 'linear-gradient(135deg,#7C3AED,#4F46E5)' : 'linear-gradient(135deg,#334155,#475569)';
-  const heatmapBg = viewMode === 'heatmap' && !isExternal && !isCross
+  const avatarBg = isOutsidePms ? 'linear-gradient(135deg,#94A3B8,#64748B)'
+    : isExternal ? 'linear-gradient(135deg,#F97316,#C2410C)'
+    : isCross ? 'linear-gradient(135deg,#7C3AED,#4F46E5)'
+    : 'linear-gradient(135deg,#334155,#475569)';
+  const heatmapBg = viewMode === 'heatmap' && !isExternal && !isCross && !isOutsidePms
     ? `linear-gradient(180deg, ${stage.bg}, #FFFFFF)`
-    : isExternal ? 'linear-gradient(180deg,#FFF7ED,#FFFFFF)' : 'rgba(255,255,255,.9)';
+    : isOutsidePms ? 'linear-gradient(180deg,#F8FAFC,#FFFFFF)'
+    : isExternal ? 'linear-gradient(180deg,#FFF7ED,#FFFFFF)'
+    : 'rgba(255,255,255,.9)';
+  const borderColor = selected ? '#2563EB'
+    : isOutsidePms ? '#CBD5E1'
+    : isExternal ? '#FDBA74'
+    : isCross ? '#DDD6FE'
+    : 'rgba(226,232,240,.78)';
 
   return (
     <button type="button" onClick={() => onSelect(emp)}
       style={{
-        width: '100%', border: `1px solid ${selected ? '#2563EB' : isExternal ? '#FDBA74' : isCross ? '#DDD6FE' : 'rgba(226,232,240,.78)'}`,
+        width: '100%', border: `1px solid ${borderColor}`,
         borderRadius: compact ? 14 : 20, background: selected ? '#EFF6FF' : heatmapBg,
         padding: compact ? '10px 11px' : '13px 14px', textAlign: 'left', cursor: 'pointer',
         fontFamily: 'inherit', boxShadow: selected ? '0 18px 38px rgba(37,99,235,.16)' : '0 16px 36px rgba(15,23,42,.06)', position: 'relative',
       }}>
-      {flags.attention && !isExternal && !isCross && (
+      {flags.attention && !isExternal && !isCross && !isOutsidePms && (
         <span title="Needs attention: overdue goals, overdue review, or PIP flag" style={{ position: 'absolute', top: 10, right: 10, width: 8, height: 8, borderRadius: '50%', background: '#DC2626', boxShadow: '0 0 0 3px #FEE2E2' }} />
       )}
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
@@ -10536,12 +10660,12 @@ function OrgMapCard({ node, selectedCode, onSelect, compact = false, viewMode = 
         </div>
       </div>
       <div style={{ marginTop: 9, paddingLeft: compact ? 40 : 48 }}>
-        {meta.attrValue && (
+        {meta.attrValue && !isOutsidePms && (
           <div style={{ fontSize: 11.2, color: '#475569', fontWeight: 700, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
             {meta.attrValue}
           </div>
         )}
-        {!isExternal && !isCross && (
+        {!isExternal && !isCross && !isOutsidePms && (
           <div style={{ marginTop: meta.roleLine || (meta.attrLabel && meta.attrValue) ? 8 : 0 }}>
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, fontSize: 10.8, color: '#64748B', fontWeight: 750 }}>
               <span>Goals</span>
@@ -10553,18 +10677,22 @@ function OrgMapCard({ node, selectedCode, onSelect, compact = false, viewMode = 
           </div>
         )}
       </div>
-      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 9, paddingLeft: compact ? 40 : 48 }}>
-        {isCross && <span style={{ fontSize: 10.5, fontWeight: 800, color: '#6D28D9', background: '#F5F3FF', border: '1px solid #DDD6FE', borderRadius: 999, padding: '2px 8px' }}>Cross-group</span>}
-        {!isCross && (
-          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 10.5, fontWeight: 800, color: stage.color, background: stage.bg, border: `1px solid ${stage.border}`, borderRadius: 999, padding: '2px 8px', whiteSpace: 'nowrap' }}>
-            <span style={{ width: 5, height: 5, borderRadius: '50%', background: stage.color }} />
-            {stage.label}
-          </span>
-        )}
-      </div>
+      {!isOutsidePms && (
+        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 9, paddingLeft: compact ? 40 : 48 }}>
+          {isCross && <span style={{ fontSize: 10.5, fontWeight: 800, color: '#6D28D9', background: '#F5F3FF', border: '1px solid #DDD6FE', borderRadius: 999, padding: '2px 8px' }}>Cross-group</span>}
+          {!isCross && (
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 10.5, fontWeight: 800, color: stage.color, background: stage.bg, border: `1px solid ${stage.border}`, borderRadius: 999, padding: '2px 8px', whiteSpace: 'nowrap' }}>
+              <span style={{ width: 5, height: 5, borderRadius: '50%', background: stage.color }} />
+              {stage.label}
+            </span>
+          )}
+        </div>
+      )}
       {stats && (
         <div style={{ marginTop: 9, paddingLeft: compact ? 40 : 48, fontSize: 10.8, color: '#475569', fontWeight: 750, lineHeight: 1.35 }}>
-          {stats.reports} {stats.reports === 1 ? 'report' : 'reports'} · {stats.goalsPending} {stats.goalsPending === 1 ? 'goal pending' : 'goals pending'} · avg {stats.avg}
+          {isOutsidePms
+            ? `${stats.reports} direct ${stats.reports === 1 ? 'report' : 'reports'} in this group`
+            : `${stats.reports} ${stats.reports === 1 ? 'report' : 'reports'} · ${stats.goalsPending} awaiting goal setup`}
         </div>
       )}
     </button>
@@ -10691,11 +10819,13 @@ export function OrgChartPanel({ employees, groups }) {
     const flags = orgMapFlags(emp);
     const stage = orgMapStageMeta(emp);
     const isCross = !!emp._crossGroupManager || !!node.crossGroupRoot;
-    const isRoot = !String(emp['Reporting Manager Code'] || '').trim() && !isCross;
+    const isOutsidePms = !!emp._outsidePmsManager || !!node.outsidePmsRoot;
+    const isRoot = !String(emp['Reporting Manager Code'] || '').trim() && !isCross && !isOutsidePms;
     const meta = orgMapCardMeta(emp, activeGroup);
     const text = `${orgMapName(emp)} ${orgMapCode(emp)} ${orgMapGroup(emp)} ${meta.roleLine} ${meta.attrLabel} ${meta.attrValue}`.toLowerCase();
     if (query && !text.includes(query)) return false;
     if (filterSet.has('cross') && !isCross) return false;
+    if (filterSet.has('outside-pms') && !isOutsidePms) return false;
     if (filterSet.has('root') && !isRoot) return false;
     if (filterSet.has('no-goals') && !flags.noGoals) return false;
     if (filterSet.has('goals-overdue') && !flags.goalsOverdue) return false;
@@ -10720,8 +10850,9 @@ export function OrgChartPanel({ employees, groups }) {
   const issueTotals = useMemo(() => orgGroups.reduce((acc, group) => ({
     external: acc.external + group.externalManagerCount,
     cross: acc.cross + group.crossGroupCount,
+    outsidePms: acc.outsidePms + (group.outsidePmsManagerCount || 0),
     roots: acc.roots + group.noManagerCount,
-  }), { external: 0, cross: 0, roots: 0 }), [orgGroups]);
+  }), { external: 0, cross: 0, outsidePms: 0, roots: 0 }), [orgGroups]);
 
   if (!orgGroups.length) {
     return (
@@ -10732,6 +10863,7 @@ export function OrgChartPanel({ employees, groups }) {
   }
 
   const signals = [
+    { key: 'outside-pms', label: 'NONE managers', value: issueTotals.outsidePms, color: '#475569', bg: '#F1F5F9', border: '#CBD5E1', title: 'Manager sits in the roster with Group Name = "NONE" — referenced only so their reports can have a valid RM.' },
     { key: 'cross', label: 'Cross-group managers', value: issueTotals.cross, color: '#6D28D9', bg: '#F5F3FF', border: '#DDD6FE', title: 'Manager exists in PMS, but sits in a different goal group from the employee.' },
     { key: 'root', label: 'Root employees', value: issueTotals.roots, color: '#1D4ED8', bg: '#EFF6FF', border: '#BFDBFE', title: 'Employee has no reporting manager code in the uploaded roster.' },
   ];
