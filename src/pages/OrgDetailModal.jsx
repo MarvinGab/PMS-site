@@ -8,6 +8,10 @@ export default function OrgDetailModal({ orgKey, onClose }) {
 
   if (!org) return null;
 
+  const workspaceSlug = String(org.workspaceSlug || '').trim();
+  const workspaceUrl = workspaceSlug
+    ? `pms.zarohr.com/?workspace=${workspaceSlug}`
+    : (org.domain || 'Not set');
   const setup = getOrganizationSetupMeta(org);
   const employeeCount = getOrganizationEmployeeCount(org);
   const seatPct = org.seats ? ((employeeCount || 0) / org.seats * 100).toFixed(1) + '%' : '0%';
@@ -20,7 +24,7 @@ export default function OrgDetailModal({ orgKey, onClose }) {
           <div>
             <h3 className="org-detail-title">{org.name}</h3>
             <p className="org-detail-sub">
-              {org.domain} · {org.orgCode || 'N/A'} · {org.industry || 'Other'}
+              {workspaceUrl} · {org.orgCode || 'N/A'} · {org.industry || 'Other'}
             </p>
           </div>
           <button type="button" className="org-detail-close" onClick={onClose}>✕</button>
@@ -32,7 +36,7 @@ export default function OrgDetailModal({ orgKey, onClose }) {
             <div className="org-detail-card-title">Organization Details</div>
             <div className="org-detail-list">
               <div className="org-detail-row">
-                <span>Workspace</span><span>{org.domain || 'Not set'}</span>
+                <span>Workspace</span><span>{workspaceUrl}</span>
               </div>
               <div className="org-detail-row">
                 <span>Organization Code</span><span>{org.orgCode || 'Not set'}</span>

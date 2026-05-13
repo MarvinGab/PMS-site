@@ -364,6 +364,10 @@ export default function SuperAdminCommsPage() {
   // Preview-as
   const previewRecipient = allRecipients[previewIndex] || allRecipients[0] || null;
   const firstName = (n) => String(n || '').trim().split(/\s+/).filter(Boolean)[0] || 'there';
+  const workspaceUrl = (org) => {
+    const slug = String(org?.workspaceSlug || '').trim();
+    return slug ? `https://pms.zarohr.com/?workspace=${encodeURIComponent(slug)}#login` : '#';
+  };
   const resolve = (text) => {
     if (!text) return text;
     const r = previewRecipient;
@@ -374,7 +378,7 @@ export default function SuperAdminCommsPage() {
       .replace(/\{recipient_email\}/g, r?.email || 'admin@example.com')
       .replace(/\{temporary_password\}/g, r?.password || 'TempPass123')
       .replace(/\{password\}/g, r?.password || 'TempPass123')
-      .replace(/\{login_url\}/g, r?.org?.domain ? `https://${r.org.domain}/#login` : '#');
+      .replace(/\{login_url\}/g, workspaceUrl(r?.org));
   };
   const previewSubject = resolve(subject);
   const previewBody    = resolve(body);

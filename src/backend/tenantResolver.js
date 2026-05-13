@@ -10,6 +10,10 @@ function normalizeHost(value) {
   return String(value || '').trim().toLowerCase().replace(/:\d+$/, '');
 }
 
+function isPlatformHost(host) {
+  return host === 'zarohr.com' || host === 'www.zarohr.com' || host === 'pms.zarohr.com';
+}
+
 function readWorkspaceQueryParam(search = '') {
   try {
     const params = new URLSearchParams(search || '');
@@ -24,6 +28,10 @@ export function getRequestedWorkspaceSlug({ hostname, search } = {}) {
   const querySlug = readWorkspaceQueryParam(search || (typeof window !== 'undefined' ? window.location.search : ''));
 
   if (!host || host === 'localhost' || host === '127.0.0.1' || host === '0.0.0.0') {
+    return querySlug;
+  }
+
+  if (isPlatformHost(host)) {
     return querySlug;
   }
 

@@ -5,6 +5,11 @@ import DeleteOrgModal from './DeleteOrgModal';
 import { useApp } from '../AppContext';
 import '../admin.css';
 
+function getWorkspaceUrl(org) {
+  const slug = String(org?.workspaceSlug || '').trim();
+  return slug ? `pms.zarohr.com/?workspace=${slug}` : (org?.domain || '');
+}
+
 export default function DashboardPage() {
   const { orgs, pendingActions, feedData, dashboardFlags, setDashboardFlags } = useApp();
 
@@ -237,7 +242,7 @@ export function OrgTable({ orgs, activeMenu, onMenuToggle, onRowDblClick, onEdit
                 <div className="org-logo" style={{ background: org.logoBg }}>{org.logoText}</div>
                 <div>
                   <div className="org-name">{org.name}</div>
-                  <div className="org-meta">{org.domain}</div>
+                  <div className="org-meta">{getWorkspaceUrl(org)}</div>
                 </div>
               </div>
             </td>

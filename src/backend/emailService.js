@@ -16,7 +16,9 @@ function getWorkspaceLoginUrl(org, identifier = '') {
   if (typeof window !== 'undefined') {
     const { origin, hostname } = window.location;
     const isLocalhost = hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '0.0.0.0';
-    if (isLocalhost) {
+    const isPlatformHost = hostname === 'zarohr.com' || hostname === 'www.zarohr.com' || hostname === 'pms.zarohr.com';
+    const isTenantHost = hostname.endsWith('.zarohr.com') && !isPlatformHost;
+    if (isLocalhost || !isTenantHost) {
       const params = new URLSearchParams();
       if (slug) params.set('workspace', slug);
       if (loginIdentifier) params.set('login', loginIdentifier);
@@ -25,9 +27,14 @@ function getWorkspaceLoginUrl(org, identifier = '') {
     }
   }
 
+  if (slug) {
+    const params = new URLSearchParams();
+    params.set('workspace', slug);
+    if (loginIdentifier) params.set('login', loginIdentifier);
+    return `https://pms.zarohr.com/?${params.toString()}#login`;
+  }
   const suffix = loginParam ? `?${loginParam}` : '';
   if (domain) return `https://${domain}/${suffix}#login`;
-  if (slug)   return `https://${slug}.zarohr.com/${suffix}#login`;
   return `https://zarohr.com/${suffix}#login`;
 }
 
@@ -127,7 +134,7 @@ export async function sendHrAdminInviteEmail(org, options = {}) {
       organizationName: org.name || 'Your organization',
       adminName,
       workspaceSlug: org.workspaceSlug || '',
-      workspaceDomain: org.domain || '',
+      workspaceDomain: loginUrl,
       loginUrl,
       temporaryPassword: org.temporaryPassword || '',
       supportEmail,
@@ -150,7 +157,7 @@ export async function sendHrAdminInviteEmail(org, options = {}) {
       company: org.name || 'Your organization',
       admin_name: adminName,
       first_name: String(adminName || '').trim().split(/\s+/).filter(Boolean)[0] || 'there',
-      workspace_domain: org.domain || '',
+      workspace_domain: loginUrl,
       recipient_email: recipientEmail,
       temporary_password: org.temporaryPassword || '',
       password: org.temporaryPassword || '',

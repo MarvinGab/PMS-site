@@ -8,6 +8,11 @@ import { logAuditEvent } from '../backend/auditLog';
 import { getOrganizationEmployeeCount, getOrganizationSetupMeta } from '../orgUtils';
 import '../admin.css';
 
+function getWorkspaceUrl(org) {
+  const slug = String(org?.workspaceSlug || '').trim();
+  return slug ? `pms.zarohr.com/?workspace=${slug}` : (org?.domain || '');
+}
+
 function OrgRow({ org, activeMenu, onMenuToggle, onOpen, onEdit, onDelete, onReopenSetup, onCloseSetup }) {
   const setup = getOrganizationSetupMeta(org);
   const employeeCount = getOrganizationEmployeeCount(org);
@@ -50,7 +55,7 @@ function OrgRow({ org, activeMenu, onMenuToggle, onOpen, onEdit, onDelete, onReo
           <div className="org-logo" style={{ background: org.logoBg }}>{org.logoText}</div>
           <div>
             <div className="org-name">{org.name}</div>
-            <div className="org-meta">{org.domain}</div>
+            <div className="org-meta">{getWorkspaceUrl(org)}</div>
           </div>
         </div>
       </td>

@@ -155,7 +155,13 @@ export default function CreateOrgPage() {
 
   function getExistingSlugs() {
     const set = new Set();
-    orgs.forEach(o => { if (isEdit && o.key === editKey) return; set.add(String(o.domain || '').split('.')[0].toLowerCase()); });
+    orgs.forEach(o => {
+      if (isEdit && o.key === editKey) return;
+      const slug = String(o.workspaceSlug || '').trim().toLowerCase();
+      if (slug) set.add(slug);
+      const legacySlug = String(o.domain || '').split('.')[0].toLowerCase();
+      if (legacySlug && legacySlug !== 'pms') set.add(legacySlug);
+    });
     return set;
   }
 
@@ -247,7 +253,7 @@ export default function CreateOrgPage() {
       key: tenantKey,
       orgCode,
       name: orgName,
-      domain: `${slugRaw}.zarohr.com`,
+      domain: 'pms.zarohr.com',
       industry,
       industryBadgeClass: existingOrg?.industryBadgeClass || 'badge-gray',
       employees: existingOrg ? existingOrg.employees : 0,
@@ -470,7 +476,7 @@ function StepWorkspace({ isEdit, form, onNameInput, onCodeInput, setField, codeC
       </div>
 
       <div className="ws-card">
-        <div className="ws-card-title">Workspace Domain</div>
+        <div className="ws-card-title">Workspace Link</div>
         <div className="form-group">
           <label className="lbl">Workspace Slug <span className="req">*</span></label>
           <div className="domain-input-wrap">
@@ -481,11 +487,11 @@ function StepWorkspace({ isEdit, form, onNameInput, onCodeInput, setField, codeC
               placeholder="your-org"
               onChange={e => onSlugInput(e.target.value)}
             />
-            <span className="domain-suffix">.zarohr.com</span>
+            <span className="domain-suffix">on pms.zarohr.com</span>
           </div>
           <div className="domain-preview-box">
             <span className="domain-preview-label">Your workspace URL:</span>
-            <span className="domain-preview-url">{form.workspace_slug ? `${form.workspace_slug}.zarohr.com` : <span style={{ color: 'var(--ink-4)' }}>yourorg.zarohr.com</span>}</span>
+            <span className="domain-preview-url">{form.workspace_slug ? `pms.zarohr.com/?workspace=${form.workspace_slug}` : <span style={{ color: 'var(--ink-4)' }}>pms.zarohr.com/?workspace=yourorg</span>}</span>
             {form.workspace_slug && (
               <span className={`domain-avail-badge ${slugCheck.ok ? 'avail-ok' : 'avail-err'}`}>
                 {slugCheck.ok ? '✓ Available' : '✗ Unavailable'}
@@ -496,7 +502,7 @@ function StepWorkspace({ isEdit, form, onNameInput, onCodeInput, setField, codeC
             <div className="f-hint hint-err" style={{ marginTop: 4 }}>{slugCheck.msg}</div>
           )}
           <div className="f-hint" style={{ marginTop: 4, color: 'var(--ink-4)' }}>
-            Only lowercase letters, numbers, and hyphens. This will be your organization's unique workspace address.
+            Only lowercase letters, numbers, and hyphens. This identifies the organization inside your PMS site.
           </div>
         </div>
       </div>

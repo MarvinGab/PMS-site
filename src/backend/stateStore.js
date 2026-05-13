@@ -93,7 +93,7 @@ function writeOrgBrandCacheFromOrganizations(organizations) {
 
 function getDomainFromSlug(slug) {
   const normalized = String(slug || '').trim().toLowerCase();
-  return normalized ? `${normalized}.zarohr.com` : '';
+  return normalized ? 'pms.zarohr.com' : '';
 }
 
 function buildOrganizationRow(org) {
