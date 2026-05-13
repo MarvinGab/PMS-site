@@ -14,11 +14,12 @@ async function invokeAuthFunction(body) {
   }
 }
 
-export async function loginWithServerSession(identifier, password) {
+export async function loginWithServerSession(identifier, password, organizationKey = '') {
   return invokeAuthFunction({
     action: 'login',
     identifier: String(identifier || '').trim(),
     password: String(password || ''),
+    organizationKey: String(organizationKey || '').trim(),
   });
 }
 

@@ -413,7 +413,7 @@ export default function LoginPage() {
     setLoading(true);
 
     let user = null;
-    const serverAuthResult = await loginWithServerSession(identifier, password);
+    const serverAuthResult = await loginWithServerSession(identifier, password, tenant?.orgKey || '');
     if (serverAuthResult?.ok && serverAuthResult?.user) {
       user = {
         ...serverAuthResult.user,

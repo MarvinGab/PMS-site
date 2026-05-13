@@ -414,8 +414,8 @@ export async function sendCustomBroadcast({ org, recipients = [], theme, templat
         rcpt?.['Email ID'] || rcpt?.Email || rcpt?.email || ''
       ).trim().toLowerCase();
       if (!recipientEmail) return null;
-      const loginUrl = getWorkspaceLoginUrl(org, recipientEmail);
       const employeeCode = String(rcpt?.['Employee Code'] || '').trim();
+      const loginUrl = getWorkspaceLoginUrl(org, recipientEmail);
       const employeeName = String(rcpt?.['Employee Name'] || '').trim() || employeeCode || recipientEmail;
       const baseTokens = {
         organization_name: org?.name || 'Your organization',

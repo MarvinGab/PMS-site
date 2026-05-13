@@ -135,8 +135,9 @@ function getHrTeam(org: OrgRow) {
     : []
 }
 
-async function resolveServerLogin(client: ReturnType<typeof createClient>, identifier: string, password: string) {
+async function resolveServerLogin(client: ReturnType<typeof createClient>, identifier: string, password: string, organizationKey = '') {
   const normalized = normalizeLower(identifier)
+  const scopedOrgKey = String(organizationKey || '').trim()
 
   if (await matchesSuperAdminCredentials(normalized, password)) {
     return { role: 'super-admin', userName: 'Super Admin' }
@@ -147,7 +148,11 @@ async function resolveServerLogin(client: ReturnType<typeof createClient>, ident
     getCredentialBlob(client),
   ])
 
-  for (const org of orgs) {
+  const candidateOrgs = scopedOrgKey
+    ? orgs.filter((org) => org.org_key === scopedOrgKey)
+    : orgs
+
+  for (const org of candidateOrgs) {
     if (normalizeLower(org.hr_admin_email) === normalized) {
       const primaryCredential = credentials?.[normalized]
       const primaryStoredSecret = String(primaryCredential?.passwordHash || primaryCredential?.password || '')
@@ -233,7 +238,11 @@ async function resolveServerLogin(client: ReturnType<typeof createClient>, ident
   }
 
   const empCode = normalizeCode(credential.empCode || matchKey)
-  for (const org of orgs) {
+  if (scopedOrgKey && String(credential.orgKey || '') && String(credential.orgKey || '') !== scopedOrgKey) {
+    return null
+  }
+
+  for (const org of candidateOrgs) {
     const hrMember = getHrTeam(org).find((member) => member.isInPMS && normalizeCode(member.empCode) === empCode)
     if (hrMember) {
       return {
@@ -255,7 +264,7 @@ async function resolveServerLogin(client: ReturnType<typeof createClient>, ident
     userName: String(credential.name || ''),
     designation: String(credential.designation || ''),
     managerCode: String(credential.managerCode || ''),
-    orgKey: String(credential.orgKey || ''),
+    orgKey: String(credential.orgKey || scopedOrgKey || ''),
     isTemp: !!credential.isTemp,
     email: String(credential.email || ''),
   }
@@ -774,8 +783,9 @@ Deno.serve(async (req: Request) => {
   if (action === 'login') {
     const identifier = String(body.identifier || '').trim()
     const password = String(body.password || '')
+    const organizationKey = String(body.organizationKey || '').trim()
     if (!identifier || !password) return json(400, { ok: false, error: 'identifier and password are required.' })
-    const user = await resolveServerLogin(adminClient, identifier, password)
+    const user = await resolveServerLogin(adminClient, identifier, password, organizationKey)
     if (!user) return json(200, { ok: false, error: 'Invalid credentials.' })
     const session = await issueSession(adminClient, user)
     return json(200, { ok: true, user, serverSessionToken: session.token, expiresAt: session.expiresAt })
