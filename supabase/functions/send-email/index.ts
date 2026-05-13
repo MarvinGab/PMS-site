@@ -69,6 +69,7 @@ type Mailer = {
 }
 
 const SMTP_SECRET_PREFIX = 'enc:v1:'
+const EMAIL_SEND_CONCURRENCY = 5
 
 function json(status: number, body: Record<string, unknown>) {
   return new Response(JSON.stringify(body), { status, headers: corsHeaders })
@@ -999,7 +1000,7 @@ Deno.serve(async (req: Request) => {
     return buildEmailContent(message, org!, mailer.footerText)
   }
 
-  for (const message of messages) {
+  async function processMessage(message: MessageRequest) {
     const allowed = await isAllowedRecipient(adminClient, org, message)
     if (!allowed) {
       const content = buildContent(message)
@@ -1019,7 +1020,7 @@ Deno.serve(async (req: Request) => {
         ok: false,
         error: 'Recipient is not recognized for this organization.',
       })
-      continue
+      return
     }
 
     const content = buildContent(message)
@@ -1064,6 +1065,10 @@ Deno.serve(async (req: Request) => {
         error: error instanceof Error ? error.message : 'Email send failed.',
       })
     }
+  }
+
+  for (let index = 0; index < messages.length; index += EMAIL_SEND_CONCURRENCY) {
+    await Promise.all(messages.slice(index, index + EMAIL_SEND_CONCURRENCY).map(processMessage))
   }
 
   const sent = results.filter((item) => item.ok).length
