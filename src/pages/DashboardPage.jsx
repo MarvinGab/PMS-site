@@ -3,11 +3,13 @@ import AdminShell from '../components/AdminShell';
 import OrgDetailModal from './OrgDetailModal';
 import DeleteOrgModal from './DeleteOrgModal';
 import { useApp } from '../AppContext';
+import { buildWorkspaceUrl } from '../orgUtils';
 import '../admin.css';
 
 function getWorkspaceUrl(org) {
   const slug = String(org?.workspaceSlug || '').trim();
-  return slug ? `pms.zarohr.com/?workspace=${slug}` : (org?.domain || '');
+  if (slug) return buildWorkspaceUrl(slug);
+  return org?.domain || '';
 }
 
 export default function DashboardPage() {

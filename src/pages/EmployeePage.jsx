@@ -16,6 +16,7 @@ import {
   hydrateAppData,
   hydrateOrganizations,
   readOrgBrandCacheSync,
+  subscribeToScopedState,
 } from '../backend/stateStore';
 import { sendCustomBroadcast } from '../backend/emailService';
 
@@ -25,6 +26,27 @@ const APP_DATA_KEY = 'zarohr_app_data_v1';
 const GOAL_WORKFLOW_KEY = 'zarohr_goal_workflow_v1';
 const MESSAGES_KEY = 'zarohr_messages_v1';
 const REMINDER_COOLDOWN_MS = 4 * 60 * 60 * 1000;
+
+// How long a soft-deleted goal sits in the Deleted Goals trash before being
+// purged from storage. Library-sourced goals (those carrying `libraryKraId`)
+// are not soft-deleted — they hard-delete and re-appear in the Goal Library.
+const DELETED_GOAL_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+
+function isDeletedGoalExpired(goal, now = Date.now()) {
+  if (!goal?.deletedAt) return false;
+  const ts = Date.parse(goal.deletedAt);
+  // Bad timestamp is treated as expired so it gets cleaned out, not kept forever.
+  if (!Number.isFinite(ts)) return true;
+  return (now - ts) >= DELETED_GOAL_RETENTION_MS;
+}
+
+function deletedGoalDaysRemaining(goal, now = Date.now()) {
+  if (!goal?.deletedAt) return null;
+  const ts = Date.parse(goal.deletedAt);
+  if (!Number.isFinite(ts)) return 0;
+  const ms = DELETED_GOAL_RETENTION_MS - (now - ts);
+  return Math.max(0, Math.ceil(ms / (24 * 60 * 60 * 1000)));
+}
 
 // Templates a manager can pick from when emailing a direct report. Token
 // resolver (src/backend/emailRenderer.js) matches single-brace {name} tokens
@@ -792,8 +814,16 @@ function TargetField({ value, onValueChange, type, onTypeChange }) {
 //   blue   = draft / informational
 function getSubmissionStatusMeta(record) {
   switch (record?.status) {
-    case 'pending-manager':
-      return { label: 'Awaiting manager approval', color: '#DC2626', bg: '#FEF2F2', border: '#FECACA' };
+    case 'pending-manager': {
+      // submitCount > 1 means the employee already went through one
+      // rejection cycle — flag it so the manager knows this is a resubmit
+      // queue item, not a first submission.
+      const isResubmit = Number(record?.submitCount || 0) > 1;
+      return {
+        label: isResubmit ? 'Awaiting manager approval (re-submitted)' : 'Awaiting manager approval',
+        color: '#DC2626', bg: '#FEF2F2', border: '#FECACA',
+      };
+    }
     case 'approved':
       return { label: 'Approved', color: '#16A34A', bg: '#F0FDF4', border: '#BBF7D0' };
     case 'sent-back':
@@ -1186,6 +1216,7 @@ function GoalLibraryPanel({ kras, libraryType, libraryName, canAdd, onAdd, added
   const [selectedId, setSelectedId] = useState(null);
   const [hoveredId, setHoveredId] = useState(null);
   const [returnDropActive, setReturnDropActive] = useState(false);
+  const [collapsed, setCollapsed] = useState(false);
 
   // Only show KRAs not yet in the plan (match by tracked libraryKraId or by name)
   const visibleKras = kras.filter((k) => {
@@ -1255,12 +1286,29 @@ function GoalLibraryPanel({ kras, libraryType, libraryName, canAdd, onAdd, added
 	            <span style={{ fontSize: 12, color: '#475569', fontWeight: 700 }}>{visibleKras.length} KRA{visibleKras.length !== 1 ? 's' : ''} available</span>
 	          )}
 	        </div>
-	        <span style={{ fontSize: 10.5, fontWeight: 800, color: '#4F46E5', background: '#FFFFFF', padding: '4px 10px', borderRadius: 999, border: '1px solid #C7D2FE', whiteSpace: 'nowrap', flexShrink: 0 }}>
-	          {libraryType === 'kra-kpi' && hasAnyKpis ? 'KRA + KPI' : 'KRA only'}
-	        </span>
+	        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
+          <span style={{ fontSize: 10.5, fontWeight: 800, color: '#4F46E5', background: '#FFFFFF', padding: '4px 10px', borderRadius: 999, border: '1px solid #C7D2FE', whiteSpace: 'nowrap' }}>
+            {libraryType === 'kra-kpi' && hasAnyKpis ? 'KRA + KPI' : 'KRA only'}
+          </span>
+          <button
+            type="button"
+            onClick={() => setCollapsed((prev) => !prev)}
+            aria-expanded={!collapsed}
+            aria-label={collapsed ? 'Expand Goal Library' : 'Collapse Goal Library'}
+            title={collapsed ? 'Expand Goal Library' : 'Collapse Goal Library'}
+            style={{
+              width: 24, height: 24, display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+              borderRadius: 6, border: '1px solid #C7D2FE', background: '#FFFFFF', color: '#4F46E5',
+              fontFamily: 'inherit', fontSize: 14, fontWeight: 800, lineHeight: 1, cursor: 'pointer', padding: 0,
+            }}
+          >
+            {collapsed ? '+' : '−'}
+          </button>
+        </div>
       </div>
 
-      {/* Card grid */}
+      {/* Card grid — hidden when the panel is collapsed via the −/+ toggle. */}
+      {!collapsed && (
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(172px,1fr))', gap: 12 }}>
         {visibleKras.map((kra, index) => {
           const cardId = kra.id || kra.name;
@@ -1362,6 +1410,7 @@ function GoalLibraryPanel({ kras, libraryType, libraryName, canAdd, onAdd, added
           );
         })}
 	          </div>
+      )}
 	        </div>
 	      );
 	    }
@@ -1904,6 +1953,37 @@ export default function EmployeePage() {
     return () => window.removeEventListener('storage', onStorage);
   }, [session?.orgKey]);
 
+  // Cross-device realtime: the storage listeners above only fire for
+  // same-device writes. When a manager / HR / proxy admin updates state on
+  // a different machine, Supabase Realtime delivers the change here and we
+  // re-hydrate the affected slice. The hydrate calls write through to
+  // localStorage with `emit: true`, so the existing same-tab listeners
+  // pick up the change and update React state — no duplicate setState.
+  useEffect(() => {
+    if (!session?.orgKey) return undefined;
+    const orgKey = session.orgKey;
+    const unsubWorkflow = subscribeToScopedState('workflow', orgKey, () => {
+      void hydrateWorkflow(orgKey).then((wf) => {
+        if (wf) setWorkflow(wf);
+      });
+    });
+    const unsubMessages = subscribeToScopedState('messages', orgKey, () => {
+      void hydrateMessages(orgKey).then((msgs) => {
+        if (msgs) setMessagesData(msgs);
+      });
+    });
+    const unsubWizard = subscribeToScopedState('wizard_state', orgKey, () => {
+      void hydrateWizardState(orgKey).then((next) => {
+        if (next?.config) setConfig(next.config);
+      });
+    });
+    return () => {
+      unsubWorkflow();
+      unsubMessages();
+      unsubWizard();
+    };
+  }, [session?.orgKey]);
+
   // Close the goal-edit modal on Esc. Also reset the delete-confirm state whenever the
   // modal opens on a different goal (or closes), so the confirm strip never leaks between goals.
   useEffect(() => {
@@ -1929,7 +2009,13 @@ export default function EmployeePage() {
   // They have no PMS goal plan of their own — the dashboard should skip all goal UI for them.
   const isExternalManager = !employee;
   const mySubmission = workflow?.submissions?.[employeeCodeKey] || null;
-  const myGoals = mySubmission?.goals || [];
+  // Active goals exclude anything currently sitting in the Deleted Goals
+  // trash. The deletedGoals derivation also applies the 7-day retention
+  // filter so expired entries are invisible in the UI even before the
+  // periodic purge effect runs.
+  const allMyGoals = mySubmission?.goals || [];
+  const myGoals = allMyGoals.filter((g) => !g.deletedAt);
+  const deletedGoals = allMyGoals.filter((g) => g.deletedAt && !isDeletedGoalExpired(g));
   const goalMetrics = getGoalPlanMetrics(myGoals, effectiveConfig, accessMode);
   const myStatusMeta = getSubmissionStatusMeta(mySubmission);
   const limits = getGoalLimits(config, employee, employeeGroup);
@@ -2006,6 +2092,15 @@ export default function EmployeePage() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeSection, canSetOwnGoals, directReports.length]);
+  // The Deleted Goals tab disappears when the trash empties (or after the
+  // 7-day auto-purge). Fall back to My Goals so the user isn't left staring
+  // at an empty section because of a stale activeSection.
+  useEffect(() => {
+    if (activeSection === 'deleted-goals' && deletedGoals.length === 0) {
+      setActiveSection('goals');
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeSection, deletedGoals.length]);
   const canEditGoalPlan = canSetOwnGoals && currentPhase === 'goal-setting' && mySubmission && !['pending-manager', 'approved'].includes(mySubmission.status);
   const canAddKra = canEditGoalPlan && (
     effectiveConfig?.goalCreationMode === 'employee-self' ||
@@ -2136,7 +2231,49 @@ export default function EmployeePage() {
   function removeGoal(goalId) {
     if (!canEditGoalPlan) return;
     updateMySubmission((record) => {
+      const now = Date.now();
+      const target = (record.goals || []).find((g) => g.id === goalId);
+      if (!target) return record;
+      // Library-sourced goals (carry libraryKraId) hard-delete because the
+      // Goal Library re-shows them as available; routing them to the trash
+      // would create a confusing duplicate state. Self-entered + prefilled
+      // goals soft-delete so the user can restore them within 7 days.
+      const isLibrarySourced = !!target.libraryKraId;
+      if (isLibrarySourced) {
+        record.goals = (record.goals || []).filter((goal) => goal.id !== goalId);
+      } else {
+        record.goals = (record.goals || []).map((goal) => (
+          goal.id === goalId
+            ? { ...goal, deletedAt: new Date(now).toISOString(), deletedBy: session?.empCode || '' }
+            : goal
+        ));
+      }
+      // Opportunistic GC: drop trash entries that have aged past the
+      // retention window. Keeps storage bounded without a separate timer.
+      record.goals = (record.goals || []).filter((goal) => !isDeletedGoalExpired(goal, now));
+      return record;
+    });
+  }
+
+  function restoreGoal(goalId) {
+    if (!canEditGoalPlan) return;
+    updateMySubmission((record) => {
+      const now = Date.now();
+      record.goals = (record.goals || []).map((goal) => {
+        if (goal.id !== goalId) return goal;
+        const { deletedAt: _drop, deletedBy: _drop2, ...rest } = goal;
+        return rest;
+      });
+      record.goals = (record.goals || []).filter((goal) => !isDeletedGoalExpired(goal, now));
+      return record;
+    });
+  }
+
+  function purgeGoalForever(goalId) {
+    updateMySubmission((record) => {
+      const now = Date.now();
       record.goals = (record.goals || []).filter((goal) => goal.id !== goalId);
+      record.goals = (record.goals || []).filter((goal) => !isDeletedGoalExpired(goal, now));
       return record;
     });
   }
@@ -2215,11 +2352,17 @@ export default function EmployeePage() {
         }
         return goal;
       });
+      // Track how many times the employee has submitted so the UI can
+      // distinguish "Submitted" (first time) from "Re-submitted" (after a
+      // rejection cycle). Stored on the submission so it survives reloads
+      // and syncs across devices via the workflow blob.
+      const nextSubmitCount = Number(record.submitCount || 0) + 1;
       return {
         ...record,
         goals: resetGoals,
         status: noManager ? 'approved' : 'pending-manager',
         submittedAt,
+        submitCount: nextSubmitCount,
         approvedAt: noManager ? submittedAt : record.approvedAt,
         managerDecisionAt: noManager ? submittedAt : null,
         managerNote: noManager ? 'No manager assigned. Goals marked approved automatically.' : '',
@@ -2840,7 +2983,7 @@ export default function EmployeePage() {
                 )}
               </div>
               <div style={{ fontSize: 13, color: '#475569', lineHeight: 1.55 }}>
-                {mySubmission.status === 'pending-manager' && `Submitted on ${formatDateTime(mySubmission.submittedAt)}. ${managerName ? `${managerName} can now approve or send back changes.` : 'Waiting for approval.'}`}
+                {mySubmission.status === 'pending-manager' && `${Number(mySubmission.submitCount || 0) > 1 ? 'Re-submitted' : 'Submitted'} on ${formatDateTime(mySubmission.submittedAt)}. ${managerName ? `${managerName} can now approve or send back changes.` : 'Waiting for approval.'}`}
                 {mySubmission.status === 'approved' && `Approved${mySubmission.managerApprovedBy ? ` by ${getManagerName(config, mySubmission.managerApprovedBy) || mySubmission.managerApprovedBy}` : ''} on ${formatDateTime(mySubmission.managerDecisionAt || mySubmission.approvedAt)}.`}
                 {mySubmission.status === 'sent-back' && (
                   hasBreakdown && approvedCount > 0
@@ -2938,7 +3081,7 @@ export default function EmployeePage() {
 
             {/* Flat 2-col card grid */}
             {myGoals.length > 0 && (
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(300px, 1fr))', gap: 16, marginBottom: 16 }}>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))', gap: 16, marginBottom: 16 }}>
                 {myGoals.map((goal, goalIndex) => {
                   const color = getVisibleGoalColor(goal, goalIndex);
                   const initial = (goal.name || '?').trim().charAt(0).toUpperCase();
@@ -3386,15 +3529,17 @@ export default function EmployeePage() {
                                         </div>
                                       )}
                                     </div>
-                                    <div style={{ marginTop: 10 }}>
-                                      <div style={{ fontSize: 10.5, fontWeight: 700, color: '#94A3B8', textTransform: 'uppercase', letterSpacing: '.07em', marginBottom: 5 }}>Target</div>
-                                      <TargetField
-                                        value={kpi.target || ''}
-                                        onValueChange={(v) => updateKpi(goal.id, kpi.id, 'target', v)}
-                                        type={kpi.targetType || 'text'}
-                                        onTypeChange={(t) => updateKpi(goal.id, kpi.id, 'targetType', t)}
-                                      />
-                                    </div>
+                                    {effectiveConfig?.targetsEnabled !== false && (
+                                      <div style={{ marginTop: 10 }}>
+                                        <div style={{ fontSize: 10.5, fontWeight: 700, color: '#94A3B8', textTransform: 'uppercase', letterSpacing: '.07em', marginBottom: 5 }}>Target</div>
+                                        <TargetField
+                                          value={kpi.target || ''}
+                                          onValueChange={(v) => updateKpi(goal.id, kpi.id, 'target', v)}
+                                          type={kpi.targetType || 'text'}
+                                          onTypeChange={(t) => updateKpi(goal.id, kpi.id, 'targetType', t)}
+                                        />
+                                      </div>
+                                    )}
                                   </div>
                                 ) : (
                                   <div>
@@ -3404,7 +3549,7 @@ export default function EmployeePage() {
                                     </div>
                                     <div style={{ fontSize: 12.5, color: '#94A3B8', marginTop: 4 }}>
                                       {effectiveConfig?.kpiRatingMode !== 'free-text' && kpi.weight ? `Weight: ${kpi.weight}%` : 'Additional KPI'}
-                                      {kpi.target ? ` · Target: ${kpi.target}` : ''}
+                                      {effectiveConfig?.targetsEnabled !== false && kpi.target ? ` · Target: ${kpi.target}` : ''}
                                     </div>
                                   </div>
                                 )}
@@ -3510,24 +3655,45 @@ export default function EmployeePage() {
                       ? 'All checks passed — ready to submit.'
                       : ''}
               </div>
-              <button
-                type="button"
-                onClick={submitGoals}
-                disabled={!canEditGoalPlan || !myValidation.canSubmit}
-                style={{
-                  padding: '11px 28px',
-                  background: canEditGoalPlan && myValidation.canSubmit ? '#16A34A' : '#CBD5E1',
-                  color: '#fff',
-                  border: 'none',
-                  borderRadius: 9,
-                  fontSize: 15,
-                  fontWeight: 700,
-                  cursor: canEditGoalPlan && myValidation.canSubmit ? 'pointer' : 'not-allowed',
-                  fontFamily: 'inherit',
-                }}
-              >
-                {mySubmission.status === 'sent-back' ? 'Resubmit Goals' : 'Submit Goals for Approval'}
-              </button>
+              {(() => {
+                // Submit-button state machine. A locked status (pending /
+                // approved) shows what already happened; an editable status
+                // shows the action the user can take. submitCount > 1 means
+                // the plan has already been through one rejection cycle, so
+                // the verb is "Re-submit" / "Re-submitted" instead of plain
+                // "Submit" / "Submitted".
+                const status = mySubmission?.status;
+                const submitCount = Number(mySubmission?.submitCount || 0);
+                const isLocked = status === 'pending-manager' || status === 'approved';
+                let label;
+                let bg;
+                if (status === 'approved') { label = '✓ Approved'; bg = '#16A34A'; }
+                else if (status === 'pending-manager') { label = submitCount > 1 ? '✓ Re-submitted' : '✓ Submitted'; bg = '#16A34A'; }
+                else if (status === 'sent-back') { label = 'Resubmit Goals'; bg = canEditGoalPlan && myValidation.canSubmit ? '#16A34A' : '#CBD5E1'; }
+                else { label = 'Submit Goals for Approval'; bg = canEditGoalPlan && myValidation.canSubmit ? '#16A34A' : '#CBD5E1'; }
+                const enabled = !isLocked && canEditGoalPlan && myValidation.canSubmit;
+                return (
+                  <button
+                    type="button"
+                    onClick={submitGoals}
+                    disabled={!enabled}
+                    style={{
+                      padding: '11px 28px',
+                      background: bg,
+                      color: '#fff',
+                      border: 'none',
+                      borderRadius: 9,
+                      fontSize: 15,
+                      fontWeight: 700,
+                      cursor: enabled ? 'pointer' : 'not-allowed',
+                      fontFamily: 'inherit',
+                      opacity: isLocked ? 0.92 : 1,
+                    }}
+                  >
+                    {label}
+                  </button>
+                );
+              })()}
             </div>
             )}
           </div>
@@ -4081,6 +4247,108 @@ export default function EmployeePage() {
     );
   }
 
+  function renderDeletedGoals() {
+    if (deletedGoals.length === 0) {
+      return <EmptyState title="No deleted goals" subtitle="Goals you delete will appear here for 7 days before being permanently removed." />;
+    }
+    const restoreDisabled = !canEditGoalPlan;
+    const restoreDisabledReason = !canSetOwnGoals
+      ? 'Goal-setting is not available for your account.'
+      : currentPhase !== 'goal-setting'
+      ? 'The goal-setting phase has ended.'
+      : ['pending-manager', 'approved'].includes(mySubmission?.status || '')
+      ? 'Your plan has moved past goal-setting — restore is disabled.'
+      : '';
+    return (
+      <div>
+        <div style={{
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12,
+          padding: '12px 14px', marginBottom: 14, borderRadius: 10,
+          background: '#F8FAFC', border: '1px solid #E2E8F0', color: '#475569', fontSize: 12.5,
+        }}>
+          <span>
+            <strong style={{ color: '#0F172A' }}>Trash</strong> · Items here are kept for 7 days, then permanently deleted. Restored goals go back into My Goals.
+          </span>
+          <span style={{ fontSize: 11.5, fontWeight: 700, color: '#94A3B8' }}>{deletedGoals.length} item{deletedGoals.length === 1 ? '' : 's'}</span>
+        </div>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: 14 }}>
+          {deletedGoals.map((goal) => {
+            const daysLeft = deletedGoalDaysRemaining(goal);
+            const kpiCount = (goal.kpis || []).length;
+            const deletedDate = (() => {
+              const ts = Date.parse(goal.deletedAt || '');
+              if (!Number.isFinite(ts)) return '';
+              return new Date(ts).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+            })();
+            return (
+              <div key={goal.id} style={{
+                background: '#fff', border: '1px solid #E2E8F0', borderRadius: 12,
+                padding: '14px 16px', display: 'flex', flexDirection: 'column', gap: 10,
+                boxShadow: '0 1px 2px rgba(15,23,42,.04)',
+              }}>
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ fontSize: 14, fontWeight: 700, color: '#0F172A', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                    {goal.name || <span style={{ color: '#94A3B8', fontStyle: 'italic', fontWeight: 500 }}>Untitled goal</span>}
+                  </div>
+                  <div style={{ marginTop: 4, fontSize: 11.5, color: '#64748B' }}>
+                    {kpiCount} KPI{kpiCount === 1 ? '' : 's'}{goal.weight ? ` · Weight ${goal.weight}%` : ''}
+                  </div>
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', fontSize: 11, color: '#64748B' }}>
+                  {deletedDate && (
+                    <span style={{ padding: '3px 8px', borderRadius: 999, background: '#F1F5F9', fontWeight: 600 }}>
+                      Deleted {deletedDate}
+                    </span>
+                  )}
+                  <span style={{
+                    padding: '3px 8px', borderRadius: 999,
+                    background: daysLeft <= 1 ? '#FEF3C7' : '#EFF6FF',
+                    color: daysLeft <= 1 ? '#92400E' : '#1D4ED8',
+                    fontWeight: 600,
+                  }}>
+                    Auto-deletes in {daysLeft} day{daysLeft === 1 ? '' : 's'}
+                  </span>
+                </div>
+                <div style={{ display: 'flex', gap: 8, marginTop: 4 }}>
+                  <button
+                    type="button"
+                    onClick={() => restoreGoal(goal.id)}
+                    disabled={restoreDisabled}
+                    title={restoreDisabled ? restoreDisabledReason : 'Move this goal back to My Goals'}
+                    style={{
+                      flex: 1, padding: '8px 12px', borderRadius: 8,
+                      border: '1px solid #BFDBFE',
+                      background: restoreDisabled ? '#F1F5F9' : '#EFF6FF',
+                      color: restoreDisabled ? '#94A3B8' : '#1D4ED8',
+                      fontFamily: 'inherit', fontSize: 12.5, fontWeight: 700,
+                      cursor: restoreDisabled ? 'not-allowed' : 'pointer',
+                    }}
+                  >
+                    Restore
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const confirmed = window.confirm(`Permanently delete "${goal.name || 'this goal'}"? This cannot be undone.`);
+                      if (confirmed) purgeGoalForever(goal.id);
+                    }}
+                    style={{
+                      flex: 1, padding: '8px 12px', borderRadius: 8,
+                      border: '1px solid #FECACA', background: '#FEF2F2', color: '#B91C1C',
+                      fontFamily: 'inherit', fontSize: 12.5, fontWeight: 700, cursor: 'pointer',
+                    }}
+                  >
+                    Delete forever
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    );
+  }
+
   function renderTeam() {
     if (directReports.length === 0) {
       return <EmptyState title="No direct reports found" subtitle="Employees reporting to you will appear here for reminders and approvals." />;
@@ -4410,7 +4678,7 @@ export default function EmployeePage() {
                       </div>
                       <div style={{ fontSize: 11.5, color: '#64748B', flexShrink: 0 }}>
                         {reviewTracksKpiWeights ? (kpi.weight ? `${kpi.weight}%` : '—') : 'Reference KPI'}
-                        {kpi.target ? ` · ${kpi.target}` : ''}
+                        {effectiveConfig?.targetsEnabled !== false && kpi.target ? ` · ${kpi.target}` : ''}
                       </div>
                     </div>
                   ))}
@@ -5080,6 +5348,15 @@ export default function EmployeePage() {
       label: currentPhase === 'self-evaluation' ? 'Self-Eval' : 'My Goals',
       count: currentPhase === 'self-evaluation' ? totalRatable : myGoals.length,
     });
+    // Deleted Goals tab — only surfaced when there's something in the trash.
+    // Stays hidden during normal use so the nav doesn't get cluttered.
+    if (deletedGoals.length > 0 && currentPhase === 'goal-setting') {
+      tabs.push({
+        id: 'deleted-goals',
+        label: '🗑 Deleted Goals',
+        count: deletedGoals.length,
+      });
+    }
   }
 	  if (directReports.length > 0) {
 	    tabs.push({
@@ -5394,6 +5671,7 @@ export default function EmployeePage() {
               : currentPhase === 'self-evaluation' ? renderSelfEvaluation()
               : <EmptyState title={`${PHASES[phaseIndex]?.label || 'Current phase'} in progress`} subtitle="This page will unlock the relevant workflow for the active appraisal phase." />
           )}
+          {activeSection === 'deleted-goals' && renderDeletedGoals()}
           {activeSection === 'team' && renderTeam()}
           {activeSection === 'send-mail' && renderSendMail()}
           {activeSection === 'messages' && renderMessages()}

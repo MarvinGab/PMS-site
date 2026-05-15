@@ -14,42 +14,58 @@ function isPlatformHost(host) {
   return host === 'zarohr.com' || host === 'www.zarohr.com' || host === 'pms.zarohr.com';
 }
 
-function readWorkspaceQueryParam(search = '') {
-  try {
-    const params = new URLSearchParams(search || '');
-    return normalizeSlug(params.get('workspace') || params.get('tenant') || '');
-  } catch (_) {
-    return '';
-  }
+function isLocalHost(host) {
+  return host === 'localhost' || host === '127.0.0.1' || host === '0.0.0.0';
 }
 
-export function getRequestedWorkspaceSlug({ hostname, search } = {}) {
-  const host = normalizeHost(hostname || (typeof window !== 'undefined' ? window.location.hostname : ''));
-  const querySlug = readWorkspaceQueryParam(search || (typeof window !== 'undefined' ? window.location.search : ''));
+// Reserved path prefixes that are NOT tenant slugs. These are platform-level
+// routes / static assets, so the first path segment shouldn't be treated as a
+// workspace slug when it matches one of these.
+const RESERVED_PATH_PREFIXES = new Set([
+  '', 'assets', 'api', 'static', 'public', 'favicon.ico', 'robots.txt',
+  'sitemap.xml', 'images', 'manifest.json',
+]);
 
-  if (!host || host === 'localhost' || host === '127.0.0.1' || host === '0.0.0.0') {
-    return querySlug;
+function readWorkspacePathSegment(pathname = '') {
+  const raw = String(pathname || '').split('/').filter(Boolean)[0] || '';
+  const candidate = normalizeSlug(raw);
+  if (!candidate || RESERVED_PATH_PREFIXES.has(candidate)) return '';
+  return candidate;
+}
+
+// Tenant slug now lives entirely in the URL path (e.g. /trio-infrastructure)
+// or in the subdomain (e.g. trio.zarohr.com). The legacy `?workspace=` query
+// param is intentionally not consulted — removed during the setup-phase
+// touchups so the URL scheme stays single-form and unambiguous.
+export function getRequestedWorkspaceSlug({ hostname, pathname } = {}) {
+  const host = normalizeHost(hostname || (typeof window !== 'undefined' ? window.location.hostname : ''));
+  const path = pathname || (typeof window !== 'undefined' ? window.location.pathname : '');
+  const pathSlug = readWorkspacePathSegment(path);
+
+  if (!host || isLocalHost(host)) {
+    return pathSlug;
   }
 
   if (isPlatformHost(host)) {
-    return querySlug;
+    return pathSlug;
   }
 
   if (host.endsWith('.zarohr.com')) {
     const prefix = host.slice(0, -'.zarohr.com'.length);
-    return prefix && prefix !== 'www' ? normalizeSlug(prefix) : querySlug;
+    if (prefix && prefix !== 'www') return normalizeSlug(prefix);
+    return pathSlug;
   }
 
-  if (querySlug) return querySlug;
-  return '';
+  return pathSlug;
 }
 
 function matchOrgByWorkspace(org, { slug, hostname }) {
   const workspaceSlug = normalizeSlug(org?.workspaceSlug || '');
   const domain = normalizeHost(org?.domain || '');
+  const canMatchDomain = !!hostname && !isPlatformHost(hostname) && !isLocalHost(hostname);
 
   if (slug && workspaceSlug && workspaceSlug === slug) return 'workspace_slug';
-  if (hostname && domain && domain === hostname) return 'domain';
+  if (canMatchDomain && domain && domain === hostname) return 'domain';
   if (slug && domain && domain === `${slug}.zarohr.com`) return 'derived_domain';
   return '';
 }
@@ -71,7 +87,8 @@ function resolveTenantFromOrganizations(organizations = [], { slug, hostname }) 
 
 async function resolveTenantFromSupabase({ slug, hostname }) {
   if (!shouldUseSupabase || !supabase) return null;
-  if (!slug && !hostname) return null;
+  const canMatchDomain = !!hostname && !isPlatformHost(hostname) && !isLocalHost(hostname);
+  if (!slug && !canMatchDomain) return null;
 
   try {
     let query = supabase
@@ -101,7 +118,7 @@ export async function resolveTenantContext(options = {}) {
   const hostname = normalizeHost(options.hostname || (typeof window !== 'undefined' ? window.location.hostname : ''));
   const slug = getRequestedWorkspaceSlug(options);
 
-  if (!slug && !hostname) return null;
+  if (!slug && (!hostname || isPlatformHost(hostname) || isLocalHost(hostname))) return null;
 
   const hydrated = await hydrateOrganizations();
   const organizations = Array.isArray(hydrated) ? hydrated : readOrganizationsSync();

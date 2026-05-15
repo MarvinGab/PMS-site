@@ -40,7 +40,7 @@ export default function DeleteOrgModal({ orgKey, onClose, onDeleted }) {
       dashboardFlags: nextFlags,
       orgs: nextOrgs,
     });
-    clearOrganizationState(orgKey);
+    await clearOrganizationState(orgKey);
     onDeleted && onDeleted();
     setSubmitting(false);
     onClose();

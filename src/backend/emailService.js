@@ -6,36 +6,33 @@ import {
   renderPlainEmailHtml,
   resolveTokens,
 } from './emailRenderer';
+import { buildWorkspaceUrl } from '../orgUtils';
 
 function getWorkspaceLoginUrl(org, identifier = '') {
   const slug = String(org?.workspaceSlug || '').trim();
   const domain = String(org?.domain || '').trim().toLowerCase();
   const loginIdentifier = String(identifier || '').trim().toLowerCase();
-  const loginParam = loginIdentifier ? `login=${encodeURIComponent(loginIdentifier)}` : '';
+  const loginQuery = loginIdentifier ? `?login=${encodeURIComponent(loginIdentifier)}` : '';
 
+  // Path-based scheme: pms.zarohr.com/<slug>?login=<id>#login
+  // Built relative to the current origin during dev/preview so links sent
+  // from a Vercel preview deploy point back to that preview, not prod.
   if (typeof window !== 'undefined') {
     const { origin, hostname } = window.location;
     const isLocalhost = hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '0.0.0.0';
     const isPlatformHost = hostname === 'zarohr.com' || hostname === 'www.zarohr.com' || hostname === 'pms.zarohr.com';
     const isTenantHost = hostname.endsWith('.zarohr.com') && !isPlatformHost;
     if (isLocalhost || !isTenantHost) {
-      const params = new URLSearchParams();
-      if (slug) params.set('workspace', slug);
-      if (loginIdentifier) params.set('login', loginIdentifier);
-      const query = params.toString();
-      return `${origin}/${query ? `?${query}` : ''}#login`;
+      const path = slug ? `/${slug}` : '/';
+      return `${origin}${path}${loginQuery}#login`;
     }
   }
 
   if (slug) {
-    const params = new URLSearchParams();
-    params.set('workspace', slug);
-    if (loginIdentifier) params.set('login', loginIdentifier);
-    return `https://pms.zarohr.com/?${params.toString()}#login`;
+    return `${buildWorkspaceUrl(slug, { absolute: true })}${loginQuery}#login`;
   }
-  const suffix = loginParam ? `?${loginParam}` : '';
-  if (domain) return `https://${domain}/${suffix}#login`;
-  return `https://zarohr.com/${suffix}#login`;
+  if (domain) return `https://${domain}/${loginQuery}#login`;
+  return `https://zarohr.com/${loginQuery}#login`;
 }
 
 function isDefaultPlatformLogo(url) {

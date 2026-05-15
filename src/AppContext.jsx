@@ -18,8 +18,8 @@ export const APP_DATA_KEY       = 'zarohr_app_data_v1';
 export const EMP_CREDENTIALS_KEY = 'zarohr_emp_credentials';
 export const EMP_SESSION_KEY    = 'zarohr_emp_session';
 
-export const SUPER_ADMIN_EMAIL = 'admin@zarohr.com';
-export const SUPER_ADMIN_PASS  = 'admin123';
+export const SUPER_ADMIN_EMAIL = String(import.meta.env.VITE_SUPER_ADMIN_EMAIL || '').toLowerCase().trim();
+export const SUPER_ADMIN_PASS  = String(import.meta.env.VITE_SUPER_ADMIN_PASSWORD || '');
 
 const LEGACY_SEED_ORG_KEYS = ['acme', 'nova', 'zenith'];
 const DEFAULT_ORGS = [];

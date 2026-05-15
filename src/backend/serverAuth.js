@@ -14,12 +14,14 @@ async function invokeAuthFunction(body) {
   }
 }
 
-export async function loginWithServerSession(identifier, password, organizationKey = '') {
+export async function loginWithServerSession(identifier, password, organizationKey = '', rememberMe = false, workspace = '') {
   return invokeAuthFunction({
     action: 'login',
     identifier: String(identifier || '').trim(),
     password: String(password || ''),
     organizationKey: String(organizationKey || '').trim(),
+    rememberMe: !!rememberMe,
+    workspace: String(workspace || '').trim(),
   });
 }
 

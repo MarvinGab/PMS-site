@@ -2,6 +2,36 @@ import { readOrganizationsSync, readWizardStateSync } from './backend/stateStore
 
 export const PMS_WIZARD_STATE_KEY = 'zarohr_pms_wizard_state_v1';
 
+// Canonical platform host. Used by buildWorkspaceUrl + tenant resolution.
+// Kept here (not in env) so welcome emails and the org directory show a
+// consistent, recognizable URL regardless of preview deploys.
+export const PLATFORM_HOST = 'pms.zarohr.com';
+
+function normalizeSlug(value) {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9-]/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-+|-+$/g, '');
+}
+
+// Build a tenant workspace URL using the new path-based scheme:
+//   https://pms.zarohr.com/<slug>[#hash]
+// Pass `absolute: false` to get the host-relative form ("pms.zarohr.com/slug")
+// suitable for inline display in the org directory. Empty slug returns the
+// platform root URL.
+export function buildWorkspaceUrl(slugOrOrg, { absolute = false, hash = '', protocol = 'https' } = {}) {
+  const slugSource = typeof slugOrOrg === 'object'
+    ? (slugOrOrg?.workspaceSlug || slugOrOrg?.orgCode || slugOrOrg?.key || '')
+    : slugOrOrg;
+  const slug = normalizeSlug(slugSource || '');
+  const path = slug ? `/${slug}` : '/';
+  const fragment = hash ? (hash.startsWith('#') ? hash : `#${hash}`) : '';
+  if (absolute) return `${protocol}://${PLATFORM_HOST}${path}${fragment}`;
+  return `${PLATFORM_HOST}${path}${fragment}`;
+}
+
 export function getWizardStorageKey(orgKey = '') {
   return `${PMS_WIZARD_STATE_KEY}:${orgKey || 'default'}`;
 }

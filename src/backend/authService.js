@@ -198,8 +198,12 @@ async function resolveEmployeeUser(orgs, credentials, identifier, password, scop
   };
 }
 
-export async function resolveLoginUser(identifier, password, superAdmin) {
+export async function resolveLoginUser(identifier, password, superAdmin, organizationKeyOverride = '') {
   const normalized = normalizeLower(identifier);
+
+  const tenantContext = await resolveTenantContext();
+  const scopedOrgKey = String(organizationKeyOverride || tenantContext?.orgKey || '').trim();
+
   if (
     normalized === normalizeLower(superAdmin?.email) &&
     password === String(superAdmin?.password || '')
@@ -207,16 +211,15 @@ export async function resolveLoginUser(identifier, password, superAdmin) {
     return { role: 'super-admin', userName: 'Super Admin' };
   }
 
+  // Org users must always sign in via their workspace URL.
+  if (!scopedOrgKey) return { __scopeError: 'org-user-needs-workspace-url' };
+
   const [orgsData, credentials] = await Promise.all([
     hydrateOrganizations(),
     hydrateEmployeeCredentials(),
   ]);
-  const tenantContext = await resolveTenantContext();
   const allOrgs = orgsData || readOrganizationsSync() || [];
-  const scopedOrgKey = tenantContext?.orgKey || '';
-  const orgs = scopedOrgKey
-    ? allOrgs.filter((org) => org.key === scopedOrgKey)
-    : allOrgs;
+  const orgs = allOrgs.filter((org) => org.key === scopedOrgKey);
   const creds = credentials || readEmployeeCredentialsSync() || {};
 
   const hrUser = await resolveHrUser(orgs, creds, identifier, password);

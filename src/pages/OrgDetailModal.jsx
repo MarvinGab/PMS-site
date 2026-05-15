@@ -1,5 +1,5 @@
 import { useApp } from '../AppContext';
-import { getOrganizationEmployeeCount, getOrganizationSetupMeta } from '../orgUtils';
+import { getOrganizationEmployeeCount, getOrganizationSetupMeta, buildWorkspaceUrl } from '../orgUtils';
 import '../admin.css';
 
 export default function OrgDetailModal({ orgKey, onClose }) {
@@ -10,7 +10,7 @@ export default function OrgDetailModal({ orgKey, onClose }) {
 
   const workspaceSlug = String(org.workspaceSlug || '').trim();
   const workspaceUrl = workspaceSlug
-    ? `pms.zarohr.com/?workspace=${workspaceSlug}`
+    ? buildWorkspaceUrl(workspaceSlug)
     : (org.domain || 'Not set');
   const setup = getOrganizationSetupMeta(org);
   const employeeCount = getOrganizationEmployeeCount(org);

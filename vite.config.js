@@ -7,7 +7,11 @@ const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
 
 export default defineConfig({
-  base: './',
+  // Absolute base so asset URLs in index.html resolve from the root regardless
+  // of which path the user is visiting (e.g. `/trio-infrastructure`). With
+  // `./` (the previous value) the browser would look for `/trio-infrastructure/assets/*`
+  // which doesn't exist and returns 404s after the path-based tenant switch.
+  base: '/',
   plugins: [react()],
   server: {
     watch: {

@@ -649,6 +649,40 @@ async function readRemoteStateScoped(recordKey, orgKey = '') {
   }
 }
 
+// Subscribe to remote changes on an `app_state` row (state_key + org_key).
+// Fires `onChange()` whenever the row is inserted/updated/deleted by ANY
+// session — including writes from other devices. The consumer is expected
+// to re-hydrate from the database inside `onChange` (e.g. by calling
+// hydrateWorkflow/hydrateMessages/etc.) so the UI reflects the new state.
+//
+// Returns an unsubscribe function. Callers must invoke it on unmount.
+export function subscribeToScopedState(recordKey, orgKey, onChange) {
+  if (!shouldUseSupabase || !supabase || typeof onChange !== 'function') {
+    return () => {};
+  }
+  const orgFilter = orgKey || '';
+  const channelName = `app_state:${recordKey}:${orgFilter || 'global'}:${Math.random().toString(36).slice(2, 8)}`;
+  const channel = supabase
+    .channel(channelName)
+    .on(
+      'postgres_changes',
+      { event: '*', schema: 'public', table: 'app_state', filter: `state_key=eq.${recordKey}` },
+      (payload) => {
+        // postgres_changes filter only narrows by state_key — narrow to the
+        // requested org_key in the handler. Fall back to `old` for deletes.
+        const row = (payload?.new && Object.keys(payload.new || {}).length > 0) ? payload.new : payload?.old;
+        if (!row) return;
+        if ((row.state_key || '') !== recordKey) return;
+        if ((row.org_key || '') !== orgFilter) return;
+        try { onChange(); } catch (error) { warnOnce(`realtime-handler:${recordKey}:${orgFilter || 'global'}`, error); }
+      },
+    )
+    .subscribe();
+  return () => {
+    try { supabase.removeChannel(channel); } catch { /* ignore teardown errors */ }
+  };
+}
+
 async function writeRemoteState(recordKey, orgKey = '', payload) {
   if (!shouldUseSupabase || !supabase) return false;
   try {
@@ -857,7 +891,7 @@ export async function deleteOrganizationRecord(orgKey = '') {
   return { ok: true };
 }
 
-export function clearOrganizationState(orgKey = '') {
+export async function clearOrganizationState(orgKey = '') {
   const scope = orgKey || 'default';
   removeLocalKey(`${WIZARD_STATE_KEY}:${scope}`);
   removeLocalKey(`${WIZARD_STATE_KEY}:${scope}`, { session: true });
@@ -865,7 +899,11 @@ export function clearOrganizationState(orgKey = '') {
   removeLocalKey(`${MESSAGES_KEY}:${scope}`);
   removeLocalKey(getNormalizedSyncKey(scope));
 
-  const credentials = readEmployeeCredentialsSync();
+  // Hydrate before mutating: the local cache may be stale relative to the
+  // remote credentials blob (e.g. someone else changed their password since
+  // this tab loaded). Reading remote first prevents that change from being
+  // clobbered when we persist this filtered set back.
+  const credentials = await hydrateEmployeeCredentials();
   if (credentials && typeof credentials === 'object') {
     const nextCredentials = Object.fromEntries(
       Object.entries(credentials).filter(([, value]) => value?.orgKey !== orgKey)
@@ -876,7 +914,7 @@ export function clearOrganizationState(orgKey = '') {
   }
 }
 
-export function migrateOrganizationState(oldOrgKey = '', newOrgKey = '') {
+export async function migrateOrganizationState(oldOrgKey = '', newOrgKey = '') {
   const fromKey = String(oldOrgKey || '').trim();
   const toKey = String(newOrgKey || '').trim();
 
@@ -903,7 +941,9 @@ export function migrateOrganizationState(oldOrgKey = '', newOrgKey = '') {
     if (copySession) removeLocalKey(fromStorageKey, { session: true });
   });
 
-  const credentials = readEmployeeCredentialsSync();
+  // Hydrate before mutating so the blob we re-persist reflects any
+  // server-side credential changes that happened since this tab loaded.
+  const credentials = await hydrateEmployeeCredentials();
   if (credentials && typeof credentials === 'object') {
     let changed = false;
     const nextCredentials = Object.fromEntries(
@@ -1029,7 +1069,10 @@ export async function syncEmployeeCredentialsForOrg({ orgKey = '', tempPassword 
       .filter(Boolean)
   );
 
-  const existing = { ...(readEmployeeCredentialsSync() || {}) };
+  // Hydrate from remote so we don't overwrite credential changes (e.g. a
+  // freshly-set permanent password) that happened since this tab cached
+  // the blob locally.
+  const existing = { ...(await hydrateEmployeeCredentials() || {}) };
   let changed = false;
 
   Object.entries(existing).forEach(([credentialKey, credential]) => {
@@ -1093,7 +1136,10 @@ export async function rotateEmployeeOtpsForSend({ orgKey = '', employees = [] } 
   const list = Array.isArray(employees) ? employees : [];
   if (list.length === 0) return new Map();
 
-  const existing = { ...(readEmployeeCredentialsSync() || {}) };
+  // Hydrate so we rotate OTPs on top of fresh remote state — otherwise
+  // an employee who set a permanent password since this tab loaded could
+  // get reverted to a new OTP and forced back into the temp-password flow.
+  const existing = { ...(await hydrateEmployeeCredentials() || {}) };
   const plaintextByCode = new Map();
   let changed = false;
 
@@ -1122,10 +1168,12 @@ export async function rotateEmployeeOtpsForSend({ orgKey = '', employees = [] } 
 
 // After a successful send, scrub the plaintext field so it doesn't sit in
 // storage. The passwordHash remains and is what the auth flow checks.
-export function clearPendingEmployeeOtps({ orgKey = '', codes = [] } = {}) {
+export async function clearPendingEmployeeOtps({ orgKey = '', codes = [] } = {}) {
   const normalizedOrgKey = String(orgKey || '').trim();
   if (!normalizedOrgKey || !codes?.length) return;
-  const existing = { ...(readEmployeeCredentialsSync() || {}) };
+  // Hydrate first so the persisted blob doesn't roll back any concurrent
+  // server-side credential update.
+  const existing = { ...(await hydrateEmployeeCredentials() || {}) };
   let changed = false;
   codes.forEach((rawCode) => {
     const code = normalizeCode(rawCode);
@@ -1147,9 +1195,10 @@ export async function hydrateEmployeeCredentials() {
     writeLocalJson(EMP_CREDENTIALS_KEY, remote);
     return remote;
   }
-  if (local && Object.keys(local).length > 0) {
-    void writeRemoteState('employee_credentials', '', local);
-  }
+  // Remote read returned null/falsy — could be a transient error, an RLS
+  // denial, or a genuinely empty row. Never push the local cache up here:
+  // doing so would overwrite a freshly-changed password (written server-side
+  // via the edge function) with a stale snapshot from this browser.
   return local;
 }
 

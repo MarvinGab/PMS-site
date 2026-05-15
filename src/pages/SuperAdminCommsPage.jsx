@@ -6,6 +6,7 @@ import zaroLogo from '../../images/final zaro logo.png';
 import { shouldUseSupabase } from '../backend/config';
 import { supabase } from '../backend/supabaseClient';
 import { uploadEmailLogoAsset, ensureDefaultZaroLogoUrl, isPublicBrandAssetUrl } from '../backend/brandAssetStorage';
+import { buildWorkspaceUrl } from '../orgUtils';
 
 // ─── Constants (mirrored from HR-side ModuleComms) ───────────────────────
 const COMMS_CHANNELS = [
@@ -366,7 +367,7 @@ export default function SuperAdminCommsPage() {
   const firstName = (n) => String(n || '').trim().split(/\s+/).filter(Boolean)[0] || 'there';
   const workspaceUrl = (org) => {
     const slug = String(org?.workspaceSlug || '').trim();
-    return slug ? `https://pms.zarohr.com/?workspace=${encodeURIComponent(slug)}#login` : '#';
+    return slug ? buildWorkspaceUrl(slug, { absolute: true, hash: 'login' }) : '#';
   };
   const resolve = (text) => {
     if (!text) return text;

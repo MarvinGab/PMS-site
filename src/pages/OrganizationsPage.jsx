@@ -5,12 +5,13 @@ import OrgDetailModal from './OrgDetailModal';
 import DeleteOrgModal from './DeleteOrgModal';
 import { useApp } from '../AppContext';
 import { logAuditEvent } from '../backend/auditLog';
-import { getOrganizationEmployeeCount, getOrganizationSetupMeta } from '../orgUtils';
+import { getOrganizationEmployeeCount, getOrganizationSetupMeta, buildWorkspaceUrl } from '../orgUtils';
 import '../admin.css';
 
 function getWorkspaceUrl(org) {
   const slug = String(org?.workspaceSlug || '').trim();
-  return slug ? `pms.zarohr.com/?workspace=${slug}` : (org?.domain || '');
+  if (slug) return buildWorkspaceUrl(slug);
+  return org?.domain || '';
 }
 
 function OrgRow({ org, activeMenu, onMenuToggle, onOpen, onEdit, onDelete, onReopenSetup, onCloseSetup }) {

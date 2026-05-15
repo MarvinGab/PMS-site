@@ -21,6 +21,7 @@ function getNavSteps(config) {
       ...(hasBscPrefill ? [{ id: 'prefill_data', label: 'Pre-fill Data', desc: 'Upload pre-assigned KRAs/KPIs' }] : []),
       ...(hasBscLibraries ? [{ id: 'goal_libraries', label: 'Goal Libraries', desc: 'Build or upload KRA libraries' }] : []),
       { id: 'limits',         label: 'Goal Limits',           desc: 'KRA/KPI count & weight rules' },
+      { id: 'targets',        label: 'Targets & Auto-Rating', desc: 'Achievement mapping' },
       { id: 'emp_settings',   label: 'Employee Settings',     desc: 'Manager hierarchy & email rules' },
       { id: 'upload',         label: 'Employee Upload',       desc: 'Upload employees, managers & routing' },
       { id: 'summary',        label: 'Summary & Launch',      desc: 'Review & go live' },
@@ -34,6 +35,7 @@ function getNavSteps(config) {
       ...(hasBscPrefill ? [{ id: 'prefill_data', label: 'Pre-fill Data', desc: 'Upload pre-assigned KRAs/KPIs' }] : []),
       ...(hasBscLibraries ? [{ id: 'goal_libraries', label: 'Goal Libraries', desc: 'Build or upload KRA libraries' }] : []),
       { id: 'limits',         label: 'Goal Limits',           desc: 'KRA/KPI count & weight rules' },
+      { id: 'targets',        label: 'Targets & Auto-Rating', desc: 'Achievement mapping' },
       { id: 'emp_settings',   label: 'Employee Settings',     desc: 'Manager hierarchy & email rules' },
       { id: 'upload',         label: 'Employee Upload',       desc: 'Upload employees, managers & routing' },
       { id: 'summary',        label: 'Summary & Launch',      desc: 'Review & go live' },
@@ -45,15 +47,13 @@ function getNavSteps(config) {
     { id: 'goals',        label: 'Goal Library',           desc: 'Flat KRA / KPI structure' },
   ];
   if (hasLibrary) steps.push({ id: 'kra_library', label: 'KRA Library', desc: 'Build & upload goal library' });
-  steps.push(
-    { id: 'limits',       label: 'Limits & Rules',          desc: 'Counts, weights & permissions' },
-    { id: 'hierarchy',    label: 'Rating Hierarchy',        desc: 'Who rates whom' },
-    { id: 'scale',        label: 'Rating Scale',            desc: 'Points & labels' },
-  );
+  steps.push({ id: 'limits', label: 'Limits & Rules', desc: 'Counts, weights & permissions' });
   if (frameworkId !== 'kra') {
     steps.push({ id: 'targets', label: 'Targets & Auto-Rating', desc: 'Achievement mapping' });
   }
   steps.push(
+    { id: 'hierarchy',    label: 'Rating Hierarchy',        desc: 'Who rates whom' },
+    { id: 'scale',        label: 'Rating Scale',            desc: 'Points & labels' },
     { id: 'competencies', label: 'Competencies',            desc: 'Behavioural assessment' },
     { id: 'bellcurve',    label: 'Bell Curve',              desc: 'Normalization bands' },
     { id: 'phases',       label: 'Phase Windows',           desc: 'Cycle dates' },
@@ -6155,7 +6155,7 @@ function _OldStepGoalLibraryBody_REMOVED({ config, update }) {
         render: () => (
           <ActiveNode question="What should the library include?" color={TREE_BLUE}>
             <ChoiceGrid color={TREE_BLUE} selectedId={c.goalKpiMode} onSelect={v => choose('goalKpiMode', v, 'n_kpi')} choices={[
-              { id: 'kra-only', icon: '📋', title: 'KRAs only', desc: 'You define the result areas. Each employee will fill in their own KPIs and targets during goal setting.' },
+              { id: 'kra-only', icon: '📋', title: 'KRAs only', desc: c.targetsEnabled === false ? 'You define the result areas. Each employee will fill in their own KPIs during goal setting.' : 'You define the result areas. Each employee will fill in their own KPIs and targets during goal setting.' },
               { id: 'kra-kpi',  icon: '🎯', title: 'KRAs and KPIs', desc: 'You pre-define both the result areas and the specific metrics. Employees get a fully built-out library to work from.' },
             ]} />
           </ActiveNode>
@@ -6171,7 +6171,7 @@ function _OldStepGoalLibraryBody_REMOVED({ config, update }) {
           { id: 'edit-freely', icon: '🔓', title: 'They can edit and add freely', desc: 'Employees can edit KPI details, adjust weights, and add new KRAs or KPIs. Requires manager approval.' },
         ] : [
           { id: 'locked',      icon: '🔒', title: 'View and submit only',   desc: 'Employees see the pre-loaded KRAs and submit without making any changes.' },
-          { id: 'add-kpis',    icon: '✏️', title: 'They fill in their own KPIs', desc: 'Employees get the pre-loaded KRAs and define their own KPI names and targets under each one.' },
+          { id: 'add-kpis',    icon: '✏️', title: 'They fill in their own KPIs', desc: c.targetsEnabled === false ? 'Employees get the pre-loaded KRAs and define their own KPI names under each one.' : 'Employees get the pre-loaded KRAs and define their own KPI names and targets under each one.' },
           { id: 'edit-freely', icon: '🔓', title: 'They can edit and add freely', desc: 'Employees can add new KRAs, edit weights, and define their own KPIs. Requires manager approval.' },
         ];
         const editSummaryMap = {
@@ -7891,9 +7891,29 @@ function StepTargets({ config, update }) {
     { name: 'Customer complaints', direction: '↓ Lower is better',  target: '≤5',    achievement: '3',    score: '5 — Outstanding (40% below)' },
     { name: 'Code defect rate',    direction: '↓ Lower is better',  target: '≤2%',   achievement: '4%',   score: '2 — Below Expectations' },
   ];
+  const targetsOn = config.targetsEnabled !== false;
   return (
     <div>
       <SectionHead title="Target setting & auto-rating" sub="Define how targets work and how achievement maps to ratings." />
+      <Card>
+        <CardHead title="Targets module" />
+        <CardBody>
+          <TogRow
+            label="Use targets & auto-rating for this organization"
+            desc="When off, target/achievement fields are hidden across the app and ratings stay fully manual. Existing target data is preserved."
+            last
+            on={targetsOn}
+            onChange={(v) => update('targetsEnabled', v)}
+          />
+        </CardBody>
+      </Card>
+      {!targetsOn && (
+        <Banner type="blue">
+          <span>ℹ️</span>
+          <span>Targets are turned off. Goal cards and reports will not show target / achievement / auto-rating fields. Turn the toggle above back on to use them again.</span>
+        </Banner>
+      )}
+      {targetsOn && (
       <Card>
         <CardHead title="Target configuration" />
         <CardBody>
@@ -7949,6 +7969,7 @@ function StepTargets({ config, update }) {
           </div>
         </CardBody>
       </Card>
+      )}
     </div>
   );
 }
@@ -9190,7 +9211,7 @@ const INITIAL = {
   freezeGoalSetting: true, managerUnlockGoals: true, freezeSelfEval: true,
   hrReopenSelf: true, midYearRevision: false,
   // Targets
-  autoRating: true, managerOverrideAuto: true,
+  targetsEnabled: true, autoRating: true, managerOverrideAuto: true,
   // Competencies
   competenciesEnabled: true,
   selectedCompetencies: ['Communication', 'Problem Solving', 'Teamwork', 'Ownership', 'Technical Expertise'],
@@ -9408,6 +9429,10 @@ export default function PMSWizard({ onLaunched, orgKeyOverride, orgNameOverride 
       }
       if (key === 'goalLibraryScope' && val !== prev.goalLibraryScope) {
         next.goalSegmentValuesConfirmed = false;
+      }
+      if (key === 'targetsEnabled' && val === false) {
+        next.autoRating = false;
+        next.managerOverrideAuto = false;
       }
       if ((key === 'managerLevels' && val !== prev.managerLevels) || (key === 'requireEmail' && val !== prev.requireEmail)) {
         next.empSettingsAppliedSnapshot = null;

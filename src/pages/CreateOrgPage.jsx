@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 import AdminShell from '../components/AdminShell';
 import { useApp } from '../AppContext';
 import { saveOrganizationRecord } from '../backend/stateStore';
+import { buildWorkspaceUrl } from '../orgUtils';
 import '../admin.css';
 
 const PMS_MODULES = ['Performance Management'];
@@ -491,7 +492,7 @@ function StepWorkspace({ isEdit, form, onNameInput, onCodeInput, setField, codeC
           </div>
           <div className="domain-preview-box">
             <span className="domain-preview-label">Your workspace URL:</span>
-            <span className="domain-preview-url">{form.workspace_slug ? `pms.zarohr.com/?workspace=${form.workspace_slug}` : <span style={{ color: 'var(--ink-4)' }}>pms.zarohr.com/?workspace=yourorg</span>}</span>
+            <span className="domain-preview-url">{form.workspace_slug ? buildWorkspaceUrl(form.workspace_slug) : <span style={{ color: 'var(--ink-4)' }}>pms.zarohr.com/yourorg</span>}</span>
             {form.workspace_slug && (
               <span className={`domain-avail-badge ${slugCheck.ok ? 'avail-ok' : 'avail-err'}`}>
                 {slugCheck.ok ? '✓ Available' : '✗ Unavailable'}

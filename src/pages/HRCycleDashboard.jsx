@@ -12,6 +12,7 @@ import {
   persistWizardState,
   hydrateWizardState,
   readEmployeeCredentialsSync,
+  hydrateEmployeeCredentials,
   persistEmployeeCredentials,
   persistEmployeeSession,
   readOrgBrandCacheSync,
@@ -1974,7 +1975,7 @@ function ModuleComms({ employees, groups, org, config, onUpdate, onConfigPatch, 
         // actually went out is cleared; failed rows keep theirs so HR can
         // resend without re-rotating.
         if (cycleLaunchOtpCodes.length > 0 && !failed) {
-          clearPendingEmployeeOtps({ orgKey: org.key, codes: cycleLaunchOtpCodes });
+          await clearPendingEmployeeOtps({ orgKey: org.key, codes: cycleLaunchOtpCodes });
         }
         setSendState({
           status: 'sent',
@@ -4269,7 +4270,7 @@ function ModuleRoster({ employees, config, onUpdate, orgKey }) {
     return getEmpStage(emp || {});
   }
 
-  function cleanupRemovedEmployeeData(codes) {
+  async function cleanupRemovedEmployeeData(codes) {
     const normalized = new Set((Array.isArray(codes) ? codes : []).map((c) => String(c || '').trim().toLowerCase()).filter(Boolean));
     if (normalized.size === 0) return;
 
@@ -4288,9 +4289,12 @@ function ModuleRoster({ employees, config, onUpdate, orgKey }) {
       saveWorkflowState(orgKey, { submissions: nextSubs, notifications: nextNotifications });
     }
 
-    const creds = readEmployeeCredentialsSync();
+    // Hydrate the credential blob from remote before deleting entries.
+    // Otherwise we'd write back a stale snapshot that wipes any password
+    // changes made (server-side) by other users since this tab loaded.
+    const creds = { ...(await hydrateEmployeeCredentials() || {}) };
     let changed = false;
-    Object.keys(creds || {}).forEach((key) => {
+    Object.keys(creds).forEach((key) => {
       const entry = creds[key];
       const keyMatch = normalized.has(String(key || '').trim().toLowerCase());
       const codeMatch = normalized.has(String(entry?.empCode || '').trim().toLowerCase());
@@ -6332,7 +6336,10 @@ function ModuleHRTeam({ org, orgKey, employees, groups, onOrgChange }) {
       isTemp: !formIsInPMS,
     };
     if (!formIsInPMS) {
-      const creds = readEmployeeCredentialsSync();
+      // Hydrate before adding the new entry so the persisted blob retains
+      // any password changes that happened server-side since this tab
+      // cached the credentials locally.
+      const creds = { ...(await hydrateEmployeeCredentials() || {}) };
       creds[email] = {
         passwordHash: await hashPasswordValue(genPass),
         name,
@@ -6351,10 +6358,12 @@ function ModuleHRTeam({ org, orgKey, employees, groups, onOrgChange }) {
     resetForm();
   }
 
-  function removeMember(id) {
+  async function removeMember(id) {
     const m = hrTeam.find((x) => x.id === id);
     if (m && !m.isInPMS && m.email) {
-      const creds = readEmployeeCredentialsSync();
+      // Hydrate before deleting so we don't roll back unrelated password
+      // changes when we persist the remaining credential blob.
+      const creds = { ...(await hydrateEmployeeCredentials() || {}) };
       delete creds[m.email];
       persistEmployeeCredentials(creds);
     }
@@ -6708,7 +6717,10 @@ export default function HRCycleDashboard() {
     if (!tempPass || !liveEmployees.length) return undefined;
 
     (async () => {
-      const existing = readEmployeeCredentialsSync();
+      // Hydrate from remote — using the local cache here would mean any
+      // password change another tab made since load could be overwritten
+      // when this effect persists the blob.
+      const existing = { ...(await hydrateEmployeeCredentials() || {}) };
       let changed = false;
       for (const emp of liveEmployees) {
         if (emp?._outsidePms) continue;

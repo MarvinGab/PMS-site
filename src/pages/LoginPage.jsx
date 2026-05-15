@@ -6,7 +6,7 @@ import {
   SUPER_ADMIN_EMAIL, SUPER_ADMIN_PASS,
 } from '../AppContext';
 import { resolveLoginUser, changeEmployeePassword } from '../backend/authService';
-import { persistEmployeeSession } from '../backend/stateStore';
+import { hydrateOrganizations, persistEmployeeSession } from '../backend/stateStore';
 import {
   loginWithServerSession,
   changePasswordOnServer,
@@ -27,6 +27,37 @@ function getLoginPrefillIdentifier() {
   } catch {
     return '';
   }
+}
+
+function normalizeWorkspaceInput(value) {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/^https?:\/\//, '')
+    .replace(/^pms\.zarohr\.com\//, '')
+    .replace(/^www\./, '')
+    .replace(/[#?].*$/, '')
+    .replace(/\/+$/, '')
+    .replace(/[^a-z0-9-]/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-+|-+$/g, '');
+}
+
+function getWorkspaceSlugFromTenant(tenant) {
+  return normalizeWorkspaceInput(tenant?.workspaceSlug || '');
+}
+
+function getScopedRouteUrl(tenant, hash) {
+  if (typeof window === 'undefined') return `#${hash}`;
+  const slug = getWorkspaceSlugFromTenant(tenant);
+  if (!slug) return `#${hash}`;
+  const current = window.location;
+  return `${current.origin}/${slug}#${hash}`;
+}
+
+function getPlatformRouteUrl(hash) {
+  if (typeof window === 'undefined') return `#${hash}`;
+  return `${window.location.origin}/#${hash}`;
 }
 
 function RightPanel() {
@@ -390,6 +421,8 @@ export default function LoginPage() {
   const [forgotOpen, setForgotOpen] = useState(false);
   const [resetBanner, setResetBanner] = useState('');
   const [tenant, setTenant] = useState(null);
+  const [workspaceInput, setWorkspaceInput] = useState('');
+  const [step, setStep] = useState('credentials'); // 'credentials' | 'workspace'
 
   useEffect(() => {
     let cancelled = false;
@@ -407,39 +440,137 @@ export default function LoginPage() {
     if (prefill) setIdentifier(prefill);
   }, []);
 
+  async function resolveWorkspaceForLogin() {
+    const token = normalizeWorkspaceInput(workspaceInput);
+    if (!token) return null;
+
+    const loadedOrgs = Array.isArray(orgs) && orgs.length > 0
+      ? orgs
+      : (await hydrateOrganizations()) || [];
+    const matchedOrg = loadedOrgs.find((org) => {
+      const slug = normalizeWorkspaceInput(org.workspaceSlug || '');
+      const code = normalizeWorkspaceInput(org.orgCode || '');
+      const key = normalizeWorkspaceInput(org.key || '');
+      return token === slug || token === code || token === key;
+    });
+    if (matchedOrg?.key) {
+      return {
+        orgKey: matchedOrg.key,
+        orgName: matchedOrg.name || '',
+        workspaceSlug: normalizeWorkspaceInput(matchedOrg.workspaceSlug || matchedOrg.orgCode || matchedOrg.key || token),
+        matchedBy: 'workspace_input',
+      };
+    }
+
+    const ctx = await resolveTenantContext({
+      hostname: typeof window !== 'undefined' ? window.location.hostname : '',
+      pathname: `/${token}`,
+    });
+    return ctx?.orgKey ? ctx : null;
+  }
+
   async function handleSubmit(e) {
     e.preventDefault();
     setError('');
     setLoading(true);
 
+    let loginTenant = tenant;
+    let workspaceToken = '';
+
+    // If the user has typed a workspace (either because they're already on
+    // the workspace step, or they prefilled it), resolve it to an org now so
+    // we can pass an explicit orgKey to the server.
+    if (workspaceInput.trim()) {
+      workspaceToken = normalizeWorkspaceInput(workspaceInput);
+      const resolved = await resolveWorkspaceForLogin();
+      if (resolved?.orgKey) {
+        loginTenant = resolved;
+        setTenant(resolved);
+      } else {
+        loginTenant = { workspaceSlug: workspaceToken };
+      }
+    }
+
+    const serverAuthResult = await loginWithServerSession(
+      identifier,
+      password,
+      loginTenant?.orgKey || '',
+      remember,
+      workspaceToken || loginTenant?.workspaceSlug || '',
+    );
+
+    // Helper: did the server tell us this account needs a workspace? We don't
+    // pre-detect super-admin attempts client-side anymore (that depended on
+    // VITE_SUPER_ADMIN_EMAIL matching the server's APP_AUTH_SUPER_ADMIN_EMAIL,
+    // which is a fragile coupling) — instead we just submit and let the
+    // server be the source of truth on who needs a workspace.
+    function serverSaysNeedsWorkspace(result) {
+      if (!result || result.ok !== false) return false;
+      if (String(result.code || '') === 'org-user-needs-workspace-url') return true;
+      return /sign in from your workspace url/i.test(String(result.error || ''));
+    }
+
     let user = null;
-    const serverAuthResult = await loginWithServerSession(identifier, password, tenant?.orgKey || '');
     if (serverAuthResult?.ok && serverAuthResult?.user) {
       user = {
         ...serverAuthResult.user,
         serverSessionToken: serverAuthResult.serverSessionToken || null,
       };
+    } else if (serverAuthResult?.ok === false) {
+      const errText = String(serverAuthResult.error || '');
+      const backendUnavailable = /not configured|failed to contact/i.test(errText);
+      if (!backendUnavailable) {
+        // Server reachable. If it asked for a workspace and we haven't
+        // collected one yet, advance to the workspace step instead of
+        // bouncing the user with an error.
+        if (serverSaysNeedsWorkspace(serverAuthResult) && step === 'credentials' && !workspaceInput.trim()) {
+          setStep('workspace');
+          setLoading(false);
+          return;
+        }
+        setError(errText || 'Invalid credentials.');
+        setLoading(false);
+        return;
+      }
+      // Backend unreachable — fall through to the local resolver.
+      user = await resolveLoginUser(identifier, password, {
+        email: SUPER_ADMIN_EMAIL,
+        password: SUPER_ADMIN_PASS,
+      }, loginTenant?.orgKey || '');
     } else {
       user = await resolveLoginUser(identifier, password, {
         email: SUPER_ADMIN_EMAIL,
         password: SUPER_ADMIN_PASS,
-      });
+      }, loginTenant?.orgKey || '');
     }
     if (!user) {
       setError('Invalid credentials. Check your email / employee code and password.');
       setLoading(false);
       return;
     }
+    if (user.__scopeError === 'org-user-needs-workspace-url') {
+      // Same escalation behavior for the local fallback path — show the
+      // workspace prompt instead of dead-ending with an error message.
+      if (step === 'credentials' && !workspaceInput.trim()) {
+        setStep('workspace');
+        setLoading(false);
+        return;
+      }
+      setError('Enter your company workspace to continue.');
+      setLoading(false);
+      return;
+    }
 
-    // Defensive isTemp detection: the server-side Edge Function may not yet
-    // return isTemp for HR admins (depends on deploy state). Cross-check the
-    // typed password against the org's temporaryPassword so a forced change
-    // is triggered regardless of what the server returned.
-    if (!user.isTemp && user.role === 'hr-admin' && user.orgKey) {
+    // Defensive isTemp detection only applies when the server itself didn't
+    // identify a credential record. Once a permanent password exists, the
+    // server already signaled isTemp:false — overriding that here would
+    // force a needless password reset every login and silently clobber the
+    // admin's password via the change-password flow.
+    if (!user.isTemp && !user.credentialKey && user.role === 'hr-admin' && user.orgKey) {
       const matchedOrg = (orgs || []).find((o) => o.key === user.orgKey);
       const orgTempPwd = String(matchedOrg?.temporaryPassword || '');
       if (orgTempPwd && orgTempPwd === password) {
-        user = { ...user, isTemp: true, credentialKey: user.credentialKey || String(matchedOrg?.hrAdminEmail || '').toLowerCase() };
+        user = { ...user, isTemp: true, credentialKey: String(matchedOrg?.hrAdminEmail || '').toLowerCase() };
       }
     }
 
@@ -450,7 +581,7 @@ export default function LoginPage() {
 
     if (user.role === 'employee') {
       if (user.isTemp) {
-        setPendingEmp({ ...user, tempPassword: password });
+        setPendingEmp({ ...user, tempPassword: password, workspaceSlug: loginTenant?.workspaceSlug || '' });
         setPendingUserKind('employee');
         setForcePwChange(true);
         setLoading(false);
@@ -464,10 +595,13 @@ export default function LoginPage() {
         orgKey: user.orgKey || '',
       });
       login('employee', { userName: user.userName });
-      window.location.hash = '#employee';
+      const targetTenant = loginTenant?.orgKey ? loginTenant : { ...loginTenant, workspaceSlug: loginTenant?.workspaceSlug || user.workspaceSlug };
+      const routeUrl = getScopedRouteUrl(targetTenant, 'employee');
+      if (routeUrl.startsWith('#')) window.location.hash = '#employee';
+      else window.location.assign(routeUrl);
     } else if (user.role === 'hr-admin') {
       if (user.isTemp) {
-        setPendingEmp({ ...user, tempPassword: password });
+        setPendingEmp({ ...user, tempPassword: password, workspaceSlug: loginTenant?.workspaceSlug || '' });
         setPendingUserKind('hr-admin');
         setForcePwChange(true);
         setLoading(false);
@@ -483,11 +617,39 @@ export default function LoginPage() {
         allowedModules: user.allowedModules || null,
         serverSessionToken: user.serverSessionToken || null,
       });
-      window.location.hash = '#hr-home';
+      const targetTenant = loginTenant?.orgKey ? loginTenant : { ...loginTenant, workspaceSlug: loginTenant?.workspaceSlug || user.workspaceSlug };
+      const routeUrl = getScopedRouteUrl(targetTenant, 'hr-home');
+      if (routeUrl.startsWith('#')) window.location.hash = '#hr-home';
+      else window.location.assign(routeUrl);
     } else {
       login('super-admin', { userName: user.userName, serverSessionToken: user.serverSessionToken || null });
-      window.location.hash = '#organizations';
+      window.location.assign(getPlatformRouteUrl('organizations'));
     }
+  }
+
+  async function openForgotPassword() {
+    setError('');
+    if (tenant?.orgKey) {
+      setForgotOpen(true);
+      return;
+    }
+    if (!workspaceInput.trim()) {
+      if (step === 'credentials') {
+        setStep('workspace');
+        return;
+      }
+      setError('Enter your company workspace before resetting your password.');
+      return;
+    }
+    setLoading(true);
+    const resolved = await resolveWorkspaceForLogin();
+    setLoading(false);
+    if (!resolved?.orgKey) {
+      setError('Workspace not found. Check the company slug or code from your HR invite.');
+      return;
+    }
+    setTenant(resolved);
+    setForgotOpen(true);
   }
 
   if (forcePwChange && pendingEmp) {
@@ -507,7 +669,9 @@ export default function LoginPage() {
               allowedModules: pendingEmp.allowedModules || null,
               serverSessionToken,
             });
-            window.location.hash = '#hr-home';
+            const routeUrl = getScopedRouteUrl(pendingEmp, 'hr-home');
+            if (routeUrl.startsWith('#')) window.location.hash = '#hr-home';
+            else window.location.assign(routeUrl);
             return;
           }
           persistEmployeeSession({
@@ -518,7 +682,9 @@ export default function LoginPage() {
             orgKey: pendingEmp.orgKey || '',
           });
           login('employee', { userName: pendingEmp.userName, serverSessionToken });
-          window.location.hash = '#employee';
+          const routeUrl = getScopedRouteUrl(pendingEmp, 'employee');
+          if (routeUrl.startsWith('#')) window.location.hash = '#employee';
+          else window.location.assign(routeUrl);
         }}
       />
     );
@@ -538,15 +704,19 @@ export default function LoginPage() {
           {tenant?.orgName && (
             <div className="login-workspace-badge">{tenant.orgName} workspace</div>
           )}
-          <h1 className="login-heading">Welcome back</h1>
+          <h1 className="login-heading">
+            {step === 'workspace' ? 'One more step' : 'Welcome back'}
+          </h1>
           <p className="login-sub">
-            {tenant?.orgName
-              ? `Sign in to ${tenant.orgName} to continue.`
-              : 'Sign in to your workspace to continue.'}
+            {step === 'workspace'
+              ? 'Enter your company workspace to finish signing in.'
+              : tenant?.orgName
+                ? `Sign in to ${tenant.orgName} to continue.`
+                : 'Sign in to continue.'}
           </p>
         </div>
 
-        {!forgotOpen ? (
+        {!forgotOpen && step === 'credentials' ? (
         <form className="login-form anim-fadeup delay-3" onSubmit={handleSubmit}>
           <div className="form-group">
             <label className="lbl">Email or Employee Code</label>
@@ -596,7 +766,7 @@ export default function LoginPage() {
             <button
               type="button"
               className="login-forgot login-forgot-btn"
-              onClick={() => setForgotOpen(true)}
+              onClick={openForgotPassword}
             >
               Forgot password?
             </button>
@@ -613,6 +783,55 @@ export default function LoginPage() {
             {loading ? 'Signing in…' : 'Sign In'}
           </button>
         </form>
+        ) : !forgotOpen && step === 'workspace' ? (
+        <form className="login-form anim-fadeup delay-3" onSubmit={handleSubmit}>
+          <div className="form-group">
+            <label className="lbl">Workspace</label>
+            <input
+              type="text"
+              placeholder="company-slug or company code"
+              value={workspaceInput}
+              onChange={e => {
+                setWorkspaceInput(e.target.value);
+                if (error) setError('');
+              }}
+              autoComplete="organization"
+              autoFocus
+              required
+            />
+            <div style={{ marginTop: 6, fontSize: 12, color: 'var(--ink-3)', lineHeight: 1.45 }}>
+              Find this in your HR welcome email — it's the company slug or code for your workspace.
+            </div>
+          </div>
+
+          {error && <div className="login-error">{error}</div>}
+
+          <button
+            type="submit"
+            className="btn btn-primary btn-xl w-full mt-8"
+            disabled={loading}
+          >
+            {loading ? 'Signing in…' : 'Sign In'}
+          </button>
+
+          <button
+            type="button"
+            className="login-inline-back"
+            onClick={() => { setStep('credentials'); setError(''); }}
+          >
+            ← Back
+          </button>
+
+          <div className="flex justify-end items-center login-meta-row" style={{ marginTop: 8 }}>
+            <button
+              type="button"
+              className="login-forgot login-forgot-btn"
+              onClick={openForgotPassword}
+            >
+              Forgot password?
+            </button>
+          </div>
+        </form>
         ) : (
           <ForgotPasswordPanel
             initialIdentifier={identifier}
@@ -623,6 +842,7 @@ export default function LoginPage() {
             }}
             onSuccess={(usedIdentifier) => {
               setForgotOpen(false);
+              setStep('credentials');
               setIdentifier(usedIdentifier || identifier);
               setPassword('');
               setResetBanner('Password updated. Sign in with your new password.');

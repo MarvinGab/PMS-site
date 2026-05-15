@@ -9,6 +9,10 @@ const corsHeaders = {
 }
 
 const SESSION_TTL_MS = 1000 * 60 * 60 * 12
+// Longer "stay signed in" lifetime — used when the user ticked Remember me
+// on the login screen. Matches the auto-sign-in feel of Gmail / Amazon
+// without leaving sessions live indefinitely.
+const SESSION_TTL_REMEMBER_MS = 1000 * 60 * 60 * 24 * 30
 const SUPER_ADMIN_EMAIL = 'admin@zarohr.com'
 const SUPER_ADMIN_PASSWORD = 'admin123'
 
@@ -31,6 +35,20 @@ function normalizeLower(value: unknown) {
 
 function normalizeCode(value: unknown) {
   return String(value || '').trim()
+}
+
+function normalizeWorkspace(value: unknown) {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/^https?:\/\//, '')
+    .replace(/^pms\.zarohr\.com\//, '')
+    .replace(/^www\./, '')
+    .replace(/[#?].*$/, '')
+    .replace(/\/+$/, '')
+    .replace(/[^a-z0-9-]/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-+|-+$/g, '')
 }
 
 function textEncoder() {
@@ -107,6 +125,33 @@ async function getOrganizations(client: ReturnType<typeof createClient>) {
   return (data || []) as OrgRow[]
 }
 
+async function resolveOrganizationKeyFromWorkspace(
+  client: ReturnType<typeof createClient>,
+  organizationKey = '',
+  workspace = '',
+) {
+  const explicitKey = String(organizationKey || '').trim()
+  if (explicitKey) return explicitKey
+
+  const token = normalizeWorkspace(workspace)
+  if (!token) return ''
+
+  // Avoid `.maybeSingle()` after `.or()` — when more than one row happens to
+  // match (e.g. a slug that also collides with an org_code on a different
+  // org), `maybeSingle` throws "PGRST116" and the whole edge function 500s.
+  // Fetching `.limit(1)` and reading `data[0]` is bulletproof regardless of
+  // how many rows the OR filter would have returned.
+  const { data, error } = await client
+    .from('organizations')
+    .select('org_key, org_code, workspace_slug')
+    .or(`workspace_slug.eq.${token},org_code.eq.${token},org_key.eq.${token}`)
+    .limit(1)
+  if (error) return ''
+  const row = Array.isArray(data) ? data[0] : null
+  if (!row?.org_key) return ''
+  return String(row.org_key || '').trim()
+}
+
 async function getCredentialBlob(client: ReturnType<typeof createClient>) {
   const { data, error } = await client
     .from('app_state')
@@ -135,12 +180,19 @@ function getHrTeam(org: OrgRow) {
     : []
 }
 
-async function resolveServerLogin(client: ReturnType<typeof createClient>, identifier: string, password: string, organizationKey = '') {
+async function resolveServerLogin(client: ReturnType<typeof createClient>, identifier: string, password: string, organizationKey = '', workspace = '') {
   const normalized = normalizeLower(identifier)
-  const scopedOrgKey = String(organizationKey || '').trim()
+  const scopedOrgKey = await resolveOrganizationKeyFromWorkspace(client, organizationKey, workspace)
 
   if (await matchesSuperAdminCredentials(normalized, password)) {
     return { role: 'super-admin', userName: 'Super Admin' }
+  }
+
+  // Tenant users (HR admin, co-admin, scoped HR, employees) must come in via
+  // their workspace URL — never the base URL. Without a workspace, we can't
+  // even tell which org's branding to render.
+  if (!scopedOrgKey) {
+    return { __scopeError: workspace ? 'workspace-not-found' : 'org-user-needs-workspace-url' }
   }
 
   const [orgs, credentials] = await Promise.all([
@@ -165,15 +217,21 @@ async function resolveServerLogin(client: ReturnType<typeof createClient>, ident
           credentialKey: normalized,
         }
       }
-      const setupPayload = org.setup_payload && typeof org.setup_payload === 'object' ? org.setup_payload : null
-      const tempPassword = String((setupPayload?.orgData as Record<string, unknown> | undefined)?.temporaryPassword || '')
-      if (tempPassword && tempPassword === password) {
-        return {
-          role: 'hr-admin',
-          orgKey: org.org_key,
-          userName: org.hr_admin_name || 'HR Admin',
-          isTemp: true,
-          credentialKey: normalized,
+      // Only allow the org's seeded OTP to authenticate if there is no
+      // credential record yet — otherwise the OTP could keep re-opening
+      // the forced-reset flow after the admin already set a permanent
+      // password.
+      if (!primaryCredential) {
+        const setupPayload = org.setup_payload && typeof org.setup_payload === 'object' ? org.setup_payload : null
+        const tempPassword = String((setupPayload?.orgData as Record<string, unknown> | undefined)?.temporaryPassword || '')
+        if (tempPassword && tempPassword === password) {
+          return {
+            role: 'hr-admin',
+            orgKey: org.org_key,
+            userName: org.hr_admin_name || 'HR Admin',
+            isTemp: true,
+            credentialKey: normalized,
+          }
         }
       }
     }
@@ -197,6 +255,8 @@ async function resolveServerLogin(client: ReturnType<typeof createClient>, ident
           credentialKey: email,
         }
       }
+      // Same guard as the primary admin: only let the seeded OTP through
+      // when no credential record exists yet for this team member.
       const tempPassword = String(member.password || '')
       if (!credential && tempPassword && tempPassword === password) {
         return {
@@ -270,10 +330,11 @@ async function resolveServerLogin(client: ReturnType<typeof createClient>, ident
   }
 }
 
-async function issueSession(client: ReturnType<typeof createClient>, user: Record<string, unknown>) {
+async function issueSession(client: ReturnType<typeof createClient>, user: Record<string, unknown>, rememberMe = false) {
   const token = crypto.randomUUID()
   const now = new Date()
-  const expiresAt = new Date(now.getTime() + SESSION_TTL_MS).toISOString()
+  const ttl = rememberMe ? SESSION_TTL_REMEMBER_MS : SESSION_TTL_MS
+  const expiresAt = new Date(now.getTime() + ttl).toISOString()
   await client.from('app_state').upsert({
     state_key: `server_session:${token}`,
     org_key: '',
@@ -281,6 +342,7 @@ async function issueSession(client: ReturnType<typeof createClient>, user: Recor
       ...user,
       expiresAt,
       issuedAt: now.toISOString(),
+      rememberMe: !!rememberMe,
     },
   }, { onConflict: 'state_key,org_key' })
   return { token, expiresAt }
@@ -460,8 +522,8 @@ async function suggestOrgsByQuery(
   const pattern = `%${trimmed.replace(/[%_]/g, (m) => `\\${m}`)}%`
   const { data, error } = await client
     .from('organizations')
-    .select('org_key, org_code, name')
-    .or(`name.ilike.${pattern},org_code.ilike.${pattern},org_key.ilike.${pattern}`)
+    .select('org_key, org_code, name, workspace_slug')
+    .or(`name.ilike.${pattern},org_code.ilike.${pattern},org_key.ilike.${pattern},workspace_slug.ilike.${pattern}`)
     .order('name', { ascending: true })
     .limit(8)
   if (error) throw error
@@ -469,6 +531,7 @@ async function suggestOrgsByQuery(
     key: String(row.org_key || ''),
     code: String(row.org_code || ''),
     name: String(row.name || ''),
+    workspaceSlug: String(row.workspace_slug || ''),
   }))
 }
 
@@ -501,6 +564,60 @@ async function updateCredentialPassword(
     )
   if (error) throw error
   return next[credentialKey] as Record<string, unknown>
+}
+
+// Once an HR admin has set a permanent password, strip the original OTP
+// from the org's setup_payload (and for HR team members, from their
+// hrTeam entry). Leaving it there means anyone who still has the welcome
+// email could keep logging in via the temp-password fallback in
+// `resolveServerLogin`, which also forces a fresh password reset every
+// time and effectively wipes the new password.
+async function clearOrgTempPasswordForCredential(
+  client: ReturnType<typeof createClient>,
+  org: OrgRow,
+  credentialKey: string,
+) {
+  if (!org?.org_key) return
+  const setupPayload = (org.setup_payload && typeof org.setup_payload === 'object')
+    ? { ...org.setup_payload as Record<string, unknown> }
+    : null
+  if (!setupPayload) return
+  const orgData = setupPayload.orgData && typeof setupPayload.orgData === 'object'
+    ? { ...(setupPayload.orgData as Record<string, unknown>) }
+    : null
+  if (!orgData) return
+
+  const primaryEmail = normalizeLower(org.hr_admin_email)
+  const normalizedKey = normalizeLower(credentialKey)
+  let changed = false
+
+  if (primaryEmail && primaryEmail === normalizedKey && orgData.temporaryPassword) {
+    orgData.temporaryPassword = ''
+    changed = true
+  }
+
+  if (Array.isArray(orgData.hrTeam)) {
+    const nextTeam = (orgData.hrTeam as Array<Record<string, unknown>>).map((member) => {
+      if (member?.isInPMS) return member
+      const memberEmail = normalizeLower(member?.email)
+      if (memberEmail && memberEmail === normalizedKey && member?.password) {
+        changed = true
+        const copy = { ...member }
+        copy.password = ''
+        return copy
+      }
+      return member
+    })
+    if (changed) orgData.hrTeam = nextTeam
+  }
+
+  if (!changed) return
+  setupPayload.orgData = orgData
+  const { error } = await client
+    .from('organizations')
+    .update({ setup_payload: setupPayload })
+    .eq('org_key', org.org_key)
+  if (error) throw error
 }
 
 async function locateCredentialForPasswordChange(
@@ -784,10 +901,22 @@ Deno.serve(async (req: Request) => {
     const identifier = String(body.identifier || '').trim()
     const password = String(body.password || '')
     const organizationKey = String(body.organizationKey || '').trim()
+    const workspace = String(body.workspace || '').trim()
+    const rememberMe = !!body.rememberMe
     if (!identifier || !password) return json(400, { ok: false, error: 'identifier and password are required.' })
-    const user = await resolveServerLogin(adminClient, identifier, password, organizationKey)
+    const user = await resolveServerLogin(adminClient, identifier, password, organizationKey, workspace)
     if (!user) return json(200, { ok: false, error: 'Invalid credentials.' })
-    const session = await issueSession(adminClient, user)
+    const scopeError = (user as Record<string, unknown>).__scopeError
+    if (scopeError === 'workspace-not-found') {
+      return json(200, { ok: false, code: 'workspace-not-found', error: 'Workspace not found. Check the company slug or code from your HR invite.' })
+    }
+    if (scopeError === 'org-user-needs-workspace-url') {
+      // The `code` field lets the client recognize this case without
+      // regex-matching the human-readable message, so tweaking the copy
+      // later won't silently break the workspace-step escalation.
+      return json(200, { ok: false, code: 'org-user-needs-workspace-url', error: 'Please sign in from your workspace URL. Ask your HR admin if you need it.' })
+    }
+    const session = await issueSession(adminClient, user, rememberMe)
     return json(200, { ok: true, user, serverSessionToken: session.token, expiresAt: session.expiresAt })
   }
 
@@ -847,7 +976,11 @@ Deno.serve(async (req: Request) => {
       empCode: String(target.credential?.empCode || target.patch?.empCode || ''),
     })
     const updated = await updateCredentialPassword(adminClient, target.credentialKey, newHash, target.patch)
-    const nextUser = await resolveServerLogin(adminClient, identifier || credentialKey || target.credentialKey, newPassword)
+    if (target.kind === 'hr-admin' && target.org) {
+      // Nuke the OTP from the org row so it can't be re-used as a login.
+      await clearOrgTempPasswordForCredential(adminClient, target.org, target.credentialKey)
+    }
+    const nextUser = await resolveServerLogin(adminClient, identifier || credentialKey || target.credentialKey, newPassword, organizationKey)
     const nextSession = nextUser ? await issueSession(adminClient, nextUser) : null
     await logAudit(adminClient, organizationKey, 'password-change-completed', {
       credentialKey: target.credentialKey,
