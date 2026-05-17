@@ -24,6 +24,8 @@ const EMP_SESSION_KEY = 'zarohr_emp_session';
 const WIZARD_STATE_KEY = 'zarohr_pms_wizard_state_v1';
 const APP_DATA_KEY = 'zarohr_app_data_v1';
 const GOAL_WORKFLOW_KEY = 'zarohr_goal_workflow_v1';
+const GOAL_DELETE_UNDO_MS = 5000;
+const GOAL_MOVE_ANIM_MS = 320;
 const MESSAGES_KEY = 'zarohr_messages_v1';
 const REMINDER_COOLDOWN_MS = 4 * 60 * 60 * 1000;
 
@@ -104,12 +106,12 @@ Thanks,
 const RATING_ENABLED = false;
 
 const ALL_PHASES = [
-  { id: 'goal-setting', label: 'Goal Setting', icon: '🎯' },
-  { id: 'mid-year-review', label: 'Mid-Year Review', icon: '📊' },
-  { id: 'self-evaluation', label: 'Self Evaluation', icon: '✍️', ratingOnly: true },
-  { id: 'manager-rating', label: 'Manager Rating', icon: '👤', ratingOnly: true },
-  { id: 'hr-review', label: 'HR Review', icon: '🔍', ratingOnly: true },
-  { id: 'results-published', label: 'Results Published', icon: '🏆', ratingOnly: true },
+  { id: 'goal-setting', label: 'Goal setting', icon: '🎯' },
+  { id: 'mid-year-review', label: 'Mid-year review', icon: '📊' },
+  { id: 'self-evaluation', label: 'Self evaluation', icon: '✍️', ratingOnly: true },
+  { id: 'manager-rating', label: 'Manager rating', icon: '👤', ratingOnly: true },
+  { id: 'hr-review', label: 'HR review', icon: '🔍', ratingOnly: true },
+  { id: 'results-published', label: 'Results published', icon: '🏆', ratingOnly: true },
 ];
 const PHASES = RATING_ENABLED ? ALL_PHASES : ALL_PHASES.filter((p) => !p.ratingOnly);
 
@@ -638,6 +640,15 @@ const NOTIFICATION_META = {
       <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M22 2 11 13"/><path d="M22 2 15 22l-4-9-9-4z"/></svg>
     ),
   },
+  'goal-resubmitted': {
+    // Distinct from first submissions — uses a "refresh" icon to read as
+    // "an updated plan is back in your queue" at a glance.
+    color: '#2563EB', bg: '#DBEAFE', border: '#BFDBFE',
+    cta: 'Review updates →',
+    icon: (
+      <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+    ),
+  },
   'goal-approved': {
     color: '#16A34A', bg: '#DCFCE7', border: '#BBF7D0',
     cta: 'View your plan →',
@@ -820,14 +831,14 @@ function getSubmissionStatusMeta(record) {
       // queue item, not a first submission.
       const isResubmit = Number(record?.submitCount || 0) > 1;
       return {
-        label: isResubmit ? 'Awaiting manager approval (re-submitted)' : 'Awaiting manager approval',
+        label: isResubmit ? 'Pending approval (re-submitted)' : 'Pending approval',
         color: '#DC2626', bg: '#FEF2F2', border: '#FECACA',
       };
     }
     case 'approved':
       return { label: 'Approved', color: '#16A34A', bg: '#F0FDF4', border: '#BBF7D0' };
     case 'sent-back':
-      return { label: 'Changes requested', color: '#D97706', bg: '#FFF7ED', border: '#FED7AA' };
+      return { label: 'Sent back', color: '#D97706', bg: '#FFF7ED', border: '#FED7AA' };
     default:
       return { label: 'Draft in progress', color: '#2563EB', bg: '#EFF6FF', border: '#BFDBFE' };
   }
@@ -844,8 +855,8 @@ function getGoalReviewStatus(goal, submission) {
 
 function getGoalStatusMeta(status) {
   if (status === 'approved') return { label: 'Approved', color: '#16A34A', bg: '#F0FDF4', border: '#BBF7D0' };
-  if (status === 'rejected') return { label: 'Changes requested', color: '#D97706', bg: '#FFF7ED', border: '#FED7AA' };
-  if (status === 'pending') return { label: 'Awaiting review', color: '#DC2626', bg: '#FEF2F2', border: '#FECACA' };
+  if (status === 'rejected') return { label: 'Sent back', color: '#D97706', bg: '#FFF7ED', border: '#FED7AA' };
+  if (status === 'pending') return { label: 'Pending approval', color: '#DC2626', bg: '#FEF2F2', border: '#FECACA' };
   return null;
 }
 
@@ -1736,8 +1747,21 @@ export default function EmployeePage() {
   // goal doesn't get hit with a wall of red "missing X" pills before the
   // user has typed anything.
   const [attemptedDoneIds, setAttemptedDoneIds] = useState(() => new Set());
-  const [confirmDeleteGoal, setConfirmDeleteGoal] = useState(false);
   const [hoveredGoalId, setHoveredGoalId] = useState(null);
+  const [undoDeleteGoal, setUndoDeleteGoal] = useState(null); // { id, name, token } | null
+  const [undoRecoverGoal, setUndoRecoverGoal] = useState(null); // { id, name, token } | null
+  const [confirmPurgeGoal, setConfirmPurgeGoal] = useState(null); // { id, name } | null
+  const [movingGoalIds, setMovingGoalIds] = useState(() => new Map()); // id -> 'delete' | 'recover'
+  const moveGoalTimersRef = useRef(new Map());
+  const undoDeleteTimerRef = useRef(null);
+  const undoRecoverTimerRef = useRef(null);
+  const ignoreWorkflowEchoUntilRef = useRef(0);
+  useEffect(() => () => {
+    moveGoalTimersRef.current.forEach((timer) => clearTimeout(timer));
+    moveGoalTimersRef.current.clear();
+    if (undoDeleteTimerRef.current) clearTimeout(undoDeleteTimerRef.current);
+    if (undoRecoverTimerRef.current) clearTimeout(undoRecoverTimerRef.current);
+  }, []);
   // When jumping to My Team from a notification or CTA, remember which report's review panel to
   // expand + scroll + flash once.
   const [focusApprovalCode, setFocusApprovalCode] = useState(null);
@@ -1768,6 +1792,11 @@ export default function EmployeePage() {
   // and Revert/Proceed buttons. This matches the 3-step guard-rail spec.
   // Shape: { action, employeeCode, employeeName, approvedPickCount, rejectedPickCount, pendingTotal, lockedCount, planNote, stage, loading }
   const [reviewConfirm, setReviewConfirm] = useState(null);
+  // Inline "Overall note" editor anchored to the expanded team row's header.
+  // Holds the empCode whose note panel is open + the draft text being typed
+  // (only committed to managerNotes on Save).
+  const [noteEditFor, setNoteEditFor] = useState(null);
+  const [noteDraft, setNoteDraft] = useState('');
   const [rewritingGoalId, setRewritingGoalId] = useState(null);
   const [rewriteSuggestions, setRewriteSuggestions] = useState([]);
   const [messagesData, setMessagesData] = useState(() => loadMessages(session?.orgKey || ''));
@@ -1963,7 +1992,9 @@ export default function EmployeePage() {
     if (!session?.orgKey) return undefined;
     const orgKey = session.orgKey;
     const unsubWorkflow = subscribeToScopedState('workflow', orgKey, () => {
+      if (Date.now() < ignoreWorkflowEchoUntilRef.current) return;
       void hydrateWorkflow(orgKey).then((wf) => {
+        if (Date.now() < ignoreWorkflowEchoUntilRef.current) return;
         if (wf) setWorkflow(wf);
       });
     });
@@ -1984,10 +2015,8 @@ export default function EmployeePage() {
     };
   }, [session?.orgKey]);
 
-  // Close the goal-edit modal on Esc. Also reset the delete-confirm state whenever the
-  // modal opens on a different goal (or closes), so the confirm strip never leaks between goals.
+  // Close the goal-edit modal on Esc.
   useEffect(() => {
-    setConfirmDeleteGoal(false);
     if (!editingGoalId) return;
     const onKey = (e) => {
       if (e.key === 'Escape') { setEditingGoalId(null); setRewritingGoalId(null); }
@@ -2092,15 +2121,6 @@ export default function EmployeePage() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeSection, canSetOwnGoals, directReports.length]);
-  // The Deleted Goals tab disappears when the trash empties (or after the
-  // 7-day auto-purge). Fall back to My Goals so the user isn't left staring
-  // at an empty section because of a stale activeSection.
-  useEffect(() => {
-    if (activeSection === 'deleted-goals' && deletedGoals.length === 0) {
-      setActiveSection('goals');
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeSection, deletedGoals.length]);
   const canEditGoalPlan = canSetOwnGoals && currentPhase === 'goal-setting' && mySubmission && !['pending-manager', 'approved'].includes(mySubmission.status);
   const canAddKra = canEditGoalPlan && (
     effectiveConfig?.goalCreationMode === 'employee-self' ||
@@ -2152,6 +2172,24 @@ export default function EmployeePage() {
     });
   }
 
+  function markLocalWorkflowMutation() {
+    ignoreWorkflowEchoUntilRef.current = Date.now() + 2500;
+  }
+
+  function clearGoalMove(goalId) {
+    const pending = moveGoalTimersRef.current.get(goalId);
+    if (pending) {
+      clearTimeout(pending);
+      moveGoalTimersRef.current.delete(goalId);
+    }
+    setMovingGoalIds((prev) => {
+      if (!prev.has(goalId)) return prev;
+      const next = new Map(prev);
+      next.delete(goalId);
+      return next;
+    });
+  }
+
   function addNotification(notification) {
     setWorkflow((prev) => ({
       submissions: prev?.submissions || {},
@@ -2171,7 +2209,7 @@ export default function EmployeePage() {
   // Click a notification → navigate to the relevant tab (and mark it read).
   function handleNotificationClick(n) {
     markNotificationsRead([n.id]);
-    if (n.type === 'goal-submitted') {
+    if (n.type === 'goal-submitted' || n.type === 'goal-resubmitted') {
       const code = normalizeCode(n.submissionCode);
       setFocusApprovalCode(code);
       setExpandedReviewCode(code);
@@ -2234,20 +2272,11 @@ export default function EmployeePage() {
       const now = Date.now();
       const target = (record.goals || []).find((g) => g.id === goalId);
       if (!target) return record;
-      // Library-sourced goals (carry libraryKraId) hard-delete because the
-      // Goal Library re-shows them as available; routing them to the trash
-      // would create a confusing duplicate state. Self-entered + prefilled
-      // goals soft-delete so the user can restore them within 7 days.
-      const isLibrarySourced = !!target.libraryKraId;
-      if (isLibrarySourced) {
-        record.goals = (record.goals || []).filter((goal) => goal.id !== goalId);
-      } else {
-        record.goals = (record.goals || []).map((goal) => (
-          goal.id === goalId
-            ? { ...goal, deletedAt: new Date(now).toISOString(), deletedBy: session?.empCode || '' }
-            : goal
-        ));
-      }
+      record.goals = (record.goals || []).map((goal) => (
+        goal.id === goalId
+          ? { ...goal, deletedAt: new Date(now).toISOString(), deletedBy: session?.empCode || '' }
+          : goal
+      ));
       // Opportunistic GC: drop trash entries that have aged past the
       // retention window. Keeps storage bounded without a separate timer.
       record.goals = (record.goals || []).filter((goal) => !isDeletedGoalExpired(goal, now));
@@ -2255,18 +2284,126 @@ export default function EmployeePage() {
     });
   }
 
+  function requestDeleteGoal(goal) {
+    if (!canEditGoalPlan || !goal?.id) return;
+    const goalId = goal.id;
+    const token = `${goalId}:${Date.now()}`;
+
+    clearGoalMove(goalId);
+    setMovingGoalIds((prev) => {
+      const next = new Map(prev);
+      next.set(goalId, 'delete');
+      return next;
+    });
+    setUndoDeleteGoal({ id: goalId, name: goal.name || 'Untitled goal', token });
+    setUndoRecoverGoal((current) => (current?.id === goalId ? null : current));
+    if (undoRecoverTimerRef.current) {
+      clearTimeout(undoRecoverTimerRef.current);
+      undoRecoverTimerRef.current = null;
+    }
+    if (undoDeleteTimerRef.current) clearTimeout(undoDeleteTimerRef.current);
+    undoDeleteTimerRef.current = setTimeout(() => {
+      setUndoDeleteGoal((current) => (current?.token === token ? null : current));
+    }, GOAL_DELETE_UNDO_MS);
+
+    markLocalWorkflowMutation();
+    const timer = setTimeout(() => {
+      moveGoalTimersRef.current.delete(goalId);
+      setMovingGoalIds((prev) => {
+        const next = new Map(prev);
+        next.delete(goalId);
+        return next;
+      });
+      removeGoal(goalId);
+    }, GOAL_MOVE_ANIM_MS);
+    moveGoalTimersRef.current.set(goalId, timer);
+  }
+
+  function undoGoalDelete() {
+    const target = undoDeleteGoal;
+    if (!target?.id) return;
+    const hadPendingMove = moveGoalTimersRef.current.has(target.id);
+    clearGoalMove(target.id);
+    if (!hadPendingMove) {
+      restoreGoal(target.id);
+    }
+    setUndoDeleteGoal(null);
+    if (undoDeleteTimerRef.current) {
+      clearTimeout(undoDeleteTimerRef.current);
+      undoDeleteTimerRef.current = null;
+    }
+  }
+
   function restoreGoal(goalId) {
     if (!canEditGoalPlan) return;
-    updateMySubmission((record) => {
-      const now = Date.now();
-      record.goals = (record.goals || []).map((goal) => {
-        if (goal.id !== goalId) return goal;
-        const { deletedAt: _drop, deletedBy: _drop2, ...rest } = goal;
-        return rest;
-      });
-      record.goals = (record.goals || []).filter((goal) => !isDeletedGoalExpired(goal, now));
-      return record;
+    const target = allMyGoals.find((goal) => goal.id === goalId);
+    clearGoalMove(goalId);
+    setMovingGoalIds((prev) => {
+      const next = new Map(prev);
+      next.set(goalId, 'recover');
+      return next;
     });
+    markLocalWorkflowMutation();
+    setUndoDeleteGoal((current) => {
+      if (current?.id !== goalId) return current;
+      if (undoDeleteTimerRef.current) {
+        clearTimeout(undoDeleteTimerRef.current);
+        undoDeleteTimerRef.current = null;
+      }
+      return null;
+    });
+    const timer = setTimeout(() => {
+      moveGoalTimersRef.current.delete(goalId);
+      setMovingGoalIds((prev) => {
+        const next = new Map(prev);
+        next.delete(goalId);
+        return next;
+      });
+      setWorkflow((prev) => {
+        const current = prev?.submissions?.[employeeCodeKey];
+        if (!current) return prev;
+        const now = Date.now();
+        let changed = false;
+        const goals = (current.goals || []).map((goal) => {
+          if (goal.id !== goalId) return goal;
+          changed = true;
+          const { deletedAt: _drop, deletedBy: _drop2, ...rest } = goal;
+          return rest;
+        }).filter((goal) => !isDeletedGoalExpired(goal, now));
+        if (!changed) return prev;
+        return {
+          ...prev,
+          submissions: {
+            ...(prev?.submissions || {}),
+            [employeeCodeKey]: {
+              ...current,
+              goals,
+              updatedAt: new Date(now).toISOString(),
+            },
+          },
+        };
+      });
+      const token = `${goalId}:${Date.now()}`;
+      setUndoRecoverGoal({ id: goalId, name: target?.name || 'Untitled goal', token });
+      if (undoRecoverTimerRef.current) clearTimeout(undoRecoverTimerRef.current);
+      undoRecoverTimerRef.current = setTimeout(() => {
+        setUndoRecoverGoal((current) => (current?.token === token ? null : current));
+      }, GOAL_DELETE_UNDO_MS);
+    }, GOAL_MOVE_ANIM_MS);
+    moveGoalTimersRef.current.set(goalId, timer);
+  }
+
+  function undoGoalRecover() {
+    const target = undoRecoverGoal;
+    if (!target?.id) return;
+    clearGoalMove(target.id);
+    markLocalWorkflowMutation();
+    removeGoal(target.id);
+    setUndoRecoverGoal(null);
+    if (undoRecoverTimerRef.current) {
+      clearTimeout(undoRecoverTimerRef.current);
+      undoRecoverTimerRef.current = null;
+    }
   }
 
   function purgeGoalForever(goalId) {
@@ -2369,13 +2506,16 @@ export default function EmployeePage() {
       };
     });
     if (managerCode) {
+      const isResubmit = nextSubmitCount > 1;
       addNotification(createNotification({
-        type: 'goal-submitted',
+        type: isResubmit ? 'goal-resubmitted' : 'goal-submitted',
         recipientCode: managerCode,
         senderCode: session.empCode,
         submissionCode: session.empCode,
-        title: `${employeeName} submitted goals`,
-        message: `${employeeName} sent a goal plan for your approval.`,
+        title: isResubmit ? `${employeeName} resubmitted goals` : `${employeeName} submitted goals`,
+        message: isResubmit
+          ? `${employeeName} updated their plan after your earlier feedback and sent it back for approval.`
+          : `${employeeName} sent a goal plan for your approval.`,
       }));
     }
   }
@@ -2614,6 +2754,19 @@ export default function EmployeePage() {
     if (currentPhase !== template.requiresPhase) {
       const phaseLabel = template.requiresPhase === 'self-evaluation' ? 'self-evaluation' : 'goal-setting';
       return { ok: false, reason: `not in ${phaseLabel} stage yet` };
+    }
+    // Per-recipient completion check — don't let the manager nudge
+    // someone who's already done the thing the reminder is about.
+    // sent-back still passes through: those people need to resubmit.
+    if (template.id === 'goal-setting') {
+      const code = String(report?.['Employee Code'] || '').trim();
+      const submission = workflow?.submissions?.[normalizeCode(code)] || null;
+      if (submission?.status === 'approved') {
+        return { ok: false, reason: 'goals already approved' };
+      }
+      if (submission?.status === 'pending-manager') {
+        return { ok: false, reason: 'goals already submitted — awaiting your review' };
+      }
     }
     return { ok: true, reason: '' };
   }
@@ -2957,6 +3110,36 @@ export default function EmployeePage() {
           // During 'pending-manager', any approved goals are carried over from a prior round —
           // label them "locked" (neutral) so the chip doesn't imply the new submission has been approved.
           const priorApprovedPending = mySubmission.status === 'pending-manager' && approvedCount > 0;
+
+          // Approved state: every card already shows its own green Approved chip,
+          // so the full status banner is visually redundant. Collapse to a thin
+          // muted one-liner that just carries the audit info (who + when).
+          if (mySubmission.status === 'approved') {
+            const approverName = mySubmission.managerApprovedBy
+              ? (getManagerName(config, mySubmission.managerApprovedBy) || mySubmission.managerApprovedBy)
+              : '';
+            const when = formatDateTime(mySubmission.managerDecisionAt || mySubmission.approvedAt);
+            return (
+              <div style={{
+                marginBottom: 12,
+                display: 'inline-flex', alignItems: 'center', gap: 8, flexWrap: 'wrap',
+                fontSize: 12.5, fontWeight: 700, color: '#15803D',
+                background: '#F0FDF4', border: '1.5px solid #BBF7D0',
+                borderRadius: 999, padding: '6px 14px',
+              }}>
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
+                  <polyline points="20 6 9 17 4 12" />
+                </svg>
+                <span>
+                  Approved{approverName ? ` by ${approverName}` : ''}{when ? ` · ${when}` : ''}
+                </span>
+                {mySubmission.managerNote ? (
+                  <span style={{ color: '#7C2D12', fontWeight: 600 }}>· Note: {mySubmission.managerNote}</span>
+                ) : null}
+              </div>
+            );
+          }
+
           return (
             <div style={{ marginBottom: 16, padding: '14px 18px', background: myStatusMeta.bg, border: `1.5px solid ${myStatusMeta.border}`, borderRadius: 12 }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 6, flexWrap: 'wrap' }}>
@@ -2984,7 +3167,6 @@ export default function EmployeePage() {
               </div>
               <div style={{ fontSize: 13, color: '#475569', lineHeight: 1.55 }}>
                 {mySubmission.status === 'pending-manager' && `${Number(mySubmission.submitCount || 0) > 1 ? 'Re-submitted' : 'Submitted'} on ${formatDateTime(mySubmission.submittedAt)}. ${managerName ? `${managerName} can now approve or send back changes.` : 'Waiting for approval.'}`}
-                {mySubmission.status === 'approved' && `Approved${mySubmission.managerApprovedBy ? ` by ${getManagerName(config, mySubmission.managerApprovedBy) || mySubmission.managerApprovedBy}` : ''} on ${formatDateTime(mySubmission.managerDecisionAt || mySubmission.approvedAt)}.`}
                 {mySubmission.status === 'sent-back' && (
                   hasBreakdown && approvedCount > 0
                     ? `Your manager approved ${approvedCount} goal${approvedCount === 1 ? '' : 's'} and sent ${rejectedCount} back for updates${mySubmission.managerDecisionAt ? ` on ${formatDateTime(mySubmission.managerDecisionAt)}` : ''}. Fix the flagged goals and resubmit.`
@@ -3080,9 +3262,23 @@ export default function EmployeePage() {
             )}
 
             {/* Flat 2-col card grid */}
-            {myGoals.length > 0 && (
+            {myGoals.length > 0 && (() => {
+              // After a sent-back submission, surface the goals that actually
+              // need the employee's attention (reviewStatus === 'rejected')
+              // at the top of the grid. Storage order is untouched —
+              // originalIndex is forwarded into the map so colours and any
+              // other index-derived visuals stay stable per goal.
+              const withIndex = myGoals.map((goal, originalIndex) => ({ goal, originalIndex }));
+              const ordered = mySubmission?.status === 'sent-back'
+                ? [
+                    ...withIndex.filter(({ goal }) => getGoalReviewStatus(goal, mySubmission) === 'rejected'),
+                    ...withIndex.filter(({ goal }) => getGoalReviewStatus(goal, mySubmission) !== 'rejected'),
+                  ]
+                : withIndex;
+              return (
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))', gap: 16, marginBottom: 16 }}>
-                {myGoals.map((goal, goalIndex) => {
+                {ordered.map(({ goal, originalIndex }) => {
+                  const goalIndex = originalIndex;
                   const color = getVisibleGoalColor(goal, goalIndex);
                   const initial = (goal.name || '?').trim().charAt(0).toUpperCase();
                   const isDragging = dragGoalId === goal.id;
@@ -3112,6 +3308,7 @@ export default function EmployeePage() {
                   const displayReviewMeta = submissionStatus === 'pending-manager' ? null : reviewMeta;
                   const isApprovedLocked = reviewStatus === 'approved';
                   const isRejected = reviewStatus === 'rejected';
+                  const isMovingDelete = movingGoalIds.get(goal.id) === 'delete';
                   const canDrag = canEditGoalPlan && !editingGoalId && !isApprovedLocked;
                   const canOpenGoalModal = canEditGoalPlan || showReviewState;
                   // Border colouring priority: drag target > review status > validation state > hover > default.
@@ -3189,26 +3386,60 @@ export default function EmployeePage() {
                         overflow: 'hidden',
                         padding: '16px 18px',
                         cursor: canOpenGoalModal ? 'pointer' : 'default',
-                        transform: hoveredGoalId === goal.id && !isDragging && !dragGoalId ? 'translateY(-2px)' : 'none',
+                        transform: isMovingDelete
+                          ? 'translateX(28px) rotate(1.5deg) scale(.97)'
+                          : hoveredGoalId === goal.id && !isDragging && !dragGoalId ? 'translateY(-2px)' : 'none',
                         boxShadow: isRejected
                           ? '0 6px 18px rgba(220,38,38,0.10)'
                           : hasError
                             ? '0 6px 18px rgba(220,38,38,0.10)'
                             : hoveredGoalId === goal.id && !isDragging && !dragGoalId ? '0 10px 28px rgba(15,23,42,.10)' : '0 1px 4px rgba(15,23,42,.05)',
-                        opacity: isDragging ? 0.45 : 1,
-                        transition: 'transform .18s ease, box-shadow .18s ease, border-color .18s ease, opacity .18s ease',
+                        opacity: isMovingDelete ? 0 : (isDragging ? 0.45 : 1),
+                        filter: isMovingDelete ? 'saturate(.72)' : 'none',
+                        clipPath: isMovingDelete ? 'polygon(0 0, 88% 4%, 100% 34%, 88% 100%, 0 96%)' : 'polygon(0 0, 100% 0, 100% 100%, 0 100%)',
+                        transition: isMovingDelete
+                          ? `transform ${GOAL_MOVE_ANIM_MS}ms cubic-bezier(.2,.85,.2,1), opacity ${GOAL_MOVE_ANIM_MS}ms ease, clip-path ${GOAL_MOVE_ANIM_MS}ms ease, filter ${GOAL_MOVE_ANIM_MS}ms ease`
+                          : 'transform .18s ease, box-shadow .18s ease, border-color .18s ease, opacity .18s ease',
                       }}
                     >
+                      {isMovingDelete && (
+                        <div style={{
+                          position: 'absolute', inset: 0, zIndex: 4, pointerEvents: 'none',
+                          background: 'repeating-linear-gradient(115deg, rgba(248,250,252,.86) 0 8px, rgba(226,232,240,.76) 8px 10px)',
+                          mixBlendMode: 'multiply',
+                        }} />
+                      )}
                       {stripeWidth > 0 && (
                         <div style={{ position: 'absolute', left: 0, top: 0, bottom: 0, width: stripeWidth, background: borderLeftColor, pointerEvents: 'none' }} />
                       )}
-                      {/* Header: avatar + title + status pill */}
+                      {/* Top-right soft-delete X — immediate move with undo. */}
+                      {canEditGoalPlan && !isApprovedLocked && (
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            requestDeleteGoal(goal);
+                          }}
+                          title="Move to Deleted Goals"
+                          aria-label="Move to Deleted Goals"
+                          style={{
+                            position: 'absolute', top: 6, right: 6, zIndex: 2,
+                            width: 20, height: 20, borderRadius: 6, padding: 0,
+                            background: '#FEF2F2', border: '1px solid #FECACA', color: '#DC2626',
+                            cursor: 'pointer',
+                            display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                          }}
+                        >
+                          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                        </button>
+                      )}
+                      {/* Header: avatar + title + weight pill (original layout) */}
                       <div style={{ display: 'flex', gap: 12, alignItems: 'flex-start', marginBottom: 12, minHeight: 72 }}>
                         <div style={{ width: 40, height: 40, borderRadius: 11, background: `${color}18`, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
                           <span style={{ fontSize: 17, fontWeight: 800, color }}>{initial}</span>
                         </div>
                         <div style={{ flex: 1, minWidth: 0 }}>
-                          <div style={{ fontSize: 15, fontWeight: 700, color: '#0F172A', lineHeight: 1.35, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                          <div title={goal.name || ''} style={{ fontSize: 13, fontWeight: 700, color: '#0F172A', lineHeight: 1.3, display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden', wordBreak: 'break-word' }}>
                             {goal.name || <span style={{ color: '#94A3B8', fontStyle: 'italic' }}>Untitled goal</span>}
                           </div>
                           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 5, marginTop: 5 }}>
@@ -3218,8 +3449,9 @@ export default function EmployeePage() {
                             <span style={{ fontSize: 11.5, color: '#64748B' }}>{goalKpis.length} KPI{goalKpis.length !== 1 ? 's' : ''}</span>
                           </div>
                         </div>
-                        {/* Goal weight pill */}
-                        <div style={{ flexShrink: 0, padding: '5px 11px', borderRadius: 999, fontSize: 12, fontWeight: 800, color: goalWeightNum > 0 ? color : '#94A3B8', background: goalWeightNum > 0 ? `${color}10` : '#F1F5F9', border: `1px solid ${goalWeightNum > 0 ? `${color}33` : '#E2E8F0'}` }}>
+                        {/* Weight pill — same vertical position as before. The corner X
+                            is reserved a 26px horizontal strip so they sit side-by-side. */}
+                        <div style={{ flexShrink: 0, marginRight: canEditGoalPlan && !isApprovedLocked ? 26 : 0, padding: '5px 11px', borderRadius: 999, fontSize: 12, fontWeight: 800, color: goalWeightNum > 0 ? color : '#94A3B8', background: goalWeightNum > 0 ? `${color}10` : '#F1F5F9', border: `1px solid ${goalWeightNum > 0 ? `${color}33` : '#E2E8F0'}` }}>
                           {goalWeightNum > 0 ? `${goal.weight}%` : 'No weight'}
                         </div>
                       </div>
@@ -3261,8 +3493,25 @@ export default function EmployeePage() {
                         </div>
                       )}
 
-                      {/* Status row */}
+                      {/* Status row + bottom-left edit pencil */}
                       <div style={{ display: 'flex', gap: 6, alignItems: 'center', minWidth: 0 }}>
+                        {canEditGoalPlan && !isApprovedLocked && (
+                          <button
+                            type="button"
+                            onClick={(e) => { e.stopPropagation(); setEditingGoalId(goal.id); }}
+                            title={isRejected ? 'Update goal' : 'Edit goal'}
+                            aria-label={isRejected ? 'Update goal' : 'Edit goal'}
+                            style={{
+                              display: 'inline-flex', alignItems: 'center', gap: 4,
+                              padding: '4px 9px', borderRadius: 999,
+                              background: '#F8FAFC', border: '1px solid #E2E8F0', color: '#475569',
+                              cursor: 'pointer', fontFamily: 'inherit', fontSize: 11, fontWeight: 700,
+                            }}
+                          >
+                            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z"/></svg>
+                            Edit
+                          </button>
+                        )}
                         {displayReviewMeta && (
                           <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 11, fontWeight: 700, color: displayReviewMeta.color, background: displayReviewMeta.bg, border: `1px solid ${displayReviewMeta.border}`, padding: '3px 9px', borderRadius: 999 }}>
                             <span style={{ width: 6, height: 6, borderRadius: '50%', background: displayReviewMeta.color }} />
@@ -3281,17 +3530,16 @@ export default function EmployeePage() {
                             Balanced
                           </span>
                         )}
-                        {canEditGoalPlan && !hasError && !hasWarn && (
-                          <span style={{ fontSize: 11.5, color: '#94A3B8', marginLeft: 'auto' }}>
-                            {isApprovedLocked ? 'click to view' : isRejected ? 'click to update' : 'click to edit'}
-                          </span>
+                        {isApprovedLocked && (
+                          <span style={{ fontSize: 11.5, color: '#94A3B8', marginLeft: 'auto' }}>click to view</span>
                         )}
                       </div>
                     </div>
                   );
                 })}
               </div>
-            )}
+              );
+            })()}
 
             {/* ── Goal Edit Modal ─────────────────────────────────────── */}
             {editingGoalId && (() => {
@@ -3361,7 +3609,7 @@ export default function EmployeePage() {
                     <div style={{ padding: '20px 24px 18px', borderBottom: `1px solid ${color}22`, display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 16, background: `linear-gradient(135deg, ${color}14, transparent 75%)` }}>
                       <div style={{ flex: 1, minWidth: 0 }}>
                         <div style={{ fontSize: 10.5, fontWeight: 800, color, textTransform: 'uppercase', letterSpacing: '.1em', marginBottom: 4 }}>
-	                          {goalCanEdit ? (goalIsRejected ? `Editing Goal ${goalIndex + 1} · Changes requested` : `Editing Goal ${goalIndex + 1}`) : `Goal ${goalIndex + 1}`}
+	                          {goalCanEdit ? (goalIsRejected ? `Editing Goal ${goalIndex + 1} · Sent back` : `Editing Goal ${goalIndex + 1}`) : `Goal ${goalIndex + 1}`}
                         </div>
                         <div style={{ fontSize: 17, fontWeight: 800, color: '#0F172A', lineHeight: 1.3, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
                           {goal.name || <span style={{ color: '#94A3B8', fontStyle: 'italic', fontWeight: 600 }}>Untitled goal</span>}
@@ -3543,17 +3791,38 @@ export default function EmployeePage() {
                                   </div>
                                 ) : (
                                   <div>
-                                    <div style={{ fontSize: 14, color: '#1E293B', fontWeight: 600 }}>
-                                      {kpi.name}
-                                      {isEmployeeAdded ? <span style={{ marginLeft: 8, fontSize: 12, fontWeight: 700, color: '#2563EB', background: '#EFF6FF', padding: '2px 9px', borderRadius: 999 }}>Suggested</span> : null}
+                                    <div style={{ fontSize: 14, color: '#1E293B', fontWeight: 600, display: 'flex', alignItems: 'baseline', gap: 8 }}>
+                                      <span style={{ width: 6, height: 6, borderRadius: '50%', background: color, flexShrink: 0, alignSelf: 'center' }} />
+                                      <span>{kpi.name}</span>
                                     </div>
-                                    <div style={{ fontSize: 12.5, color: '#94A3B8', marginTop: 4 }}>
-                                      {effectiveConfig?.kpiRatingMode !== 'free-text' && kpi.weight ? `Weight: ${kpi.weight}%` : 'Additional KPI'}
-                                      {effectiveConfig?.targetsEnabled !== false && kpi.target ? ` · Target: ${kpi.target}` : ''}
-                                    </div>
+                                    {(() => {
+                                      // Only render the meta sub-line when there's
+                                      // actually something to say — the old fallback
+                                      // text "Additional KPI" duplicated the badge
+                                      // and confused readers.
+                                      const showWeight = effectiveConfig?.kpiRatingMode !== 'free-text' && kpi.weight;
+                                      const showTarget = effectiveConfig?.targetsEnabled !== false && kpi.target;
+                                      if (!showWeight && !showTarget) return null;
+                                      const parts = [];
+                                      if (showWeight) parts.push(`Weight: ${kpi.weight}%`);
+                                      if (showTarget) parts.push(`Target: ${kpi.target}`);
+                                      return (
+                                        <div style={{ fontSize: 12.5, color: '#94A3B8', marginTop: 4 }}>
+                                          {parts.join(' · ')}
+                                        </div>
+                                      );
+                                    })()}
                                   </div>
                                 )}
                               </div>
+                              {/* Right edge of the KPI row — "Self added" badge
+                                  sits here (not next to the title) so the name
+                                  stays clean. */}
+                              {isEmployeeAdded && (
+                                <span style={{ flexShrink: 0, alignSelf: 'flex-start', fontSize: 11, fontWeight: 700, color: '#2563EB', background: '#EFF6FF', padding: '2px 9px', borderRadius: 999, whiteSpace: 'nowrap' }}>
+                                  Self added
+                                </span>
+                              )}
                               {kpiEditable && (
                                 <button type="button" onClick={() => removeKpi(goal.id, kpi.id)} style={{ padding: '7px 9px', borderRadius: 8, border: '1px solid #E2E8F0', background: '#fff', color: '#94A3B8', cursor: 'pointer', fontFamily: 'inherit', fontSize: 12 }}>✕</button>
                               )}
@@ -3573,38 +3842,13 @@ export default function EmployeePage() {
                     </div>
 
                     {/* Footer */}
-                    <div style={{ padding: '14px 24px', borderTop: '1px solid #E2E8F0', display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: confirmDeleteGoal ? '#FEF2F2' : '#F8FAFC', gap: 12, transition: 'background 180ms ease' }}>
-                      {confirmDeleteGoal ? (
-                        <>
-                          <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, color: '#991B1B', fontWeight: 600, minWidth: 0 }}>
-                            <span style={{ width: 20, height: 20, display: 'flex', alignItems: 'center', justifyContent: 'center', borderRadius: '50%', background: '#DC2626', color: '#fff', fontSize: 12, fontWeight: 800, flexShrink: 0 }}>!</span>
-                            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>Delete this goal and all its KPIs?</span>
-                          </div>
-                          <div style={{ display: 'flex', gap: 8, flexShrink: 0 }}>
-                            <button
-                              type="button"
-                              onClick={() => setConfirmDeleteGoal(false)}
-                              style={{ padding: '9px 16px', borderRadius: 10, border: '1px solid #CBD5E1', background: '#fff', color: '#475569', cursor: 'pointer', fontFamily: 'inherit', fontSize: 13, fontWeight: 700 }}
-                            >
-                              Cancel
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => { removeGoal(goal.id); closeModal(); }}
-                              style={{ padding: '9px 18px', borderRadius: 10, border: 'none', background: '#DC2626', color: '#fff', cursor: 'pointer', fontFamily: 'inherit', fontSize: 13, fontWeight: 700, boxShadow: '0 4px 12px rgba(220,38,38,0.35)' }}
-                            >
-                              Yes, delete
-                            </button>
-                          </div>
-                        </>
-                      ) : (
-                        <>
+                    <div style={{ padding: '14px 24px', borderTop: '1px solid #E2E8F0', display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: '#F8FAFC', gap: 12 }}>
 	                          <div>
 	                            {goalCanEdit && (canAddKra || goal.libraryKraId || !isGoalStructurallyValid(goal)) && (
                               <button
                                 type="button"
-                                onClick={() => setConfirmDeleteGoal(true)}
-                                title={goalIsLocked ? 'This goal is missing required fields — delete to clean up the plan.' : 'Delete goal'}
+                                onClick={() => { requestDeleteGoal(goal); closeModal(); }}
+                                title={goalIsLocked ? 'This goal is missing required fields — move to Deleted Goals.' : 'Move to Deleted Goals'}
                                 style={{ padding: '10px 18px', borderRadius: 10, border: '1px solid #FECACA', background: '#fff', color: '#DC2626', cursor: 'pointer', fontFamily: 'inherit', fontSize: 13.5, fontWeight: 700 }}
                               >
                                 {goalIsLocked ? 'Delete broken goal' : 'Delete goal'}
@@ -3629,8 +3873,6 @@ export default function EmployeePage() {
 	                              </button>
 	                            )}
 	                          </div>
-                        </>
-                      )}
                     </div>
                   </div>
                 </div>
@@ -3644,16 +3886,40 @@ export default function EmployeePage() {
             )}
 
 
-            {canSetOwnGoals && (
+            {canSetOwnGoals && (() => {
+              const blocked = canEditGoalPlan && !myValidation.canSubmit && myValidation.errors.length > 0;
+              const firstError = blocked ? myValidation.errors[0] : '';
+              const moreCount = blocked ? Math.max(0, myValidation.errors.length - 1) : 0;
+              return (
             <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, marginTop: 10, flexWrap: 'wrap', alignItems: 'center' }}>
-              <div style={{ fontSize: 13.5, color: '#64748B' }}>
-                {!canEditGoalPlan && mySubmission.status === 'approved'
-                  ? 'This goal plan is approved and locked for the current phase.'
-                  : !canEditGoalPlan && mySubmission.status === 'pending-manager'
-                    ? 'Your manager now has this plan in the approval queue.'
-                    : myValidation.canSubmit
-                      ? 'All checks passed — ready to submit.'
-                      : ''}
+              <div style={{ fontSize: 13.5, minWidth: 0, display: 'inline-flex', alignItems: 'center', gap: 8, color: blocked ? '#B91C1C' : '#64748B' }}>
+                {blocked ? (
+                  <>
+                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
+                      <circle cx="12" cy="12" r="10" />
+                      <line x1="12" y1="8" x2="12" y2="12" />
+                      <line x1="12" y1="16" x2="12.01" y2="16" />
+                    </svg>
+                    <span style={{ fontWeight: 600 }}>
+                      {firstError}
+                      {moreCount > 0 && (
+                        <span style={{ marginLeft: 6, fontWeight: 700, color: '#991B1B', background: '#FEF2F2', border: '1px solid #FECACA', padding: '1px 7px', borderRadius: 999, fontSize: 11 }}>
+                          +{moreCount} more
+                        </span>
+                      )}
+                    </span>
+                  </>
+                ) : (
+                  <span style={{ color: '#64748B' }}>
+                    {!canEditGoalPlan && mySubmission.status === 'approved'
+                      ? 'This goal plan is approved and locked for the current phase.'
+                      : !canEditGoalPlan && mySubmission.status === 'pending-manager'
+                        ? 'Your manager now has this plan in the approval queue.'
+                        : myValidation.canSubmit
+                          ? 'All checks passed — ready to submit.'
+                          : ''}
+                  </span>
+                )}
               </div>
               {(() => {
                 // Submit-button state machine. A locked status (pending /
@@ -3695,7 +3961,8 @@ export default function EmployeePage() {
                 );
               })()}
             </div>
-            )}
+              );
+            })()}
           </div>
         )}
       </div>
@@ -3891,6 +4158,13 @@ export default function EmployeePage() {
       .msg-close-btn:hover { background: #F1F5F9; color: #0F172A; transform: rotate(90deg); }
       .msg-panel-wrap { animation: msgPanelIn 300ms cubic-bezier(.2,.9,.2,1) both; }
       .msg-empty-wrap { animation: msgEmptyIn 220ms ease-out both; }
+      .msg-composer-input,
+      .msg-composer-input:focus,
+      .msg-composer-input:focus-visible {
+        border-color: transparent !important;
+        box-shadow: none !important;
+        outline: none !important;
+      }
     `;
 
 		    const renderContactList = (width = '360px') => (
@@ -4132,6 +4406,7 @@ export default function EmployeePage() {
             }}
           >
             <textarea
+              className="msg-composer-input"
               value={messageInput}
               onChange={(e) => setMessageInput(e.target.value)}
               onKeyDown={(e) => {
@@ -4148,6 +4423,7 @@ export default function EmployeePage() {
               style={{
                 width: '100%',
                 padding: 0, margin: 0, border: 'none', outline: 'none',
+                boxShadow: 'none', appearance: 'none', WebkitAppearance: 'none',
                 fontFamily: 'inherit', fontSize: 14, resize: 'none',
                 background: 'transparent', color: '#0F172A',
                 lineHeight: '20px',
@@ -4218,21 +4494,6 @@ export default function EmployeePage() {
       >
         <style>{animCss}</style>
 
-        {/* Header matches Team Goals one-for-one so switching tabs doesn't visibly shift anything below. */}
-        <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'center', flexWrap: 'wrap', marginBottom: 12 }}>
-          <div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-              <div style={{ fontSize: 18, fontWeight: 800, color: '#0F172A' }}>Messages</div>
-              {totalUnread > 0 && (
-                <span style={{ fontSize: 11, fontWeight: 800, color: '#fff', background: accentFill, padding: '3px 10px', borderRadius: 999, boxShadow: `0 2px 8px ${brandPalette.primary}59` }}>
-                  {totalUnread} new
-                </span>
-              )}
-            </div>
-            <div style={{ fontSize: 12.5, color: '#64748B', marginTop: 3 }}>{contacts.length} {contacts.length === 1 ? 'contact' : 'contacts'}</div>
-          </div>
-        </div>
-
         <div
           onClick={(e) => {
             if (!activeConversation || e.target !== e.currentTarget) return;
@@ -4261,20 +4522,10 @@ export default function EmployeePage() {
       : '';
     return (
       <div>
-        <div style={{
-          display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12,
-          padding: '12px 14px', marginBottom: 14, borderRadius: 10,
-          background: '#F8FAFC', border: '1px solid #E2E8F0', color: '#475569', fontSize: 12.5,
-        }}>
-          <span>
-            <strong style={{ color: '#0F172A' }}>Trash</strong> · Items here are kept for 7 days, then permanently deleted. Restored goals go back into My Goals.
-          </span>
-          <span style={{ fontSize: 11.5, fontWeight: 700, color: '#94A3B8' }}>{deletedGoals.length} item{deletedGoals.length === 1 ? '' : 's'}</span>
-        </div>
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: 14 }}>
           {deletedGoals.map((goal) => {
-            const daysLeft = deletedGoalDaysRemaining(goal);
             const kpiCount = (goal.kpis || []).length;
+            const isMovingRecover = movingGoalIds.get(goal.id) === 'recover';
             const deletedDate = (() => {
               const ts = Date.parse(goal.deletedAt || '');
               if (!Number.isFinite(ts)) return '';
@@ -4282,11 +4533,42 @@ export default function EmployeePage() {
             })();
             return (
               <div key={goal.id} style={{
-                background: '#fff', border: '1px solid #E2E8F0', borderRadius: 12,
+                position: 'relative',
+                background: '#fff', border: '1px dashed #E2E8F0', borderRadius: 12,
                 padding: '14px 16px', display: 'flex', flexDirection: 'column', gap: 10,
                 boxShadow: '0 1px 2px rgba(15,23,42,.04)',
+                transform: isMovingRecover ? 'translateX(-28px) rotate(-1.2deg) scale(.97)' : 'none',
+                opacity: isMovingRecover ? 0 : 1,
+                filter: isMovingRecover ? 'saturate(.78)' : 'none',
+                clipPath: isMovingRecover ? 'polygon(12% 4%, 100% 0, 100% 96%, 12% 100%, 0 64%)' : 'polygon(0 0, 100% 0, 100% 100%, 0 100%)',
+                transition: isMovingRecover
+                  ? `transform ${GOAL_MOVE_ANIM_MS}ms cubic-bezier(.2,.85,.2,1), opacity ${GOAL_MOVE_ANIM_MS}ms ease, clip-path ${GOAL_MOVE_ANIM_MS}ms ease, filter ${GOAL_MOVE_ANIM_MS}ms ease`
+                  : 'transform .18s ease, opacity .18s ease, box-shadow .18s ease',
               }}>
-                <div style={{ minWidth: 0 }}>
+                {isMovingRecover && (
+                  <div style={{
+                    position: 'absolute', inset: 0, zIndex: 4, pointerEvents: 'none',
+                    background: 'repeating-linear-gradient(65deg, rgba(240,253,244,.9) 0 8px, rgba(187,247,208,.62) 8px 10px)',
+                    mixBlendMode: 'multiply',
+                  }} />
+                )}
+                {/* Top-right permanent-delete X — app confirmation modal below. */}
+                <button
+                  type="button"
+                  onClick={() => setConfirmPurgeGoal({ id: goal.id, name: goal.name || 'Untitled goal' })}
+                  title="Delete permanently"
+                  aria-label="Delete permanently"
+                  style={{
+                    position: 'absolute', top: 8, right: 8, zIndex: 2,
+                    width: 22, height: 22, borderRadius: 7, padding: 0,
+                    background: '#FEF2F2', border: '1px solid #FECACA', color: '#DC2626',
+                    cursor: 'pointer',
+                    display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                  }}
+                >
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                </button>
+                <div style={{ minWidth: 0, paddingRight: 28 }}>
                   <div style={{ fontSize: 14, fontWeight: 700, color: '#0F172A', overflow: 'hidden', textOverflow: 'ellipsis' }}>
                     {goal.name || <span style={{ color: '#94A3B8', fontStyle: 'italic', fontWeight: 500 }}>Untitled goal</span>}
                   </div>
@@ -4300,45 +4582,28 @@ export default function EmployeePage() {
                       Deleted {deletedDate}
                     </span>
                   )}
-                  <span style={{
-                    padding: '3px 8px', borderRadius: 999,
-                    background: daysLeft <= 1 ? '#FEF3C7' : '#EFF6FF',
-                    color: daysLeft <= 1 ? '#92400E' : '#1D4ED8',
-                    fontWeight: 600,
-                  }}>
-                    Auto-deletes in {daysLeft} day{daysLeft === 1 ? '' : 's'}
-                  </span>
                 </div>
                 <div style={{ display: 'flex', gap: 8, marginTop: 4 }}>
                   <button
                     type="button"
-                    onClick={() => restoreGoal(goal.id)}
+                    onClick={() => {
+                      if (restoreDisabled) return;
+                      restoreGoal(goal.id);
+                    }}
                     disabled={restoreDisabled}
                     title={restoreDisabled ? restoreDisabledReason : 'Move this goal back to My Goals'}
                     style={{
-                      flex: 1, padding: '8px 12px', borderRadius: 8,
-                      border: '1px solid #BFDBFE',
-                      background: restoreDisabled ? '#F1F5F9' : '#EFF6FF',
-                      color: restoreDisabled ? '#94A3B8' : '#1D4ED8',
-                      fontFamily: 'inherit', fontSize: 12.5, fontWeight: 700,
+                      display: 'inline-flex', alignItems: 'center', gap: 5,
+                      padding: '6px 12px', borderRadius: 999,
+                      border: `1px solid ${restoreDisabled ? '#E2E8F0' : '#BBF7D0'}`,
+                      background: restoreDisabled ? '#F1F5F9' : '#F0FDF4',
+                      color: restoreDisabled ? '#94A3B8' : '#15803D',
+                      fontFamily: 'inherit', fontSize: 12, fontWeight: 700,
                       cursor: restoreDisabled ? 'not-allowed' : 'pointer',
                     }}
                   >
-                    Restore
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      const confirmed = window.confirm(`Permanently delete "${goal.name || 'this goal'}"? This cannot be undone.`);
-                      if (confirmed) purgeGoalForever(goal.id);
-                    }}
-                    style={{
-                      flex: 1, padding: '8px 12px', borderRadius: 8,
-                      border: '1px solid #FECACA', background: '#FEF2F2', color: '#B91C1C',
-                      fontFamily: 'inherit', fontSize: 12.5, fontWeight: 700, cursor: 'pointer',
-                    }}
-                  >
-                    Delete forever
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>
+                    Recover
                   </button>
                 </div>
               </div>
@@ -4370,7 +4635,7 @@ export default function EmployeePage() {
     counts.all = rows.length;
     const FILTER_TABS = [
       { id: 'all', label: 'All', color: '#475569', bg: '#F8FAFC', activeBg: '#0F172A', activeColor: '#fff' },
-      { id: 'pending', label: 'Pending', color: '#D97706', bg: '#FFF7ED', activeBg: '#D97706', activeColor: '#fff' },
+      { id: 'pending', label: 'Approval pending', color: '#D97706', bg: '#FFF7ED', activeBg: '#D97706', activeColor: '#fff' },
       { id: 'approved', label: 'Approved', color: '#16A34A', bg: '#F0FDF4', activeBg: '#16A34A', activeColor: '#fff' },
       { id: 'sent-back', label: 'Sent back', color: '#DC2626', bg: '#FEF2F2', activeBg: '#DC2626', activeColor: '#fff' },
       { id: 'not-submitted', label: 'Not submitted', color: '#475569', bg: '#F8FAFC', activeBg: '#475569', activeColor: '#fff' },
@@ -4400,27 +4665,9 @@ export default function EmployeePage() {
           .appr-commit:disabled { opacity: 0.5; cursor: not-allowed !important; }
         `}</style>
 
-        <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'center', flexWrap: 'wrap', marginBottom: 12 }}>
-          <div>
-	      <div style={{ fontSize: 18, fontWeight: 800, color: '#0F172A' }}>My Team Goals</div>
-            <div style={{ fontSize: 12.5, color: '#64748B', marginTop: 3 }}>{visible.length} of {rows.length} team members</div>
-          </div>
-          <div style={{ position: 'relative', width: 'min(320px, 100%)' }}>
-            <input
-              value={teamSearch}
-              onChange={(e) => setTeamSearch(e.target.value)}
-              placeholder="Search team"
-              style={{ width: '100%', boxSizing: 'border-box', padding: '10px 12px 10px 34px', borderRadius: 10, border: '1.5px solid #D9E2EC', background: '#fff', color: '#0F172A', fontFamily: 'inherit', fontSize: 13.5, outline: 'none' }}
-            />
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#94A3B8" strokeWidth="2.3" strokeLinecap="round" strokeLinejoin="round" style={{ position: 'absolute', left: 12, top: '50%', transform: 'translateY(-50%)', pointerEvents: 'none' }}>
-              <circle cx="11" cy="11" r="8" />
-              <path d="m21 21-4.35-4.35" />
-            </svg>
-          </div>
-        </div>
-
-        {/* Filter row */}
-        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 14 }}>
+        {/* Filter row + Search (single row) */}
+        <div style={{ display: 'flex', gap: 12, alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', marginBottom: 14 }}>
+          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
           {FILTER_TABS.map((t) => {
             const n = counts[t.id] || 0;
             const active = teamFilter === t.id;
@@ -4428,7 +4675,14 @@ export default function EmployeePage() {
               <button
                 key={t.id}
                 type="button"
-                onClick={() => setTeamFilter(t.id)}
+                onClick={() => {
+                  setTeamFilter(t.id);
+                  // Reset any open review/note state so the new filter
+                  // renders all rows collapsed — never carry an expanded
+                  // pane from the previous tab.
+                  setExpandedReviewCode(null);
+                  setNoteEditFor(null);
+                }}
                 style={{
                   display: 'inline-flex', alignItems: 'center', gap: 7,
                   padding: '6px 12px', borderRadius: 999, cursor: 'pointer', fontFamily: 'inherit',
@@ -4447,6 +4701,19 @@ export default function EmployeePage() {
               </button>
             );
           })}
+          </div>
+          <div style={{ position: 'relative', width: 'min(280px, 100%)' }}>
+            <input
+              value={teamSearch}
+              onChange={(e) => setTeamSearch(e.target.value)}
+              placeholder="Search team"
+              style={{ width: '100%', boxSizing: 'border-box', padding: '8px 12px 8px 32px', borderRadius: 999, border: '1.5px solid #D9E2EC', background: '#fff', color: '#0F172A', fontFamily: 'inherit', fontSize: 12.5, outline: 'none' }}
+            />
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#94A3B8" strokeWidth="2.3" strokeLinecap="round" strokeLinejoin="round" style={{ position: 'absolute', left: 11, top: '50%', transform: 'translateY(-50%)', pointerEvents: 'none' }}>
+              <circle cx="11" cy="11" r="8" />
+              <path d="m21 21-4.35-4.35" />
+            </svg>
+          </div>
         </div>
 
         {visible.length === 0 && (
@@ -4455,71 +4722,260 @@ export default function EmployeePage() {
           </div>
         )}
 
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(300px, 1fr))', gap: 8 }}>
         {visible.map(({ report, reportCode, submission, bucket }) => {
           const reportGoals = submission?.goals || [];
           const reportGroup = getEmployeeGoalGroup(config, report);
           const reportOverrides = resolveGroupAccess(reportGroup);
           const reportEffectiveConfig = reportOverrides ? { ...config, ...reportOverrides } : config;
           const metrics = getGoalPlanMetrics(reportGoals, reportEffectiveConfig, getGoalAccessMode(reportEffectiveConfig));
-          const statusMeta = getSubmissionStatusMeta(submission);
+          // Row pill uses the same nomenclature as the filter tabs above
+          // (Pending / Approved / Sent back / Not submitted) so the manager
+          // can scan a row and instantly map it to the bucket they came from.
+          const statusMeta = (() => {
+            const status = submission?.status;
+            if (status === 'pending-manager') {
+              const isResubmit = Number(submission?.submitCount || 0) > 1;
+              return { label: isResubmit ? 'Pending (re-submitted)' : 'Pending', color: '#D97706', bg: '#FFF7ED', border: '#FED7AA' };
+            }
+            if (status === 'approved') return { label: 'Approved', color: '#16A34A', bg: '#F0FDF4', border: '#BBF7D0' };
+            if (status === 'sent-back') return { label: 'Sent back', color: '#DC2626', bg: '#FEF2F2', border: '#FECACA' };
+            return { label: 'Not submitted', color: '#475569', bg: '#F8FAFC', border: '#CBD5E1' };
+          })();
           const normalizedCode = normalizeCode(reportCode);
           const canReview = bucket === 'pending' || bucket === 'approved' || bucket === 'sent-back';
           const expanded = canReview && expandedReviewCode === normalizedCode;
           const isFocused = focusApprovalCode === normalizedCode;
+
+          // Manager-side "complete" mirrors past 100% so over-allocation
+          // visibly *retreats* the bar instead of silently capping at 100.
+          // 110% → 90, 150% → 50, 200% → 0. Per-side then averaged.
+          const mirror = (pct, isOver) => (isOver ? Math.max(0, 200 - pct) : Math.min(100, pct));
+          const effGoal = mirror(metrics.goalPct, metrics.goalOver);
+          const effKpi = mirror(metrics.kpiPct, metrics.kpiOver);
+          const effOverall = metrics.shouldTrackKpis
+            ? Math.round((effGoal + effKpi) / 2)
+            : effGoal;
+          const isOver = metrics.goalOver || metrics.kpiOver;
+          const pctColor = isOver ? '#DC2626' : effOverall === 100 ? '#16A34A' : '#2563EB';
+          const barGradient = isOver
+            ? 'linear-gradient(90deg,#DC2626,#F87171)'
+            : effOverall === 100
+              ? 'linear-gradient(90deg,#16A34A,#22C55E)'
+              : 'linear-gradient(90deg,#2563EB,#4F46E5)';
+
           return (
-	            <div
-	              key={reportCode}
-	              ref={(el) => {
+            <div
+              key={reportCode}
+              ref={(el) => {
                 if (el && isFocused) {
                   el.scrollIntoView({ behavior: 'smooth', block: 'start' });
-	                  setTimeout(() => setFocusApprovalCode(null), 1200);
-	                }
-	              }}
-	              onClick={() => { if (canReview) openApproval(reportCode); }}
-	              style={{ background: '#fff', border: `1.5px solid ${isFocused ? '#93C5FD' : '#E9EDF2'}`, borderRadius: 12, padding: expanded ? '12px 14px 0' : '12px 14px', marginBottom: 10, animation: isFocused ? 'approvalFlash 1200ms ease' : 'none', cursor: canReview ? 'pointer' : 'default' }}
-	            >
-	              <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'center', flexWrap: 'wrap', marginBottom: 10 }}>
-	                <div style={{ minWidth: 0 }}>
-	                  <div style={{ fontSize: 15, fontWeight: 800, color: '#0F172A' }}>{report['Employee Name'] || reportCode}</div>
-	                  <div style={{ fontSize: 12.5, color: '#64748B', marginTop: 4 }}>
-	                    {reportCode}
-	                    {report.Designation ? ` · ${report.Designation}` : ''}
-	                    {submission?.submittedAt ? ` · submitted ${formatDateTime(submission.submittedAt)}` : ' · not submitted yet'}
-	                  </div>
-	                </div>
-	                <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-	                  <div style={{ padding: '5px 10px', borderRadius: 999, background: statusMeta.bg, border: `1px solid ${statusMeta.border}`, color: statusMeta.color, fontSize: 12, fontWeight: 800 }}>
-	                    {statusMeta.label}
-	                  </div>
-	                </div>
-	              </div>
-	              <div style={{ display: 'grid', gridTemplateColumns: '76px minmax(180px,1fr) auto', gap: 12, alignItems: 'center' }}>
-	                <div>
-	                  <div style={{ fontSize: 20, fontWeight: 800, color: metrics.overall === 100 ? '#16A34A' : '#2563EB', lineHeight: 1 }}>{metrics.overall}%</div>
-	                  <div style={{ fontSize: 11.5, color: '#64748B', marginTop: 3 }}>complete</div>
-	                </div>
-	                <div>
-	                  <div style={{ height: 7, background: '#E2E8F0', borderRadius: 999, overflow: 'hidden' }}>
-	                    <div style={{ height: '100%', width: `${metrics.overall}%`, background: metrics.overall === 100 ? 'linear-gradient(90deg,#16A34A,#22C55E)' : 'linear-gradient(90deg,#2563EB,#4F46E5)', borderRadius: 999 }} />
-	                  </div>
-	                </div>
-	                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
-	                  <div style={{ fontSize: 12, color: '#64748B' }}>Goals {metrics.goalPct}%</div>
-	                  {metrics.shouldTrackKpis && (
-	                    <div style={{ fontSize: 12, color: '#64748B' }}>KPI {metrics.kpiPct}%</div>
-	                  )}
-	                  <div style={{ fontSize: 12, color: '#64748B' }}>{reportGoals.length} goals</div>
-	                </div>
-	              </div>
+                  setTimeout(() => setFocusApprovalCode(null), 1200);
+                }
+              }}
+              onClick={() => { if (canReview) openApproval(reportCode); }}
+              style={{ background: '#fff', border: `1px solid ${isFocused ? '#93C5FD' : '#E9EDF2'}`, borderRadius: 10, padding: expanded ? '8px 14px 0' : '8px 14px', gridColumn: expanded ? '1 / -1' : 'auto', animation: isFocused ? 'approvalFlash 1200ms ease' : 'none', cursor: canReview ? 'pointer' : 'default' }}
+            >
+              <div style={{ display: 'flex', gap: 12, alignItems: 'center', minWidth: 0 }}>
+                <div style={{ minWidth: 0, flex: '0 1 180px' }}>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: '#0F172A', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    {report['Employee Name'] || reportCode}
+                  </div>
+                  <div style={{ fontSize: 11, color: '#94A3B8', marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    {reportCode} · {reportGoals.length} goal{reportGoals.length === 1 ? '' : 's'}
+                    {report.Designation ? ` · ${report.Designation}` : ''}
+                  </div>
+                </div>
+                <span
+                  title={statusMeta.label}
+                  aria-label={statusMeta.label}
+                  style={{ flexShrink: 0, width: 9, height: 9, borderRadius: '50%', background: statusMeta.color, border: `2px solid ${statusMeta.bg}`, boxShadow: `0 0 0 1px ${statusMeta.border}` }}
+                />
 
-	              {expanded && submission && (
-	                <div onClick={(e) => e.stopPropagation()} style={{ marginTop: 12, marginLeft: -14, marginRight: -14, borderTop: '1px solid #E2E8F0', background: '#FAFBFC', padding: '14px 14px 16px', borderBottomLeftRadius: 12, borderBottomRightRadius: 12 }}>
-	                  {renderReviewPanel(submission, bucket)}
-	                </div>
-	              )}
+                <div style={{ flex: expanded && bucket === 'pending' && submission ? '0 1 160px' : '1 1 100px', minWidth: 60, maxWidth: 220, height: 5, background: '#E2E8F0', borderRadius: 999, overflow: 'hidden' }}>
+                  <div style={{ height: '100%', width: `${effOverall}%`, background: barGradient, borderRadius: 999, transition: 'width .2s ease' }} />
+                </div>
+                <div style={{ flexShrink: 0, fontSize: 13, fontWeight: 800, color: pctColor, minWidth: 38, textAlign: 'right' }}>
+                  {effOverall}%
+                </div>
+                {expanded && bucket === 'pending' && submission && (() => {
+                  // Action toolbar — appears INLINE with the header when the
+                  // manager has expanded this employee's row for review.
+                  // Layout: [count chips] ──auto-spacer── [Note] [Reject all] [Submit] [Approve all]
+                  // so the action buttons always stick to the right edge
+                  // regardless of how long the bar / chip block is.
+                  // Stops propagation so the row's click-to-toggle doesn't
+                  // collapse the panel while you're acting on it.
+                  const picksLocal = goalReviewPicks[reportCode] || {};
+                  const pendingGoalsLocal = (submission.goals || []).filter((g) => g.reviewStatus !== 'approved');
+                  const lockedGoalsLocal = (submission.goals || []).filter((g) => g.reviewStatus === 'approved');
+                  const rejectedCount = Object.values(picksLocal).filter((p) => p.status === 'reject').length;
+                  const approvedCount = pendingGoalsLocal.filter((g) => picksLocal[g.id]?.status === 'approve').length;
+                  const brokenCount = pendingGoalsLocal.filter((g) => !isGoalStructurallyValid(g, reportEffectiveConfig)).length;
+                  const noteValue = managerNotes[reportCode] || '';
+                  const hasNote = !!noteValue.trim();
+                  const noteOpen = noteEditFor === reportCode;
+                  const confirmPayload = (action) => ({
+                    action,
+                    employeeCode: reportCode,
+                    employeeName: submission.employeeName,
+                    approvedPickCount: approvedCount,
+                    rejectedPickCount: rejectedCount,
+                    ...(action === 'approve-all' ? { brokenPendingCount: brokenCount } : {}),
+                    pendingTotal: pendingGoalsLocal.length,
+                    lockedCount: lockedGoalsLocal.length,
+                    planNote: sanitizeText(noteValue),
+                    stage: 'confirm',
+                    loading: false,
+                  });
+                  const stop = (fn) => (e) => { e.stopPropagation(); fn(); };
+                  const chipStyle = (color, bg, border) => ({
+                    padding: '3px 9px', borderRadius: 999, background: bg,
+                    border: `1px solid ${border}`, color, fontSize: 11,
+                    fontWeight: 700, whiteSpace: 'nowrap',
+                  });
+                  return (
+                    <>
+                      {/* Flex spacer — pushes the chip block toward the middle */}
+                      <div style={{ flex: 1, minWidth: 8 }} />
+                      <div style={{ display: 'inline-flex', gap: 4, alignItems: 'center', flexShrink: 0 }}>
+                        <div title="Goals pending your review" style={chipStyle('#D97706', '#FFF7ED', '#FED7AA')}>
+                          {pendingGoalsLocal.length} Goal{pendingGoalsLocal.length === 1 ? '' : 's'}
+                        </div>
+                        {approvedCount > 0 && (
+                          <div title={`${approvedCount} marked approve`} style={chipStyle('#16A34A', '#F0FDF4', '#BBF7D0')}>
+                            {approvedCount} approved
+                          </div>
+                        )}
+                        {rejectedCount > 0 && (
+                          <div title={`${rejectedCount} marked reject`} style={chipStyle('#DC2626', '#FEF2F2', '#FECACA')}>
+                            {rejectedCount} rejected
+                          </div>
+                        )}
+                        {lockedGoalsLocal.length > 0 && (
+                          <div title={`${lockedGoalsLocal.length} approved in a previous round (locked)`} style={chipStyle('#15803D', '#DCFCE7', '#86EFAC')}>
+                            {lockedGoalsLocal.length} locked
+                          </div>
+                        )}
+                      </div>
+                      {/* Second spacer — keeps chips visually mid, buttons at far right */}
+                      <div style={{ flex: 1, minWidth: 8 }} />
+                      <div style={{ display: 'inline-flex', gap: 6, alignItems: 'center', flexShrink: 0 }}>
+                        <button
+                          type="button"
+                          onClick={stop(() => {
+                            if (noteOpen) { setNoteEditFor(null); return; }
+                            setNoteDraft(noteValue);
+                            setNoteEditFor(reportCode);
+                          })}
+                          title={hasNote ? 'Edit overall note' : 'Add overall note'}
+                          style={{
+                            display: 'inline-flex', alignItems: 'center', gap: 4,
+                            padding: '4px 9px', borderRadius: 7,
+                            border: `1.5px solid ${noteOpen ? '#0F172A' : '#E2E8F0'}`,
+                            background: noteOpen ? '#0F172A' : '#fff',
+                            color: noteOpen ? '#fff' : '#475569',
+                            cursor: 'pointer', fontFamily: 'inherit', fontSize: 11.5, fontWeight: 700,
+                          }}
+                        >
+                          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z"/></svg>
+                          Note{hasNote && <span style={{ width: 5, height: 5, borderRadius: '50%', background: noteOpen ? '#86EFAC' : '#16A34A' }} />}
+                        </button>
+                        {/* Reject all — always shown unless approves marked
+                            (contradiction). Standalone wizard, no Submit. */}
+                        {approvedCount === 0 && (
+                          <button
+                            type="button"
+                            onClick={stop(() => setReviewConfirm(confirmPayload('reject-all')))}
+                            style={{ padding: '4px 10px', borderRadius: 7, border: '1.5px solid #FECACA', background: '#fff', color: '#DC2626', cursor: 'pointer', fontFamily: 'inherit', fontSize: 11.5, fontWeight: 700, whiteSpace: 'nowrap' }}
+                          >
+                            Reject all
+                          </button>
+                        )}
+                        {/* Approve all — shortcut, hidden when rejects exist
+                            (contradiction) or any pending goal is broken. */}
+                        {rejectedCount === 0 && brokenCount === 0 && (
+                          <button
+                            type="button"
+                            onClick={stop(() => setReviewConfirm(confirmPayload('approve-all')))}
+                            style={{ padding: '4px 10px', borderRadius: 7, border: 'none', background: '#16A34A', color: '#fff', cursor: 'pointer', fontFamily: 'inherit', fontSize: 11.5, fontWeight: 700, whiteSpace: 'nowrap', boxShadow: '0 4px 10px rgba(22,163,74,.28)' }}
+                          >
+                            Approve all
+                          </button>
+                        )}
+                        {/* Submit · N — only appears once the manager has
+                            marked ≥1 goal as Reject individually. Commits
+                            the per-goal picks (rejects → send back, the
+                            rest → auto-approve). Hidden otherwise so the
+                            toolbar never shows a dead-disabled button. */}
+                        {rejectedCount > 0 && (
+                          <button
+                            type="button"
+                            onClick={stop(() => setReviewConfirm(confirmPayload('commit')))}
+                            style={{ padding: '4px 10px', borderRadius: 7, border: 'none', background: '#2563EB', color: '#fff', cursor: 'pointer', fontFamily: 'inherit', fontSize: 11.5, fontWeight: 700, whiteSpace: 'nowrap', boxShadow: '0 4px 10px rgba(37,99,235,.28)' }}
+                          >
+                            Submit · {rejectedCount} send back
+                          </button>
+                        )}
+                      </div>
+                    </>
+                  );
+                })()}
+                {canReview && (
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#94A3B8" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0, transform: expanded ? 'rotate(180deg)' : 'none', transition: 'transform .15s ease' }}>
+                    <polyline points="6 9 12 15 18 9"/>
+                  </svg>
+                )}
+              </div>
+              {isOver && (
+                <div style={{ marginTop: 6, display: 'inline-flex', alignItems: 'center', gap: 6, padding: '2px 8px', borderRadius: 999, background: '#FEF2F2', border: '1px solid #FECACA', color: '#991B1B', fontSize: 10.5, fontWeight: 700 }}>
+                  <span style={{ width: 6, height: 6, borderRadius: '50%', background: '#DC2626' }} />
+                  Over-allocated · Goals {metrics.goalPct}%{metrics.shouldTrackKpis && metrics.kpiOver ? ` · KPI ${metrics.kpiPct}%` : ''}
+                </div>
+              )}
+
+              {expanded && noteEditFor === reportCode && (
+                <div onClick={(e) => e.stopPropagation()} style={{ marginTop: 10, padding: '10px 12px', border: '1px solid #E2E8F0', borderRadius: 9, background: '#F8FAFC', cursor: 'default' }}>
+                  <div style={{ fontSize: 11, fontWeight: 700, color: '#64748B', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 5 }}>Overall note (optional)</div>
+                  <textarea
+                    value={noteDraft}
+                    onChange={(e) => setNoteDraft(e.target.value)}
+                    autoFocus
+                    rows={2}
+                    placeholder="A comment about the plan as a whole"
+                    style={{ width: '100%', padding: '8px 10px', borderRadius: 7, border: '1.5px solid #D9E2EC', fontFamily: 'inherit', fontSize: 12.5, resize: 'vertical', background: '#fff', boxSizing: 'border-box' }}
+                  />
+                  <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 6, marginTop: 6 }}>
+                    <button
+                      type="button"
+                      onClick={() => setNoteEditFor(null)}
+                      style={{ padding: '5px 12px', borderRadius: 7, background: '#fff', border: '1px solid #E2E8F0', color: '#475569', cursor: 'pointer', fontFamily: 'inherit', fontSize: 11.5, fontWeight: 700 }}
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setManagerNotes((p) => ({ ...p, [reportCode]: noteDraft }));
+                        setNoteEditFor(null);
+                      }}
+                      style={{ padding: '5px 12px', borderRadius: 7, background: '#0F172A', border: '1px solid #0F172A', color: '#fff', cursor: 'pointer', fontFamily: 'inherit', fontSize: 11.5, fontWeight: 700 }}
+                    >
+                      Save
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {expanded && submission && (
+                <div onClick={(e) => e.stopPropagation()} style={{ marginTop: 10, marginLeft: -14, marginRight: -14, borderTop: '1px solid #E2E8F0', background: '#FAFBFC', padding: '14px 14px 16px', borderBottomLeftRadius: 10, borderBottomRightRadius: 10, cursor: 'default' }}>
+                  {renderReviewPanel(submission, bucket)}
+                </div>
+              )}
             </div>
           );
         })}
+        </div>
       </div>
     );
   }
@@ -4536,10 +4992,21 @@ export default function EmployeePage() {
     const setPick = (empCode, goalId, status) => {
       setGoalReviewPicks((prev) => {
         const perEmployee = { ...(prev[empCode] || {}) };
-        if (perEmployee[goalId]?.status === status) {
-          delete perEmployee[goalId];
+        const existing = perEmployee[goalId];
+        // Toggling the same status clears the decision, but we KEEP any
+        // typed note in a parked { status: null, note } slot so re-arming
+        // the same status (or switching to another) restores it. Only an
+        // explicitly empty note collapses the entry away.
+        if (existing?.status === status) {
+          const keptNote = existing?.note || '';
+          if (keptNote) {
+            perEmployee[goalId] = { status: null, note: keptNote };
+          } else {
+            delete perEmployee[goalId];
+          }
         } else {
-          perEmployee[goalId] = { status, note: status === 'reject' ? (perEmployee[goalId]?.note || '') : '' };
+          const prevNote = existing?.note || '';
+          perEmployee[goalId] = { status, note: prevNote };
         }
         return { ...prev, [empCode]: perEmployee };
       });
@@ -4563,29 +5030,21 @@ export default function EmployeePage() {
 
     return (
       <div>
-        {!readOnly && (
-          <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginBottom: 12 }}>
-            {rejectedPickCount > 0 && (
-              <div style={{ padding: '5px 11px', borderRadius: 999, background: '#FEF2F2', border: '1px solid #FECACA', fontSize: 12, fontWeight: 700, color: '#DC2626' }}>
-                {rejectedPickCount} marked reject
-              </div>
-            )}
-            {approvedPickCount > 0 && (
-              <div style={{ padding: '5px 11px', borderRadius: 999, background: '#F0FDF4', border: '1px solid #BBF7D0', fontSize: 12, fontWeight: 700, color: '#16A34A' }}>
-                {approvedPickCount} marked approve
-              </div>
-            )}
-            <div style={{ padding: '6px 12px', borderRadius: 999, background: '#FEF2F2', border: '1px solid #FECACA', fontSize: 12.5, fontWeight: 700, color: '#DC2626' }}>
-              {pendingGoals.length} pending review
-            </div>
-            {lockedGoals.length > 0 && (
-              <div style={{ padding: '6px 12px', borderRadius: 999, background: '#F0FDF4', border: '1px solid #BBF7D0', fontSize: 12.5, fontWeight: 700, color: '#16A34A' }}>
-                {lockedGoals.length} already approved
-              </div>
-            )}
+        {!readOnly && pendingGoals.length > 0 && (
+          <div style={{
+            display: 'inline-flex', alignItems: 'center', gap: 7,
+            padding: '5px 11px', marginBottom: 10, borderRadius: 999,
+            background: '#EFF6FF', border: '1px solid #BFDBFE', color: '#1D4ED8',
+            fontSize: 11.5, fontWeight: 600,
+          }}>
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
+              <circle cx="12" cy="12" r="10" />
+              <line x1="12" y1="16" x2="12" y2="12" />
+              <line x1="12" y1="8" x2="12.01" y2="8" />
+            </svg>
+            Tip: you can approve or reject individual goals as well — pick per-goal, then hit Submit.
           </div>
         )}
-
         {(submission.goals || []).map((goal, goalIndex) => {
           const color = getPerspectiveColor(goal, activePerspectives, goalIndex);
           const locked = goal.reviewStatus === 'approved';
@@ -4598,32 +5057,35 @@ export default function EmployeePage() {
           return (
             <div key={goal.id} style={{
               border: `1.5px solid ${stateColor}`,
-              borderRadius: 12, padding: '14px 16px', marginBottom: 12,
+              borderRadius: 10, padding: '10px 12px', marginBottom: 8,
               background: stateBg,
               transition: 'border-color 180ms ease, background 180ms ease',
             }}>
-              <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap', marginBottom: 10 }}>
-                <div style={{ minWidth: 0, flex: 1 }}>
+              {/* Single-line header: perspective tag + goal name (left) · weight + actions (right) */}
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, flexWrap: 'wrap', marginBottom: (goal.kpis || []).length > 0 || markedReject ? 8 : 0 }}>
+                <div style={{ minWidth: 0, flex: 1, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
                   {!isFlatFramework && goal.perspName && goal.perspName !== 'All KRAs' && (
-                    <div style={{ fontSize: 11, fontWeight: 700, color, textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 4 }}>{goal.perspName}</div>
+                    <span style={{ fontSize: 10, fontWeight: 800, color, background: `${color}14`, padding: '2px 7px', borderRadius: 999, textTransform: 'uppercase', letterSpacing: '.06em', flexShrink: 0 }}>{goal.perspName}</span>
                   )}
-                  <div style={{ fontSize: 14.5, fontWeight: 700, color: '#0D1117' }}>{goal.name || <span style={{ color: '#94A3B8', fontStyle: 'italic' }}>Untitled goal</span>}</div>
+                  <span style={{ fontSize: 13, fontWeight: 700, color: '#0D1117', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                    {goal.name || <span style={{ color: '#94A3B8', fontStyle: 'italic' }}>Untitled goal</span>}
+                  </span>
                 </div>
-                <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexShrink: 0 }}>
-                  <div style={{ fontSize: 12, fontWeight: 700, color, background: `${color}14`, padding: '4px 10px', borderRadius: 999 }}>
+                <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexShrink: 0 }}>
+                  <div style={{ fontSize: 11, fontWeight: 800, color, background: `${color}14`, padding: '3px 9px', borderRadius: 999 }}>
                     {goal.weight || 0}%
                   </div>
                   {locked ? (
-                    <div style={{ display: 'inline-flex', alignItems: 'center', gap: 4, padding: '5px 10px', borderRadius: 999, background: '#DCFCE7', border: '1px solid #86EFAC', color: '#15803D', fontSize: 11.5, fontWeight: 700 }}>
-                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+                    <div style={{ display: 'inline-flex', alignItems: 'center', gap: 3, padding: '3px 8px', borderRadius: 999, background: '#DCFCE7', border: '1px solid #86EFAC', color: '#15803D', fontSize: 11, fontWeight: 700 }}>
+                      <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
                       Approved
                     </div>
                   ) : readOnly ? null : (
                     <>
                       {broken && (
-                        <span title="Goal is missing required fields and cannot be approved" style={{ display: 'inline-flex', alignItems: 'center', gap: 4, padding: '5px 9px', borderRadius: 999, background: '#FEF2F2', border: '1px solid #FECACA', color: '#991B1B', fontSize: 11, fontWeight: 800 }}>
-                          <span style={{ width: 6, height: 6, borderRadius: '50%', background: '#DC2626' }} />
-                          Broken — can't approve
+                        <span title="Goal is missing required fields and cannot be approved" style={{ display: 'inline-flex', alignItems: 'center', gap: 4, padding: '3px 8px', borderRadius: 999, background: '#FEF2F2', border: '1px solid #FECACA', color: '#991B1B', fontSize: 10.5, fontWeight: 800 }}>
+                          <span style={{ width: 5, height: 5, borderRadius: '50%', background: '#DC2626' }} />
+                          Broken
                         </span>
                       )}
                       <button
@@ -4633,16 +5095,16 @@ export default function EmployeePage() {
                         disabled={broken}
                         title={broken ? 'Missing required fields — ask employee to fix and resubmit' : (markedApprove ? 'Click again to clear' : 'Mark approve')}
                         style={{
-                          display: 'inline-flex', alignItems: 'center', gap: 4,
-                          padding: '6px 11px', borderRadius: 9,
+                          display: 'inline-flex', alignItems: 'center', gap: 3,
+                          padding: '4px 9px', borderRadius: 7,
                           border: `1.5px solid ${markedApprove ? '#16A34A' : '#E2E8F0'}`,
                           background: markedApprove ? '#16A34A' : '#fff',
                           color: markedApprove ? '#fff' : '#64748B',
                           cursor: broken ? 'not-allowed' : 'pointer',
                           opacity: broken ? 0.45 : 1,
-                          fontFamily: 'inherit', fontSize: 12, fontWeight: 700,
+                          fontFamily: 'inherit', fontSize: 11.5, fontWeight: 700,
                         }}>
-                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+                        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
                         Approve
                       </button>
                       <button
@@ -4651,14 +5113,14 @@ export default function EmployeePage() {
                         onClick={() => setPick(submission.employeeCode, goal.id, 'reject')}
                         title={markedReject ? 'Click again to clear' : 'Mark reject'}
                         style={{
-                          display: 'inline-flex', alignItems: 'center', gap: 4,
-                          padding: '6px 11px', borderRadius: 9,
+                          display: 'inline-flex', alignItems: 'center', gap: 3,
+                          padding: '4px 9px', borderRadius: 7,
                           border: `1.5px solid ${markedReject ? '#DC2626' : '#E2E8F0'}`,
                           background: markedReject ? '#DC2626' : '#fff',
                           color: markedReject ? '#fff' : '#64748B',
-                          cursor: 'pointer', fontFamily: 'inherit', fontSize: 12, fontWeight: 700,
+                          cursor: 'pointer', fontFamily: 'inherit', fontSize: 11.5, fontWeight: 700,
                         }}>
-                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
                         Reject
                       </button>
                     </>
@@ -4667,123 +5129,38 @@ export default function EmployeePage() {
               </div>
 
               {(goal.kpis || []).length > 0 ? (
-                <div style={{ display: 'grid', gap: 6 }}>
+                <div style={{ display: 'grid', gap: 4 }}>
                   {(goal.kpis || []).map((kpi) => (
-                    <div key={kpi.id} style={{ padding: '9px 12px', background: '#fff', borderRadius: 8, border: '1px solid #E9EDF2', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, flexWrap: 'wrap' }}>
-                      <div style={{ fontSize: 13.5, color: '#1E293B', fontWeight: 600, minWidth: 0, flex: 1 }}>
+                    <div key={kpi.id} style={{ padding: '5px 10px', background: '#fff', borderRadius: 6, border: '1px solid #E9EDF2', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
+                      <div style={{ fontSize: 12.5, color: '#1E293B', fontWeight: 600, minWidth: 0, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis' }}>
                         {kpi.name || <span style={{ color: '#94A3B8', fontStyle: 'italic' }}>Unnamed KPI</span>}
                         {kpi.source !== 'library' && kpi.source !== undefined && (
-                          <span style={{ marginLeft: 8, fontSize: 10.5, fontWeight: 700, color: '#2563EB', background: '#EFF6FF', padding: '2px 8px', borderRadius: 999 }}>Employee added</span>
+                          <span style={{ marginLeft: 6, fontSize: 10, fontWeight: 700, color: '#2563EB', background: '#EFF6FF', padding: '1px 6px', borderRadius: 999 }}>Self added</span>
                         )}
                       </div>
-                      <div style={{ fontSize: 11.5, color: '#64748B', flexShrink: 0 }}>
+                      <div style={{ fontSize: 11, color: '#64748B', flexShrink: 0 }}>
                         {reviewTracksKpiWeights ? (kpi.weight ? `${kpi.weight}%` : '—') : 'Reference KPI'}
                         {effectiveConfig?.targetsEnabled !== false && kpi.target ? ` · ${kpi.target}` : ''}
                       </div>
                     </div>
                   ))}
                 </div>
-              ) : (
-                <div style={{ fontSize: 12.5, color: '#94A3B8', fontStyle: 'italic' }}>No KPIs added.</div>
-              )}
+              ) : null}
 
               {markedReject && (
-                <div style={{ marginTop: 10 }}>
+                <div style={{ marginTop: 8 }}>
                   <textarea
                     value={pick?.note || ''}
                     onChange={(e) => setPickNote(submission.employeeCode, goal.id, e.target.value)}
                     rows={2}
                     placeholder="Tell them what to change (optional)…"
-                    style={{ width: '100%', padding: '10px 12px', borderRadius: 9, border: '1.5px solid #FECACA', fontFamily: 'inherit', fontSize: 13, resize: 'vertical', background: '#fff', color: '#0F172A', boxSizing: 'border-box' }}
+                    style={{ width: '100%', padding: '7px 10px', borderRadius: 7, border: '1.5px solid #FECACA', fontFamily: 'inherit', fontSize: 12.5, resize: 'vertical', background: '#fff', color: '#0F172A', boxSizing: 'border-box' }}
                   />
                 </div>
               )}
             </div>
           );
         })}
-
-        {!readOnly && (
-          <>
-            <div style={{ marginTop: 14 }}>
-              <div style={{ fontSize: 11, fontWeight: 700, color: '#64748B', textTransform: 'uppercase', letterSpacing: '.07em', marginBottom: 6 }}>Overall note (optional)</div>
-              <textarea
-                value={managerNotes[submission.employeeCode] || ''}
-                onChange={(event) => setManagerNotes((prev) => ({ ...prev, [submission.employeeCode]: event.target.value }))}
-                rows={2}
-                placeholder="A comment about the plan as a whole"
-                style={{ width: '100%', padding: '11px 13px', borderRadius: 10, border: '1.5px solid #D9E2EC', fontFamily: 'inherit', fontSize: 13.5, resize: 'vertical', boxSizing: 'border-box' }}
-              />
-            </div>
-
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10, marginTop: 16, flexWrap: 'wrap' }}>
-              {/* Reject all — hidden when any goal has been marked approve (would contradict). */}
-              {approvedPickCount === 0 ? (
-                <button
-                  type="button"
-                  className="appr-action"
-                  onClick={() => setReviewConfirm({
-                    action: 'reject-all',
-                    employeeCode: submission.employeeCode,
-                    employeeName: submission.employeeName,
-                    approvedPickCount, rejectedPickCount,
-                    pendingTotal: pendingGoals.length,
-                    lockedCount: lockedGoals.length,
-                    planNote: sanitizeText(managerNotes[submission.employeeCode] || ''),
-                    stage: 'confirm',
-                    loading: false,
-                  })}
-                  style={{ padding: '10px 16px', borderRadius: 10, border: '1px solid #FECACA', background: '#fff', color: '#DC2626', cursor: 'pointer', fontFamily: 'inherit', fontSize: 13.5, fontWeight: 700 }}
-                >
-                  Reject all
-                </button>
-              ) : <span />}
-              <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
-                <button
-                  type="button"
-                  className="appr-action appr-commit"
-                  onClick={() => setReviewConfirm({
-                    action: 'commit',
-                    employeeCode: submission.employeeCode,
-                    employeeName: submission.employeeName,
-                    approvedPickCount, rejectedPickCount,
-                    pendingTotal: pendingGoals.length,
-                    lockedCount: lockedGoals.length,
-                    planNote: sanitizeText(managerNotes[submission.employeeCode] || ''),
-                    stage: 'confirm',
-                    loading: false,
-                  })}
-                  disabled={rejectedPickCount === 0}
-                  title={rejectedPickCount === 0 ? 'Mark at least one goal as Reject — unmarked goals will be auto-approved.' : ''}
-                  style={{ padding: '10px 18px', borderRadius: 10, border: '1px solid #BFDBFE', background: rejectedPickCount === 0 ? '#EFF6FF' : '#2563EB', color: rejectedPickCount === 0 ? '#93C5FD' : '#fff', cursor: rejectedPickCount === 0 ? 'not-allowed' : 'pointer', fontFamily: 'inherit', fontSize: 13.5, fontWeight: 700, boxShadow: rejectedPickCount === 0 ? 'none' : '0 4px 12px rgba(37,99,235,.3)' }}
-                >
-                  Submit decision{rejectedPickCount > 0 ? ` · ${rejectedPickCount} send back` : ''}
-                </button>
-                {/* Approve all — hidden when (a) any goal is marked reject (would contradict)
-                    or (b) any pending goal is structurally broken (can't be approved anyway). */}
-                {rejectedPickCount === 0 && brokenPendingCount === 0 && (
-                  <button
-                    type="button"
-                    className="appr-action"
-                    onClick={() => setReviewConfirm({
-                      action: 'approve-all',
-                      employeeCode: submission.employeeCode,
-                      employeeName: submission.employeeName,
-                      approvedPickCount, rejectedPickCount, brokenPendingCount,
-                      pendingTotal: pendingGoals.length,
-                      lockedCount: lockedGoals.length,
-                      planNote: sanitizeText(managerNotes[submission.employeeCode] || ''),
-                      stage: 'confirm',
-                      loading: false,
-                    })}
-                    style={{ padding: '10px 18px', borderRadius: 10, border: 'none', background: '#16A34A', color: '#fff', cursor: 'pointer', fontFamily: 'inherit', fontSize: 13.5, fontWeight: 700, boxShadow: '0 4px 12px rgba(22,163,74,.32)' }}
-                  >
-                    Approve all
-                  </button>
-                )}
-              </div>
-            </div>
-          </>
-        )}
 
         {readOnly && submission.managerNote && (
           <div style={{ marginTop: 14, fontSize: 13, color: '#7C2D12', background: '#FFF7ED', border: '1px solid #FED7AA', borderRadius: 8, padding: '10px 12px' }}>
@@ -5185,8 +5562,8 @@ export default function EmployeePage() {
     // Keep this as plain hero content, not a glass/card surface, so brand hero choices read cleanly.
     const panelBoxStyle = {
       flex: '1.8 1 360px', minWidth: 0,
-      minHeight: 86,
-      padding: '4px 0',
+      minHeight: 54,
+      padding: '2px 0',
       color: '#fff',
     };
 
@@ -5198,14 +5575,14 @@ export default function EmployeePage() {
         const fill = accentFill;
         rightPanel = (
           <div style={panelBoxStyle}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', gap: 14, alignItems: 'center', marginBottom: 14 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'center', marginBottom: 6 }}>
               <div style={{ minWidth: 0 }}>
-                <div style={{ fontSize: 15, fontWeight: 800, color: '#fff' }}>Self-rating progress</div>
-                <div style={{ fontSize: 12.5, color: 'rgba(255,255,255,0.72)', marginTop: 4 }}>{totalRated} of {totalRatable} rated</div>
+                <div style={{ fontSize: 13, fontWeight: 800, color: '#fff' }}>Self-rating progress</div>
+                <div style={{ fontSize: 11.5, color: 'rgba(255,255,255,0.72)', marginTop: 2 }}>{totalRated} of {totalRatable} rated</div>
               </div>
-              <div style={{ fontSize: 28, fontWeight: 800, lineHeight: 1, color: tone, textShadow: '0 2px 14px rgba(15,23,42,0.22)' }}>{pct}%</div>
+              <div style={{ fontSize: 20, fontWeight: 800, lineHeight: 1, color: tone, textShadow: '0 2px 14px rgba(15,23,42,0.22)' }}>{pct}%</div>
             </div>
-            <div style={{ height: 9, background: 'rgba(255,255,255,0.24)', borderRadius: 999, overflow: 'hidden', boxShadow: 'inset 0 1px 3px rgba(15,23,42,0.22)' }}>
+            <div style={{ height: 5, background: 'rgba(255,255,255,0.24)', borderRadius: 999, overflow: 'hidden', boxShadow: 'inset 0 1px 3px rgba(15,23,42,0.22)' }}>
               <div style={{ height: '100%', width: `${pct}%`, background: fill, borderRadius: 999, transition: 'width .25s ease', boxShadow: `0 0 18px ${tone}` }} />
             </div>
           </div>
@@ -5213,19 +5590,19 @@ export default function EmployeePage() {
       } else {
         rightPanel = (
           <div style={panelBoxStyle}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', gap: 14, alignItems: 'center', marginBottom: 14 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'center', marginBottom: 6 }}>
               <div style={{ minWidth: 0 }}>
-                <div style={{ fontSize: 15, fontWeight: 800, color: '#fff' }}>Goal plan completion</div>
-                <div style={{ fontSize: 12.5, color: 'rgba(255,255,255,0.72)', marginTop: 4 }}>
+                <div style={{ fontSize: 13, fontWeight: 800, color: '#fff' }}>Goal plan completion</div>
+                <div style={{ fontSize: 11.5, color: 'rgba(255,255,255,0.72)', marginTop: 2 }}>
                   Goal weights <span style={{ color: goalMetrics.goalOver ? '#FCA5A5' : 'rgba(255,255,255,0.92)', fontWeight: goalMetrics.goalOver ? 800 : 600 }}>{goalMetrics.goalPct}%</span>
                   {goalMetrics.shouldTrackKpis ? <> · KPI <span style={{ color: goalMetrics.kpiOver ? '#FCA5A5' : 'rgba(255,255,255,0.92)', fontWeight: goalMetrics.kpiOver ? 800 : 600 }}>{goalMetrics.kpiPct}%</span></> : ''}
                 </div>
               </div>
-              <div style={{ fontSize: 28, fontWeight: 800, lineHeight: 1, color: progressTone, textShadow: '0 2px 14px rgba(15,23,42,0.22)' }}>
+              <div style={{ fontSize: 20, fontWeight: 800, lineHeight: 1, color: progressTone, textShadow: '0 2px 14px rgba(15,23,42,0.22)' }}>
                 {goalMetrics.goalOver ? `${goalMetrics.goalPct}%` : `${goalMetrics.overall}%`}
               </div>
             </div>
-            <div style={{ height: 9, background: 'rgba(255,255,255,0.24)', borderRadius: 999, overflow: 'hidden', boxShadow: 'inset 0 1px 3px rgba(15,23,42,0.22)' }}>
+            <div style={{ height: 5, background: 'rgba(255,255,255,0.24)', borderRadius: 999, overflow: 'hidden', boxShadow: 'inset 0 1px 3px rgba(15,23,42,0.22)' }}>
               <div style={{ height: '100%', width: `${Math.min(100, goalMetrics.overall)}%`, background: progressFill, borderRadius: 999, transition: 'width .25s ease', boxShadow: `0 0 18px ${progressTone}` }} />
             </div>
           </div>
@@ -5234,16 +5611,16 @@ export default function EmployeePage() {
     } else if (section === 'team' && directReports.length > 0) {
       rightPanel = (
         <div style={panelBoxStyle}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', gap: 14, alignItems: 'center', marginBottom: 14 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'center', marginBottom: 6 }}>
             <div style={{ minWidth: 0 }}>
-              <div style={{ fontSize: 15, fontWeight: 800, color: '#fff' }}>Team submission status</div>
-              <div style={{ fontSize: 12.5, color: 'rgba(255,255,255,0.78)', marginTop: 4 }}>
+              <div style={{ fontSize: 13, fontWeight: 800, color: '#fff' }}>Team submission status</div>
+              <div style={{ fontSize: 11.5, color: 'rgba(255,255,255,0.78)', marginTop: 2 }}>
                 <span style={{ color: '#FCA5A5', fontWeight: 700 }}>{teamSubmitted}</span> pending review · <span style={{ color: '#86EFAC', fontWeight: 700 }}>{teamApproved}</span> approved · <span style={{ fontWeight: 700 }}>{Math.max(0, teamTotal - teamDone)}</span> awaiting submit
               </div>
             </div>
-            <div style={{ fontSize: 28, fontWeight: 800, lineHeight: 1, color: '#FFFFFF', textShadow: '0 2px 14px rgba(15,23,42,0.22)' }}>{teamPct}%</div>
+            <div style={{ fontSize: 20, fontWeight: 800, lineHeight: 1, color: '#FFFFFF', textShadow: '0 2px 14px rgba(15,23,42,0.22)' }}>{teamPct}%</div>
           </div>
-          <div style={{ height: 9, background: 'rgba(255,255,255,0.24)', borderRadius: 999, overflow: 'hidden', boxShadow: 'inset 0 1px 3px rgba(15,23,42,0.22)' }}>
+          <div style={{ height: 5, background: 'rgba(255,255,255,0.24)', borderRadius: 999, overflow: 'hidden', boxShadow: 'inset 0 1px 3px rgba(15,23,42,0.22)' }}>
             <div style={{ height: '100%', width: `${teamPct}%`, background: accentFill, borderRadius: 999, transition: 'width .25s ease' }} />
           </div>
         </div>
@@ -5251,7 +5628,7 @@ export default function EmployeePage() {
     } else if (section === 'messages') {
       rightPanel = (
         <div style={panelBoxStyle}>
-          <div style={{ fontSize: 15, fontWeight: 800, color: '#fff', marginBottom: 10 }}>Latest message</div>
+          <div style={{ fontSize: 13, fontWeight: 800, color: '#fff', marginBottom: 6 }}>Latest message</div>
           {latestMsg ? (
             <div>
               <div style={{ fontSize: 13, fontWeight: 700, color: '#fff' }}>{latestMsg.senderName}</div>
@@ -5269,7 +5646,7 @@ export default function EmployeePage() {
       const phaseLabel = PHASES[phaseIndex]?.label || currentPhase;
       rightPanel = (
         <div style={panelBoxStyle}>
-          <div style={{ fontSize: 15, fontWeight: 800, color: '#fff', marginBottom: 12 }}>At a glance</div>
+          <div style={{ fontSize: 13, fontWeight: 800, color: '#fff', marginBottom: 6 }}>At a glance</div>
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
             {employeeDesignation && (
               <span style={{ padding: '6px 12px', borderRadius: 999, background: 'rgba(255,255,255,0.18)', border: '1px solid rgba(255,255,255,0.32)', fontSize: 12, fontWeight: 700 }}>{employeeDesignation}</span>
@@ -5297,10 +5674,10 @@ export default function EmployeePage() {
         isolation: 'isolate',
         overflow: 'hidden',
         ...heroBackgroundStyle,
-        borderRadius: 8, padding: '28px 30px', marginBottom: 18, color: '#fff',
+        borderRadius: 8, padding: '14px 22px', marginBottom: 12, color: '#fff',
         border: '1px solid rgba(255,255,255,0.28)',
         boxShadow: '0 18px 48px rgba(15,23,42,.18)',
-        display: 'flex', flexWrap: 'wrap', gap: 22, alignItems: 'center',
+        display: 'flex', flexWrap: 'wrap', gap: 18, alignItems: 'center',
         cursor: heroClosesThread ? 'pointer' : 'default',
       }}>
         {!isImageHero && (
@@ -5313,11 +5690,11 @@ export default function EmployeePage() {
           }} />
         )}
         <div style={{ flex: '1 1 240px', minWidth: 0 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-            <span style={{ fontSize: 24, fontWeight: 800, whiteSpace: 'nowrap', textShadow: '0 2px 12px rgba(15,23,42,0.18)' }}>Hi, {employeeName.split(' ')[0]}</span>
-            <span style={{ fontSize: 20 }}>👋</span>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <span style={{ fontSize: 18, fontWeight: 800, whiteSpace: 'nowrap', textShadow: '0 2px 12px rgba(15,23,42,0.18)' }}>Hi, {employeeName.split(' ')[0]}</span>
+            <span style={{ fontSize: 16 }}>👋</span>
           </div>
-          <div style={{ fontSize: 15, marginTop: 10, color: 'rgba(255,255,255,0.92)' }}>
+          <div style={{ fontSize: 12.5, marginTop: 4, color: 'rgba(255,255,255,0.92)' }}>
             {!canSetOwnGoals
               ? (directReports.length > 0
                 ? `You manage ${directReports.length} team member${directReports.length !== 1 ? 's' : ''} on this cycle.`
@@ -5325,10 +5702,10 @@ export default function EmployeePage() {
               : (myGoals.length > 0
                 ? `You have ${myGoals.length} active goal${myGoals.length !== 1 ? 's' : ''} this cycle.`
                 : 'Start setting your goals for this cycle.')}
-            {canSetOwnGoals && totalGoalsWithIssues > 0 && <span style={{ marginLeft: 8, fontWeight: 700, background: 'rgba(220,38,38,0.92)', padding: '2px 9px', borderRadius: 999, fontSize: 11.5 }}>{totalGoalsWithIssues} need attention</span>}
+            {canSetOwnGoals && totalGoalsWithIssues > 0 && <span style={{ marginLeft: 8, fontWeight: 700, background: 'rgba(220,38,38,0.92)', padding: '2px 9px', borderRadius: 999, fontSize: 11 }}>{totalGoalsWithIssues} need attention</span>}
           </div>
           {!isExternalManager && (
-            <div style={{ fontSize: 13, color: 'rgba(255,255,255,0.76)', display: 'flex', gap: 10, flexWrap: 'wrap', marginTop: 12 }}>
+            <div style={{ fontSize: 11.5, color: 'rgba(255,255,255,0.76)', display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 6 }}>
               {employeeDesignation && <span>{employeeDesignation}</span>}
               {managerName && <span>· Reports to: {managerName}</span>}
             </div>
@@ -5561,6 +5938,7 @@ export default function EmployeePage() {
                     {notifications.map((n, i) => {
                       const unread = !n.read;
                       const meta = n.type === 'goal-submitted' ? { color: '#DC2626', bg: '#FEF2F2' }
+                        : n.type === 'goal-resubmitted' ? { color: '#2563EB', bg: '#EFF6FF' }
                         : n.type === 'goal-approved' ? { color: '#16A34A', bg: '#F0FDF4' }
                         : n.type === 'goal-rejected' ? { color: '#D97706', bg: '#FFF7ED' }
                         : { color: '#2563EB', bg: '#EFF6FF' };
@@ -5602,7 +5980,11 @@ export default function EmployeePage() {
       {/* ── Body ── */}
       <div style={{ display: 'flex', flex: 1, minHeight: 0 }}>
         {/* ── Main content (full width — sidebar replaced by inline tab row) ── */}
-        <div style={{ flex: 1, overflowY: 'auto', padding: '28px 32px 72px' }}>
+        <div style={{ flex: 1, overflowY: 'auto' }}>
+          {/* Constrain dashboard content to a comfortable max-width and
+              centre it. On ultra-wide screens the page no longer sprawls;
+              on a laptop it fills the viewport as before. */}
+          <div style={{ maxWidth: 1600, margin: '0 auto', width: '100%', boxSizing: 'border-box', padding: '28px 32px 72px' }}>
 
           {renderHero(activeSection)}
 
@@ -5647,6 +6029,21 @@ export default function EmployeePage() {
               })}
             </div>
 
+            {activeSection === 'deleted-goals' && deletedGoals.length > 0 && (
+              <div style={{
+                display: 'inline-flex', alignItems: 'center', gap: 7,
+                padding: '6px 12px', borderRadius: 999,
+                background: '#FEF2F2', border: '1.5px solid #FECACA', color: '#B91C1C',
+                fontSize: 12, fontWeight: 700, whiteSpace: 'nowrap',
+              }}>
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
+                  <circle cx="12" cy="12" r="10" />
+                  <line x1="12" y1="8" x2="12" y2="12" />
+                  <line x1="12" y1="16" x2="12.01" y2="16" />
+                </svg>
+                {deletedGoals.length} item{deletedGoals.length === 1 ? '' : 's'} · auto deletes after 7 days
+              </div>
+            )}
             {tabCTA && (
               <button
                 type="button"
@@ -5676,6 +6073,7 @@ export default function EmployeePage() {
           {activeSection === 'send-mail' && renderSendMail()}
           {activeSection === 'messages' && renderMessages()}
           {activeSection === 'profile' && renderProfile()}
+          </div>
         </div>
       </div>
       {reminderToast && (
@@ -5751,6 +6149,157 @@ export default function EmployeePage() {
                 style={{ border: '1px solid #E2E8F0', background: '#fff', color: '#475569', borderRadius: 8, padding: '7px 14px', fontSize: 12.5, fontWeight: 700, cursor: reminderSending ? 'not-allowed' : 'pointer', fontFamily: 'inherit' }}>Cancel</button>
               <button type="button" onClick={commitReminder} disabled={reminderSending}
                 style={{ border: 'none', background: reminderSending ? '#93C5FD' : '#2563EB', color: '#fff', borderRadius: 8, padding: '7px 14px', fontSize: 12.5, fontWeight: 800, cursor: reminderSending ? 'not-allowed' : 'pointer', fontFamily: 'inherit' }}>{reminderSending ? 'Sending…' : 'Send'}</button>
+            </div>
+          </div>
+        </div>
+      ), document.body)}
+      {undoDeleteGoal && createPortal((
+        <>
+          <style>{`
+            @keyframes goalUndoIn { from { opacity: 0; transform: translate(-50%, 18px) scale(.97); } to { opacity: 1; transform: translate(-50%, 0) scale(1); } }
+            @keyframes goalUndoBorder { from { transform: scaleX(1); } to { transform: scaleX(0); } }
+          `}</style>
+          <div key={undoDeleteGoal.token} role="status" aria-live="polite" style={{
+            position: 'fixed', left: '50%', bottom: 22, zIndex: 9500,
+            transform: 'translateX(-50%)',
+            width: 'min(520px, calc(100vw - 28px))',
+            animation: 'goalUndoIn 220ms cubic-bezier(.2,.9,.25,1)',
+            fontFamily: 'inherit',
+          }}>
+            <div style={{
+              position: 'relative', overflow: 'hidden',
+              borderRadius: 14, background: '#EFF6FF',
+              border: '1.5px solid #EF4444',
+              boxShadow: '0 18px 42px rgba(15,23,42,.20)',
+              padding: '12px 14px',
+              display: 'flex', alignItems: 'center', gap: 12,
+            }}>
+              <div style={{
+                position: 'absolute', left: 0, right: 0, bottom: 0, height: 3,
+                background: '#EF4444', transformOrigin: 'left center',
+                animation: `goalUndoBorder ${GOAL_DELETE_UNDO_MS}ms linear forwards`,
+              }} />
+              <div style={{
+                width: 32, height: 32, borderRadius: 10,
+                background: '#DBEAFE', color: '#1D4ED8',
+                display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0,
+              }}>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-2 14a2 2 0 0 1-2 2H9a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M8 6V4h8v2"/></svg>
+              </div>
+              <div style={{ minWidth: 0, flex: 1 }}>
+                <div style={{ fontSize: 13.5, fontWeight: 800, color: '#0F172A', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>Moved to Deleted Goals</div>
+                <div style={{ marginTop: 2, fontSize: 12.2, color: '#475569', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{undoDeleteGoal.name}</div>
+              </div>
+              <button
+                type="button"
+                onClick={undoGoalDelete}
+                style={{
+                  border: '1px solid #BFDBFE', background: '#FFFFFF', color: '#1D4ED8',
+                  borderRadius: 10, padding: '8px 13px',
+                  fontFamily: 'inherit', fontSize: 12.5, fontWeight: 800,
+                  cursor: 'pointer', boxShadow: '0 1px 2px rgba(15,23,42,.06)', flexShrink: 0,
+                }}
+              >
+                Undo
+              </button>
+            </div>
+          </div>
+        </>
+      ), document.body)}
+      {undoRecoverGoal && createPortal((
+        <>
+          <style>{`
+            @keyframes goalUndoIn { from { opacity: 0; transform: translate(-50%, 18px) scale(.97); } to { opacity: 1; transform: translate(-50%, 0) scale(1); } }
+            @keyframes goalUndoBorder { from { transform: scaleX(1); } to { transform: scaleX(0); } }
+          `}</style>
+          <div key={undoRecoverGoal.token} role="status" aria-live="polite" style={{
+            position: 'fixed', left: '50%', bottom: 22, zIndex: 9500,
+            transform: 'translateX(-50%)',
+            width: 'min(520px, calc(100vw - 28px))',
+            animation: 'goalUndoIn 220ms cubic-bezier(.2,.9,.25,1)',
+            fontFamily: 'inherit',
+          }}>
+            <div style={{
+              position: 'relative', overflow: 'hidden',
+              borderRadius: 14, background: '#F0FDF4',
+              border: '1.5px solid #16A34A',
+              boxShadow: '0 18px 42px rgba(15,23,42,.20)',
+              padding: '12px 14px',
+              display: 'flex', alignItems: 'center', gap: 12,
+            }}>
+              <div style={{
+                position: 'absolute', left: 0, right: 0, bottom: 0, height: 3,
+                background: '#16A34A', transformOrigin: 'left center',
+                animation: `goalUndoBorder ${GOAL_DELETE_UNDO_MS}ms linear forwards`,
+              }} />
+              <div style={{
+                width: 32, height: 32, borderRadius: 10,
+                background: '#DCFCE7', color: '#15803D',
+                display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0,
+              }}>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>
+              </div>
+              <div style={{ minWidth: 0, flex: 1 }}>
+                <div style={{ fontSize: 13.5, fontWeight: 800, color: '#0F172A', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>Recovered to My Goals</div>
+                <div style={{ marginTop: 2, fontSize: 12.2, color: '#475569', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{undoRecoverGoal.name}</div>
+              </div>
+              <button
+                type="button"
+                onClick={undoGoalRecover}
+                style={{
+                  border: '1px solid #BBF7D0', background: '#FFFFFF', color: '#15803D',
+                  borderRadius: 10, padding: '8px 13px',
+                  fontFamily: 'inherit', fontSize: 12.5, fontWeight: 800,
+                  cursor: 'pointer', boxShadow: '0 1px 2px rgba(15,23,42,.06)', flexShrink: 0,
+                }}
+              >
+                Undo
+              </button>
+            </div>
+          </div>
+        </>
+      ), document.body)}
+      {confirmPurgeGoal && createPortal((
+        <div
+          role="dialog"
+          aria-modal="true"
+          onClick={() => setConfirmPurgeGoal(null)}
+          style={{ position: 'fixed', inset: 0, zIndex: 9800, background: 'rgba(15,23,42,.45)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20 }}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{ width: '100%', maxWidth: 390, background: '#fff', borderRadius: 14, boxShadow: '0 24px 60px rgba(15,23,42,.25)', overflow: 'hidden', fontFamily: 'inherit' }}
+          >
+            <div style={{ padding: '20px 22px', borderBottom: '1px solid #FEE2E2', display: 'flex', gap: 12, alignItems: 'flex-start' }}>
+              <div style={{ width: 36, height: 36, borderRadius: 10, background: '#FEF2F2', color: '#DC2626', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.3" strokeLinecap="round" strokeLinejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-2 14a2 2 0 0 1-2 2H9a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/></svg>
+              </div>
+              <div style={{ minWidth: 0 }}>
+                <div style={{ fontSize: 15, fontWeight: 800, color: '#0F172A' }}>Permanently delete goal?</div>
+                <div style={{ marginTop: 5, fontSize: 12.5, color: '#64748B', lineHeight: 1.5 }}>
+                  This will permanently remove "{confirmPurgeGoal.name}" and all its KPIs. This cannot be undone.
+                </div>
+              </div>
+            </div>
+            <div style={{ padding: '13px 18px', background: '#F8FAFC', display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+              <button
+                type="button"
+                onClick={() => setConfirmPurgeGoal(null)}
+                style={{ padding: '8px 14px', borderRadius: 8, background: '#fff', border: '1px solid #E2E8F0', color: '#475569', cursor: 'pointer', fontFamily: 'inherit', fontSize: 12.5, fontWeight: 700 }}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  const id = confirmPurgeGoal.id;
+                  setConfirmPurgeGoal(null);
+                  purgeGoalForever(id);
+                }}
+                style={{ padding: '8px 14px', borderRadius: 8, background: '#DC2626', border: '1px solid #DC2626', color: '#fff', cursor: 'pointer', fontFamily: 'inherit', fontSize: 12.5, fontWeight: 800, boxShadow: '0 6px 14px rgba(220,38,38,.25)' }}
+              >
+                Delete forever
+              </button>
             </div>
           </div>
         </div>

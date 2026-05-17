@@ -21,7 +21,7 @@ import {
   clearPendingEmployeeOtps,
 } from '../backend/stateStore';
 import { resetUserPasswordByAdmin } from '../backend/authService';
-import { sendCustomBroadcast, sendManagerSummaryEmails } from '../backend/emailService';
+import { sendCustomBroadcast } from '../backend/emailService';
 import { shouldUseSupabase } from '../backend/config';
 import { supabase } from '../backend/supabaseClient';
 import { hashPasswordValue } from '../backend/passwordCrypto';
@@ -253,10 +253,10 @@ function UploadSheetButton({ onDownload, fileRef, phase = 'idle' }) {
 
 /* ── PMS employee stages ─────────────────────────────────── */
 const EMP_STAGES = [
-  { id: 'goal-creation',    label: 'Goal Creation',       short: 'Goal Creation',    color: '#4F46E5', bg: '#EEF2FF', border: '#C7D2FE' },
-  { id: 'pending-approval', label: 'Pending Approval',    short: 'Pending Approval', color: '#D97706', bg: '#FFFBEB', border: '#FDE68A' },
-  { id: 'self-evaluation',  label: 'Self Evaluation',     short: 'Self Eval',        color: '#0891B2', bg: '#ECFEFF', border: '#A5F3FC' },
-  { id: 'mgr-evaluation',   label: 'Manager Evaluation',  short: 'Manager Eval',     color: '#7C3AED', bg: '#F5F3FF', border: '#DDD6FE' },
+  { id: 'goal-creation',    label: 'Goal creation',       short: 'Goal creation',    color: '#4F46E5', bg: '#EEF2FF', border: '#C7D2FE' },
+  { id: 'pending-approval', label: 'Pending approval',    short: 'Pending approval', color: '#D97706', bg: '#FFFBEB', border: '#FDE68A' },
+  { id: 'self-evaluation',  label: 'Self evaluation',     short: 'Self eval',        color: '#0891B2', bg: '#ECFEFF', border: '#A5F3FC' },
+  { id: 'mgr-evaluation',   label: 'Manager evaluation',  short: 'Manager eval',     color: '#7C3AED', bg: '#F5F3FF', border: '#DDD6FE' },
   { id: 'completed',        label: 'Completed',           short: 'Completed',        color: '#16A34A', bg: '#F0FDF4', border: '#BBF7D0' },
   // "Exempt" = roster row that can't participate this cycle (outside-PMS rows
   // tagged NONE, or in-PMS employees whose RM isn't in the roster). Counted
@@ -547,52 +547,35 @@ function buildRoster(employees) {
   return [...employees, ...synthesizeExternalManagers(employees)];
 }
 
-function buildManagerSummaryRecipients(employees) {
+// Helm Managers = top-level managers who sit OUTSIDE the PMS (Group Name =
+// NONE) but still have direct reports in the roster. They don't author goals
+// themselves, only approve/evaluate, so they get a dedicated invite that
+// carries login credentials AND a list of their reportees.
+function buildHelmManagerRecipients(employees) {
   const list = Array.isArray(employees) ? employees : [];
-  // Index every uploaded employee by code so managers who are themselves in
-  // the roster surface their OWN email, not whatever was stamped on the
-  // reportee's row. Falls back to the reportee's "Reporting Manager Email"
-  // when the manager isn't in the roster (truly external).
-  const rosterByCode = new Map();
-  list.forEach((emp) => {
-    const code = String(emp?.['Employee Code'] || '').trim().toLowerCase();
-    if (code) rosterByCode.set(code, emp);
+  const hasReportsSet = new Set();
+  list.forEach((e) => {
+    const rmCode = String(e?.['Reporting Manager Code'] || '').trim().toLowerCase();
+    if (rmCode) hasReportsSet.add(rmCode);
   });
-
-  // Dedupe by manager CODE — one recipient per manager identity. Two managers
-  // who happen to share an email are kept as separate rows (admin's data, not
-  // ours to merge); managers with no code fall back to email-based grouping.
-  const managers = new Map();
-  list.forEach((employee) => {
-    const rawCode = String(employee?.['Reporting Manager Code'] || '').trim();
-    const code = rawCode.toLowerCase();
-    const reporteeStampedEmail = String(employee?.['Reporting Manager Email'] || '').trim().toLowerCase();
-    const managerEmp = code ? rosterByCode.get(code) : null;
-    const ownEmail = String(managerEmp?.['Email ID'] || managerEmp?.Email || '').trim().toLowerCase();
-    const email = ownEmail || reporteeStampedEmail;
-    if (!code && !email) return;
-
-    const key = code || `email:${email}`;
-    const existing = managers.get(key);
-    if (existing) {
-      existing._reportsCount += 1;
-      // First non-empty email wins; don't overwrite once we have one.
-      if (!existing['Email ID'] && email) existing['Email ID'] = email;
-      return;
-    }
-    managers.set(key, {
-      'Employee Name':
-        String(managerEmp?.['Employee Name'] || '').trim()
-        || String(employee?.['Reporting Manager Name'] || '').trim()
-        || email
-        || rawCode,
-      'Employee Code': rawCode || email,
-      'Email ID': email,
-      _managerSummary: true,
-      _reportsCount: 1,
-    });
-  });
-  return Array.from(managers.values()).sort((a, b) => (a['Employee Name'] || '').localeCompare(b['Employee Name'] || ''));
+  return list
+    .filter((emp) => {
+      if (!emp?._outsidePms && !emp?._pmsExempt) return false;
+      const code = String(emp?.['Employee Code'] || '').trim().toLowerCase();
+      return code && hasReportsSet.has(code);
+    })
+    .map((emp) => {
+      const code = String(emp?.['Employee Code'] || '').trim().toLowerCase();
+      const reportees = list
+        .filter((e) => String(e?.['Reporting Manager Code'] || '').trim().toLowerCase() === code)
+        .map((r) => ({
+          name: String(r?.['Employee Name'] || '').trim(),
+          code: String(r?.['Employee Code'] || '').trim(),
+          designation: String(r?.Designation || r?.Role || '').trim(),
+        }));
+      return { ...emp, _helmManager: true, _reportees: reportees };
+    })
+    .sort((a, b) => (a['Employee Name'] || '').localeCompare(b['Employee Name'] || ''));
 }
 
 // Patch an email onto an employee. For a regular row it updates "Email ID".
@@ -742,10 +725,10 @@ function ModuleOverview({ employees, groups, orgName, congratsDismissed, onDismi
   const completionPct = total > 0 ? Math.round((completed / total) * 100) : 0;
 
   const statCards = [
-    { label: 'Total Employees', value: total,                              color: '#4F46E5', bg: 'linear-gradient(135deg,#EEF2FF 0%,#FFFFFF 100%)' },
-    { label: 'In Goal Creation', value: stageSummary['goal-creation'] || 0, color: '#4F46E5', bg: 'linear-gradient(135deg,#EEF2FF 0%,#FFFFFF 100%)' },
-    { label: 'Pending Approval', value: stageSummary['pending-approval'] || 0, color: '#D97706', bg: 'linear-gradient(135deg,#FFFBEB 0%,#FFFFFF 100%)' },
-    { label: 'In Evaluation',    value: inEvaluation,                       color: '#0891B2', bg: 'linear-gradient(135deg,#ECFEFF 0%,#FFFFFF 100%)' },
+    { label: 'Total employees', value: total,                              color: '#4F46E5', bg: 'linear-gradient(135deg,#EEF2FF 0%,#FFFFFF 100%)' },
+    { label: 'In goal creation', value: stageSummary['goal-creation'] || 0, color: '#4F46E5', bg: 'linear-gradient(135deg,#EEF2FF 0%,#FFFFFF 100%)' },
+    { label: 'Pending approval', value: stageSummary['pending-approval'] || 0, color: '#D97706', bg: 'linear-gradient(135deg,#FFFBEB 0%,#FFFFFF 100%)' },
+    { label: 'In evaluation',    value: inEvaluation,                       color: '#0891B2', bg: 'linear-gradient(135deg,#ECFEFF 0%,#FFFFFF 100%)' },
     { label: 'Completed',        value: completed,                          color: '#16A34A', bg: 'linear-gradient(135deg,#F0FDF4 0%,#FFFFFF 100%)' },
     ...(exemptEmployees.length > 0 ? [
       { label: 'Exempt',          value: exemptEmployees.length,             color: '#64748B', bg: 'linear-gradient(135deg,#F1F5F9 0%,#FFFFFF 100%)' },
@@ -785,7 +768,7 @@ function ModuleOverview({ employees, groups, orgName, congratsDismissed, onDismi
           let footer = null;
           if (s.label === 'Exempt' && employees.length > 0) {
             footer = `${Math.round((s.value / employees.length) * 100)}% of roster`;
-          } else if (s.label === 'Total Employees' && exemptEmployees.length > 0) {
+          } else if (s.label === 'Total employees' && exemptEmployees.length > 0) {
             // Make the eligible-vs-roster relationship explicit so "Total: 20"
             // doesn't read as "we only have 20 people" when the roster has 25.
             footer = `eligible · ${employees.length} in roster`;
@@ -911,7 +894,7 @@ function ModuleOverview({ employees, groups, orgName, congratsDismissed, onDismi
 function LoginStatusPill({ status }) {
   const map = {
     permanent: { label: 'Active',          color: '#15803D', bg: '#F0FDF4', border: '#BBF7D0' },
-    temp:      { label: 'Setup pending',   color: '#B45309', bg: '#FFFBEB', border: '#FDE68A' },
+    temp:      { label: 'Setup pending',   color: '#BE185D', bg: '#FDF2F8', border: '#FBCFE8' },
     none:      { label: 'Not logged in',  color: '#64748B', bg: '#F8FAFC', border: '#E2E8F0' },
   };
   const s = map[status] || map.none;
@@ -1634,15 +1617,13 @@ function ComposeRecipients({
       )}
 
       {/* Recipients table */}
-      {(activeTemplate === 'manager-summary'
-        || activeTemplate === 'co-admin-invite'
-        || activeTemplate === 'scoped-hr-invite') && (
+      {(activeTemplate === 'co-admin-invite'
+        || activeTemplate === 'scoped-hr-invite'
+        || activeTemplate === 'helm-managers') && (
         <div style={{ fontSize: 11.5, color: '#64748B', marginBottom: 8 }}>
-          {activeTemplate === 'manager-summary'
-            ? 'Recipients: every employee who has at least one direct report in this cycle.'
-            : activeTemplate === 'co-admin-invite'
-              ? 'Recipients come from the HR Team panel. To add or edit emails, manage them there.'
-              : 'Recipients come from the HR Team panel. To add or edit emails, manage them there.'}
+          {activeTemplate === 'helm-managers'
+            ? 'Recipients: top-level managers with reports but no goals to set themselves (Group = NONE in the roster).'
+            : 'Recipients come from the HR Team panel. To add or edit emails, manage them there.'}
         </div>
       )}
       <div style={{ background: '#fff', border: '1px solid #E9EDF2', borderRadius: 12, overflow: 'hidden' }}>
@@ -1756,7 +1737,7 @@ function ComposeRecipients({
               ? 'Sends the welcome email to all Co-Admins on the HR Team that have an email and a temp password.'
               : activeTemplate === 'scoped-hr-invite'
               ? 'Sends the welcome email to all Scoped HR members on the HR Team that have an email and a temp password.'
-              : 'Manual manager summary — sends to reporting managers only when you click below.' };
+              : 'Sends a login invite + reportee list to top-level managers outside the PMS. A fresh 6-digit password is generated per recipient.' };
         return (
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: 14, padding: '12px 16px', background: banner.bg, border: `1px solid ${banner.bd}`, borderRadius: 11, gap: 12, flexWrap: 'wrap' }}>
             <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8, fontSize: 12, color: banner.tx }}>
@@ -1810,28 +1791,50 @@ function ModuleComms({ employees, groups, org, config, onUpdate, onConfigPatch, 
   const [stepTab, setStepTab] = useState('compose'); // 'compose' | 'design' | 'recipients'
   const [activeTemplate, setActiveTemplate] = useState('cycle-launch');
 
-  const defaultTemplates = useMemo(() => ({
-    'cycle-launch': {
-      subject: `Welcome to ${org.name || 'the PMS'} — Your Goal Setting is Now Open`,
-      body: `Dear {employee_name},\n\nThe Performance Management System for ${org.name || 'our organization'} is now live!\n\nYour login credentials:\n  Employee Code : {employee_code}\n  Password      : {password}\n\nPlease log in to complete your goal-setting for this appraisal cycle.\n\nWarm regards,\n${org.hrAdminName || 'HR Team'}`,
-    },
-    'co-admin-invite': {
-      subject: `${org.name || 'PMS'} — you've been added as a Co-Admin`,
-      body: `Hello {employee_name},\n\n${org.hrAdminName || 'HR'} has added you as a Co-Admin for ${org.name || 'our organization'} on Zaro HR.\n\nYour login email : {recipient_email}\nTemporary password : {temporary_password}\n\nYou'll have full HR-admin access. Please log in and change your password right after.\n\nWarm regards,\n${org.hrAdminName || 'HR Team'}`,
-    },
-    'scoped-hr-invite': {
-      subject: `${org.name || 'PMS'} — your Scoped HR access is ready`,
-      body: `Hello {employee_name},\n\n${org.hrAdminName || 'HR'} has set you up as a Scoped HR member for ${org.name || 'our organization'} on Zaro HR.\n\nYour login email : {recipient_email}\nTemporary password : {temporary_password}\n\nYour access is limited to the scope HR has assigned. Please log in and change your password right after.\n\nWarm regards,\n${org.hrAdminName || 'HR Team'}`,
-    },
-    'manager-summary': {
-      subject: `${org.name || 'PMS'} — your reportee setup summary`,
-      body: `Hello {employee_name},\n\nThe following reportees are mapped to you for this cycle:\n\n{reportee_list}\n\nLog in to review their goal-setting progress.\n\nWarm regards,\n${org.hrAdminName || 'HR Team'}`,
-    },
-  }), [org.name, org.hrAdminName]);
+  const defaultTemplates = useMemo(() => {
+    const orgLabel = org.name || 'PMS';
+    const signOff = `— ${org.hrAdminName || 'HR Team'}`;
+    return {
+      'cycle-launch': {
+        subject: `Goal setting is open · ${orgLabel}`,
+        body: `Hi {employee_name},\n\nPMS goal-setting for this cycle is live. Sign in to add your goals.\n\nEmployee Code : {employee_code}\nPassword : {password}\n\n${signOff}`,
+      },
+      'co-admin-invite': {
+        subject: `Co-Admin access ready · ${orgLabel}`,
+        body: `Hi {employee_name},\n\nYou're set up as a Co-Admin for ${orgLabel}. Sign in and change your password.\n\nLogin email : {recipient_email}\nTemporary password : {temporary_password}\n\n${signOff}`,
+      },
+      'scoped-hr-invite': {
+        subject: `Scoped HR access ready · ${orgLabel}`,
+        body: `Hi {employee_name},\n\nYou're set up as a Scoped HR member for ${orgLabel}. Sign in and change your password.\n\nLogin email : {recipient_email}\nTemporary password : {temporary_password}\n\n${signOff}`,
+      },
+      'helm-managers': {
+        subject: `Your team is set up · ${orgLabel}`,
+        body: `Hi {employee_name},\n\nYour team for this cycle:\n\n{reportee_list}\n\nSign in to review and approve their goals.\n\nLogin email : {recipient_email}\nPassword : {password}\n\n${signOff}`,
+      },
+    };
+  }, [org.name, org.hrAdminName]);
 
-  const initialTemplates = config?.emailTemplates?.templates || defaultTemplates;
+  // Merge defaults UNDER saved config: any keys the org saved earlier win,
+  // but newly-introduced templates (e.g. helm-managers) still get their
+  // default draft instead of an empty editor. We also dedent the legacy
+  // "Your login credentials:" header — the renderer only paints the colored
+  // credentials box when a paragraph is purely Key:value lines, so the
+  // older header line was blocking the card from appearing.
+  const initialTemplates = useMemo(() => {
+    const saved = config?.emailTemplates?.templates || {};
+    const merged = { ...defaultTemplates, ...saved };
+    const dedent = (body) => typeof body !== 'string' ? body : body.replace(
+      /Your login credentials:\s*\n\s+([A-Za-z][A-Za-z ]*\s*:\s*\{[^}]+\})\s*\n\s+([A-Za-z][A-Za-z ]*\s*:\s*\{[^}]+\})/g,
+      '$1\n$2',
+    );
+    Object.keys(merged).forEach((k) => {
+      if (merged[k]?.body) merged[k] = { ...merged[k], body: dedent(merged[k].body) };
+    });
+    return merged;
+  }, [defaultTemplates, config?.emailTemplates?.templates]);
   const [templates, setTemplates] = useState(initialTemplates);
   const [previewIndex, setPreviewIndex] = useState(0);
+  const hrTeam = useMemo(() => org?.hrTeam || [], [org?.hrTeam]);
 
   // Auto-populate the email-design logo from the org-level brand logo (captured
   // during setup or HR Team page) on first mount. Users can replace or remove it.
@@ -1879,7 +1882,12 @@ function ModuleComms({ employees, groups, org, config, onUpdate, onConfigPatch, 
 
   const sendConfig = useMemo(() => {
     if (activeTemplate === 'cycle-launch') {
-      const recipients = (employees || []).filter((e) => String(e?.['Email ID'] || e?.Email || '').trim());
+      // Outside-PMS roster rows (Group = NONE) don't author goals, so they
+      // must never receive the cycle-launch broadcast. They are handled by
+      // the Helm Managers template instead.
+      const recipients = (employees || [])
+        .filter((e) => !e?._outsidePms && !e?._pmsExempt)
+        .filter((e) => String(e?.['Email ID'] || e?.Email || '').trim());
       return {
         label: `Send launch email to ${recipients.length} employee${recipients.length !== 1 ? 's' : ''}`,
         disabled: recipients.length === 0,
@@ -1887,9 +1895,19 @@ function ModuleComms({ employees, groups, org, config, onUpdate, onConfigPatch, 
         kind: 'broadcast',
       };
     }
+    if (activeTemplate === 'helm-managers') {
+      const recipients = buildHelmManagerRecipients(employees)
+        .filter((e) => String(e?.['Email ID'] || e?.Email || '').trim());
+      return {
+        label: `Send invite to ${recipients.length} Helm Manager${recipients.length !== 1 ? 's' : ''}`,
+        disabled: recipients.length === 0,
+        recipients,
+        kind: 'broadcast',
+      };
+    }
     if (activeTemplate === 'co-admin-invite' || activeTemplate === 'scoped-hr-invite') {
       const wantedType = activeTemplate === 'co-admin-invite' ? 'co-admin' : 'scoped-hr';
-      const team = (org?.hrTeam || []).filter((m) => m.type === wantedType && String(m.email || '').trim() && !m.isInPMS);
+      const team = hrTeam.filter((m) => m.type === wantedType && String(m.email || '').trim() && !m.isInPMS);
       const recipients = team.map((m) => ({
         'Employee Name': m.name || m.email,
         'Employee Code': m.empCode || m.id || '',
@@ -1904,14 +1922,8 @@ function ModuleComms({ employees, groups, org, config, onUpdate, onConfigPatch, 
         kind: 'broadcast',
       };
     }
-    const recipients = buildManagerSummaryRecipients(employees);
-    return {
-      label: `Send summary to ${recipients.length} manager${recipients.length !== 1 ? 's' : ''}`,
-      disabled: recipients.length === 0,
-      recipients,
-      kind: 'manager-summary',
-    };
-  }, [activeTemplate, employees, org?.hrTeam]);
+    return { label: 'Pick a template', disabled: true, recipients: [], kind: 'broadcast' };
+  }, [activeTemplate, employees, hrTeam]);
 
   async function handleSend(overrideRecipients = null) {
     if (sendConfig.disabled || sendState.status === 'sending') return;
@@ -1921,7 +1933,7 @@ function ModuleComms({ employees, groups, org, config, onUpdate, onConfigPatch, 
       return;
     }
     const sendingSelected = Array.isArray(overrideRecipients);
-    const recipientsToSend = sendingSelected ? overrideRecipients : sendConfig.recipients;
+    let recipientsToSend = sendingSelected ? overrideRecipients : sendConfig.recipients;
     if (sendingSelected && recipientsToSend.length === 0) {
       setSendState({ status: 'failed', message: 'Select at least one recipient with an email.' });
       return;
@@ -1930,44 +1942,64 @@ function ModuleComms({ employees, groups, org, config, onUpdate, onConfigPatch, 
     try {
       let res;
       let cycleLaunchOtpCodes = [];
-      if (sendConfig.kind === 'broadcast') {
-        // HR-team invites already carry their own per-member password. For
-        // cycle-launch, rotate a fresh 6-digit OTP per employee right before
-        // send so no two recipients share a password and a resend always
-        // supersedes the prior OTP.
-        let otpByCode = new Map();
-        if (activeTemplate === 'cycle-launch') {
-          otpByCode = await rotateEmployeeOtpsForSend({
-            orgKey: org.key,
-            employees: recipientsToSend,
-          });
-          cycleLaunchOtpCodes = [...otpByCode.keys()];
-        }
-        const tokensFor = (rcpt) => {
-          const member = rcpt?._hrTeamMember;
-          if (member) {
-            return {
-              temporary_password: member.password || '',
-              password: member.password || '',
-            };
-          }
+      let skippedActivePasswordCount = 0;
+      // HR-team invites already carry their own per-member password. For
+      // cycle-launch and helm-managers, rotate a fresh 6-digit OTP per
+      // recipient right before send so no two recipients share a password
+      // and a resend always supersedes the prior OTP.
+      let otpByCode = new Map();
+      if (activeTemplate === 'cycle-launch' || activeTemplate === 'helm-managers') {
+        otpByCode = await rotateEmployeeOtpsForSend({
+          orgKey: org.key,
+          employees: recipientsToSend,
+        });
+        cycleLaunchOtpCodes = [...otpByCode.keys()];
+        const beforeFilterCount = recipientsToSend.length;
+        recipientsToSend = recipientsToSend.filter((rcpt) => {
           const code = String(rcpt?.['Employee Code'] || '').trim().toLowerCase();
-          const otp = code ? otpByCode.get(code) : '';
-          if (otp) {
-            return {
-              temporary_password: otp,
-              password: otp,
-            };
-          }
-          return undefined;
-        };
-        res = await sendCustomBroadcast({ org, recipients: recipientsToSend, theme: effectiveEmailTheme, template: tpl, tokensFor });
-      } else {
-        const recipientFilter = sendingSelected
-          ? new Set(recipientsToSend.map((r) => getEmail(r).toLowerCase()).filter(Boolean))
-          : null;
-        res = await sendManagerSummaryEmails({ org, employees, theme: effectiveEmailTheme, template: tpl, recipientFilter });
+          return code && otpByCode.has(code);
+        });
+        skippedActivePasswordCount = beforeFilterCount - recipientsToSend.length;
+        if (recipientsToSend.length === 0) {
+          setSendState({
+            status: 'failed',
+            message: skippedActivePasswordCount > 0
+              ? 'No temporary-password invites sent. Selected recipients already have active passwords.'
+              : 'No temporary-password invites could be prepared.',
+          });
+          return;
+        }
       }
+      const tokensFor = (rcpt) => {
+        // Helm Managers carry their own list of direct reports — render it
+        // as a bullet list so the email mirrors the Manager-summary layout.
+        const helmExtras = {};
+        if (rcpt?._helmManager && Array.isArray(rcpt._reportees)) {
+          helmExtras.reportee_list = rcpt._reportees
+            .map((r) => `• ${r.name || r.code}${r.designation ? ` — ${r.designation}` : ''}${r.code ? ` (${r.code})` : ''}`)
+            .join('\n') || '—';
+          helmExtras.reportee_count = String(rcpt._reportees.length);
+        }
+        const member = rcpt?._hrTeamMember;
+        if (member) {
+          return {
+            ...helmExtras,
+            temporary_password: member.password || '',
+            password: member.password || '',
+          };
+        }
+        const code = String(rcpt?.['Employee Code'] || '').trim().toLowerCase();
+        const otp = code ? otpByCode.get(code) : '';
+        if (otp) {
+          return {
+            ...helmExtras,
+            temporary_password: otp,
+            password: otp,
+          };
+        }
+        return Object.keys(helmExtras).length > 0 ? helmExtras : undefined;
+      };
+      res = await sendCustomBroadcast({ org, recipients: recipientsToSend, theme: effectiveEmailTheme, template: tpl, tokensFor });
       if (res?.ok || res?.skipped) {
         const sent = res.sent ?? recipientsToSend.length ?? 0;
         const failed = res.failed ?? 0;
@@ -1979,7 +2011,9 @@ function ModuleComms({ employees, groups, org, config, onUpdate, onConfigPatch, 
         }
         setSendState({
           status: 'sent',
-          message: res.skipped ? 'Nothing to send.' : `Sent ${sent}${sendingSelected ? ' selected' : ''}${failed ? ` · ${failed} failed` : ''}.`,
+          message: res.skipped
+            ? 'Nothing to send.'
+            : `Sent ${sent}${sendingSelected ? ' selected' : ''}${failed ? ` · ${failed} failed` : ''}${skippedActivePasswordCount ? ` · ${skippedActivePasswordCount} already active` : ''}.`,
         });
         if (sendingSelected && !failed) setSelectedCodes([]);
       } else {
@@ -2004,14 +2038,17 @@ function ModuleComms({ employees, groups, org, config, onUpdate, onConfigPatch, 
   function showRecipToast(m) { setRecipToast(m); setTimeout(() => setRecipToast(null), 2500); }
 
   const recipientRows = useMemo(() => {
-    if (activeTemplate === 'cycle-launch') return employees || [];
+    if (activeTemplate === 'cycle-launch') {
+      return (employees || []).filter((e) => !e?._outsidePms && !e?._pmsExempt);
+    }
     return sendConfig.recipients || [];
   }, [activeTemplate, employees, sendConfig.recipients]);
   // Inline edits go through `applyEmailPatch(employees, …)`. That only updates
   // the employee roster — so we allow it for templates whose recipients ARE
-  // employees (cycle-launch + manager-summary). Co-Admin / Scoped-HR invites
+  // employees (cycle-launch + helm-managers). Co-Admin / Scoped-HR invites
   // pull from `org.hrTeam`; those need to be edited in the HR Team panel.
-  const canEditRecipientEmails = activeTemplate === 'cycle-launch' || activeTemplate === 'manager-summary';
+  const canEditRecipientEmails = activeTemplate === 'cycle-launch'
+    || activeTemplate === 'helm-managers';
   const canBulkEditRecipientEmails = canEditRecipientEmails;
   const canSelectRecipients = true;
   const addRecipientsTarget = activeTemplate === 'cycle-launch'
@@ -2020,7 +2057,7 @@ function ModuleComms({ employees, groups, org, config, onUpdate, onConfigPatch, 
     ? { module: 'hr-team', label: 'Add Co-Admin' }
     : activeTemplate === 'scoped-hr-invite'
     ? { module: 'hr-team', label: 'Add Scoped HR' }
-    : { module: 'mgr-change', label: 'Add managers' };
+    : { module: 'roster', label: 'Add Helm Managers' };
 
   useEffect(() => {
     setSelectedCodes([]);
@@ -2032,9 +2069,10 @@ function ModuleComms({ employees, groups, org, config, onUpdate, onConfigPatch, 
   // Last sent (email_deliveries) — keyed by lowercased recipient email. Filter
   // by delivery_type so each tab shows its own send history.
   const [lastSentByEmail, setLastSentByEmail] = useState({});
+  const sendCompleted = sendState.status === 'sent';
   useEffect(() => {
     if (!shouldUseSupabase || !supabase || !org?.key) { setLastSentByEmail({}); return; }
-    const deliveryType = activeTemplate === 'manager-summary' ? 'manager-summary' : 'custom-broadcast';
+    const deliveryType = 'custom-broadcast';
     let cancelled = false;
     (async () => {
       const { data: orgRow, error: orgErr } = await supabase
@@ -2057,7 +2095,7 @@ function ModuleComms({ employees, groups, org, config, onUpdate, onConfigPatch, 
       setLastSentByEmail(next);
     })();
     return () => { cancelled = true; };
-  }, [org?.key, activeTemplate, sendState?.status === 'sent']);
+  }, [org?.key, activeTemplate, sendCompleted]);
 
   function commitEmail(code) {
     const newEmail = String(emailEdits[code] ?? '').trim();
@@ -2135,11 +2173,10 @@ function ModuleComms({ employees, groups, org, config, onUpdate, onConfigPatch, 
   const brandTheme = { accent: brand, credBg: withAlpha(brand, 0.08), credBorder: withAlpha(brand, 0.25) };
 
   // Preview context — driven by which template is being edited so that admin
-  // and manager-summary drafts don't render against an employee. Each template
+  // and helm-managers drafts don't render against an employee. Each template
   // has its own sensible "stand-in" recipient.
   const sampleEmployee = employees[previewIndex] || employees[0] || null;
   const previewContext = (() => {
-    const hrTeam = org?.hrTeam || [];
     if (activeTemplate === 'co-admin-invite') {
       const sample = hrTeam.find((m) => m.type === 'co-admin' && m.email);
       return {
@@ -2162,20 +2199,17 @@ function ModuleComms({ employees, groups, org, config, onUpdate, onConfigPatch, 
         sampleReportees: [],
       };
     }
-    if (activeTemplate === 'manager-summary') {
-      const samples = (employees || []).slice(0, 3).map((e) => ({
-        name: e['Employee Name'] || e['Employee Code'] || 'Employee',
-        code: e['Employee Code'] || '',
-        designation: e.Designation || e.Role || '',
-      }));
-      const synthName = sampleEmployee?.['Reporting Manager Name'] || 'Reporting Manager';
-      const synthEmail = sampleEmployee?.['Reporting Manager Email'] || 'manager@example.com';
+    if (activeTemplate === 'helm-managers') {
+      const helms = buildHelmManagerRecipients(employees);
+      const sample = helms[0] || null;
+      const reportees = (sample?._reportees || []).slice(0, 3);
       return {
-        kind: 'manager',
-        name: synthName,
-        email: synthEmail,
-        code: sampleEmployee?.['Reporting Manager Code'] || '—',
-        sampleReportees: samples,
+        kind: 'helm-manager',
+        name: sample?.['Employee Name'] || 'Helm Manager',
+        email: sample?.['Email ID'] || sample?.Email || 'manager@example.com',
+        code: sample?.['Employee Code'] || '—',
+        password: '123456',
+        sampleReportees: reportees,
       };
     }
     // Cycle-launch: surface the previewed employee's actual pending OTP if
@@ -2324,10 +2358,10 @@ function ModuleComms({ employees, groups, org, config, onUpdate, onConfigPatch, 
           {/* Template switcher — drafts share the same brand/design but each has its own subject + body */}
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 12 }}>
             {[
-              { k: 'cycle-launch',     label: 'Cycle launch',     desc: 'Broadcast to all employees' },
+              { k: 'cycle-launch',     label: 'Cycle launch',     desc: 'Broadcast to employees in the cycle' },
               { k: 'co-admin-invite',  label: 'Co-Admin invite',  desc: 'Send when you add a Co-Admin' },
               { k: 'scoped-hr-invite', label: 'Scoped HR invite', desc: 'Send when you add a Scoped HR' },
-              { k: 'manager-summary',  label: 'Manager summary',  desc: 'Manual send to reporting managers' },
+              { k: 'helm-managers',    label: 'Helm Managers',    desc: 'Invite top-level managers (no goals to set)' },
             ].map((t) => {
               const active = activeTemplate === t.k;
               return (
@@ -2994,7 +3028,7 @@ function ModuleStageControl({ employees, onUpdate, orgKey }) {
       EMP_STAGES.find((s) => s.id === getEmpStage(e))?.label || '',
       '',
     ]);
-    const rows = dataRows.length > 0 ? dataRows : [['E001', 'Sample Name', 'Goal Creation', 'Pending Approval']];
+    const rows = dataRows.length > 0 ? dataRows : [['E001', 'Sample Name', 'Goal creation', 'Pending approval']];
     const csv = [headers, ...rows].map((r) => r.map((v) => /[",\n]/.test(v) ? `"${String(v).replace(/"/g, '""')}"` : v).join(',')).join('\n');
     const blob = new Blob([csv], { type: 'text/csv' });
     const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'stage_change.csv'; a.click();
@@ -3057,7 +3091,7 @@ function ModuleStageControl({ employees, onUpdate, orgKey }) {
                 <div style={{ fontSize: 13, color: '#64748B', lineHeight: 1.55 }}>
                   All goals, KPIs, approvals, manager notes and notifications for the selected
                   {' '}employee{resetTargets.length !== 1 ? 's' : ''} will be permanently deleted. They restart at
-                  {' '}<strong style={{ color: '#0F172A' }}>Goal Creation</strong> with their current group's default library re-prefilled.
+                  {' '}<strong style={{ color: '#0F172A' }}>Goal creation</strong> with their current group's default library re-prefilled.
                   This can't be undone.
                 </div>
               </div>
@@ -3205,7 +3239,7 @@ function ModuleStageControl({ employees, onUpdate, orgKey }) {
                 <button
                   type="button"
                   onClick={() => setResetConfirmOpen(true)}
-                  title="Wipe all goals/KPIs/progress and restart at Goal Creation with the default library"
+                  title="Wipe all goals/KPIs/progress and restart at Goal creation with the default library"
                   style={{
                     display: 'inline-flex', alignItems: 'center', gap: 7,
                     padding: '9px 14px', background: '#fff', color: '#B91C1C',
@@ -7045,7 +7079,11 @@ export default function HRCycleDashboard() {
         </div>
 
         {/* MAIN CONTENT */}
-        <div style={{ flex: 1, overflowY: 'auto', padding: '24px 28px' }}>
+        <div style={{ flex: 1, overflowY: 'auto' }}>
+          {/* Centred max-width wrapper — keeps the dashboard at the same
+              comfortable width across screen sizes (laptop fills it, big
+              monitors gutter-letterbox instead of sprawling). */}
+          <div style={{ maxWidth: 1600, margin: '0 auto', width: '100%', boxSizing: 'border-box', padding: '24px 28px' }}>
 
           {/* module content */}
           {activeModule === 'overview' && (
@@ -7073,6 +7111,7 @@ export default function HRCycleDashboard() {
             />
           )}
 
+          </div>
         </div>
       </div>
     </div>

@@ -17,6 +17,16 @@ import { resolveTenantContext } from '../backend/tenantResolver';
 
 const REMEMBER_KEY = 'zaro.login.remembered';
 
+// Every login should drop a user straight onto the home tab (My Goals,
+// or My Team Goals for managers without goals). Clearing the persisted
+// active-section key on login resets the EmployeePage to its default
+// landing instead of restoring whatever tab was open last sign-out.
+function clearEmployeeActiveSection(orgKey, empCode) {
+  try {
+    localStorage.removeItem(`zarohr_emp_active_section:${orgKey || 'default'}:${empCode || 'anon'}`);
+  } catch { /* ignore */ }
+}
+
 const ROTATING_WORDS = ['clear.', 'structured.', 'actionable.', 'on time.'];
 
 function getLoginPrefillIdentifier() {
@@ -594,6 +604,7 @@ export default function LoginPage() {
         managerCode: user.managerCode,
         orgKey: user.orgKey || '',
       });
+      clearEmployeeActiveSection(user.orgKey, user.empCode);
       login('employee', { userName: user.userName });
       const targetTenant = loginTenant?.orgKey ? loginTenant : { ...loginTenant, workspaceSlug: loginTenant?.workspaceSlug || user.workspaceSlug };
       const routeUrl = getScopedRouteUrl(targetTenant, 'employee');
@@ -681,6 +692,7 @@ export default function LoginPage() {
             managerCode: pendingEmp.managerCode,
             orgKey: pendingEmp.orgKey || '',
           });
+          clearEmployeeActiveSection(pendingEmp.orgKey, pendingEmp.empCode);
           login('employee', { userName: pendingEmp.userName, serverSessionToken });
           const routeUrl = getScopedRouteUrl(pendingEmp, 'employee');
           if (routeUrl.startsWith('#')) window.location.hash = '#employee';

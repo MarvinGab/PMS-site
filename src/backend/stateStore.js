@@ -13,6 +13,9 @@ const NORMALIZED_SYNC_KEY_PREFIX = 'zarohr_normalized_sync_v2';
 const ORG_BRAND_CACHE_KEY = 'zarohr_org_brand_cache_v1';
 
 const warnedKeys = new Set();
+const remoteWriteQueues = new Map();
+const recentLocalRemoteWrites = new Map();
+const REMOTE_ECHO_GUARD_MS = 8000;
 const ORGANIZATION_SELECT = `
   org_key,
   org_code,
@@ -598,6 +601,45 @@ function writeLocalJson(key, value, { session = false, emit = false } = {}) {
   }
 }
 
+function stableJson(value) {
+  try {
+    const seen = new WeakSet();
+    return JSON.stringify(value, (_key, current) => {
+      if (!current || typeof current !== 'object' || Array.isArray(current)) return current;
+      if (seen.has(current)) return '[Circular]';
+      seen.add(current);
+      return Object.keys(current).sort().reduce((sorted, key) => {
+        sorted[key] = current[key];
+        return sorted;
+      }, {});
+    });
+  } catch {
+    return '';
+  }
+}
+
+function rememberLocalRemoteWrite(recordKey, orgKey = '', payload) {
+  const queueKey = `${recordKey}:${orgKey || ''}`;
+  const raw = stableJson(payload);
+  if (!raw) return;
+  recentLocalRemoteWrites.set(queueKey, { raw, expiresAt: Date.now() + REMOTE_ECHO_GUARD_MS });
+  setTimeout(() => {
+    const current = recentLocalRemoteWrites.get(queueKey);
+    if (current?.raw === raw) recentLocalRemoteWrites.delete(queueKey);
+  }, REMOTE_ECHO_GUARD_MS + 250);
+}
+
+function isStaleRemoteEcho(recordKey, orgKey = '', payload) {
+  const queueKey = `${recordKey}:${orgKey || ''}`;
+  const recent = recentLocalRemoteWrites.get(queueKey);
+  if (!recent) return false;
+  if (Date.now() > recent.expiresAt) {
+    recentLocalRemoteWrites.delete(queueKey);
+    return false;
+  }
+  return stableJson(payload) !== recent.raw;
+}
+
 function removeLocalKey(key, { session = false } = {}) {
   if (typeof window === 'undefined') return;
   try {
@@ -683,22 +725,35 @@ export function subscribeToScopedState(recordKey, orgKey, onChange) {
   };
 }
 
-async function writeRemoteState(recordKey, orgKey = '', payload) {
+function writeRemoteState(recordKey, orgKey = '', payload) {
   if (!shouldUseSupabase || !supabase) return false;
-  try {
-    const { error } = await supabase
-      .from('app_state')
-      .upsert({
-        ...stateRecordKey(recordKey, orgKey),
-        payload,
-        updated_at: new Date().toISOString(),
-      }, { onConflict: 'state_key,org_key' });
-    if (error) throw error;
-    return true;
-  } catch (error) {
-    warnOnce(`remote-write:${recordKey}:${orgKey || 'global'}`, error);
-    return false;
-  }
+  const queueKey = `${recordKey}:${orgKey || ''}`;
+  rememberLocalRemoteWrite(recordKey, orgKey, payload);
+  const run = async () => {
+    try {
+      const { error } = await supabase
+        .from('app_state')
+        .upsert({
+          ...stateRecordKey(recordKey, orgKey),
+          payload,
+          updated_at: new Date().toISOString(),
+        }, { onConflict: 'state_key,org_key' });
+      if (error) throw error;
+      return true;
+    } catch (error) {
+      warnOnce(`remote-write:${recordKey}:${orgKey || 'global'}`, error);
+      return false;
+    }
+  };
+  const previous = remoteWriteQueues.get(queueKey) || Promise.resolve();
+  const queued = previous.catch(() => undefined).then(run);
+  remoteWriteQueues.set(queueKey, queued);
+  queued.finally(() => {
+    if (remoteWriteQueues.get(queueKey) === queued) {
+      remoteWriteQueues.delete(queueKey);
+    }
+  });
+  return queued;
 }
 
 async function upsertOrganizationsRemote(organizations) {
@@ -1009,6 +1064,7 @@ export async function hydrateWorkflow(orgKey = '') {
   if (!shouldUseSupabase) return local;
   const remote = await readRemoteStateScoped('workflow', orgKey);
   if (remote) {
+    if (isStaleRemoteEcho('workflow', orgKey, remote)) return local;
     writeLocalJson(`${GOAL_WORKFLOW_KEY}:${orgKey || 'default'}`, remote, { emit: true });
     return remote;
   }

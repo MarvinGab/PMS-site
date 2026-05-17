@@ -7914,61 +7914,72 @@ function StepTargets({ config, update }) {
         </Banner>
       )}
       {targetsOn && (
-      <Card>
-        <CardHead title="Target configuration" />
-        <CardBody>
-          <Grid3>
-            <Field label="Target entry by">
-              <select style={selectStyle}><option>Manager sets targets</option><option>Employee proposes, manager approves</option><option>HR pre-loads targets</option><option>Auto-fetched from system</option></select>
-            </Field>
-            <Field label="Target type allowed">
-              <select style={selectStyle}><option>Numeric only</option><option>Percentage only</option><option>Numeric + Percentage</option><option>All — numeric, %, currency, text</option></select>
-            </Field>
-            <Field label="Achievement entry by">
-              <select style={selectStyle}><option>Employee enters achievement</option><option>Manager enters achievement</option><option>Auto-fetched from system</option><option>Both — employee + manager verify</option></select>
-            </Field>
-          </Grid3>
-          <Banner type="blue"><span>ℹ️</span><span>For each KPI, define whether higher achievement = better (revenue) or lower = better (error rate, attrition). This drives auto-rating calculation.</span></Banner>
-          <div style={{ overflowX: 'auto', marginBottom: 16 }}>
-            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12.5 }}>
-              <thead>
-                <tr style={{ color: '#9CA3AF', textTransform: 'uppercase', fontSize: 10.5, letterSpacing: '0.05em' }}>
-                  {['KPI Example', 'Direction', 'Target', 'Achievement', 'Auto-rating'].map(h => (
-                    <td key={h} style={{ padding: '6px 10px', borderBottom: '1px solid #F1F3F5', fontWeight: 600 }}>{h}</td>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {exampleKPIs.map((k, i) => (
-                  <tr key={i}>
-                    <td style={{ padding: '8px 10px', borderBottom: '1px solid #F1F3F5', fontWeight: 500 }}>{k.name}</td>
-                    <td style={{ padding: '8px 10px', borderBottom: '1px solid #F1F3F5' }}>
-                      <select style={{ ...selectStyle, width: 'auto', fontSize: 11.5, padding: '3px 7px' }} defaultValue={k.direction}>
-                        <option>↑ Higher is better</option><option>↓ Lower is better</option><option>= Exact target</option>
-                      </select>
-                    </td>
-                    <td style={{ padding: '8px 10px', borderBottom: '1px solid #F1F3F5' }}><input style={{ ...inputStyle, width: 70 }} defaultValue={k.target} /></td>
-                    <td style={{ padding: '8px 10px', borderBottom: '1px solid #F1F3F5' }}><input style={{ ...inputStyle, width: 70 }} defaultValue={k.achievement} /></td>
-                    <td style={{ padding: '8px 10px', borderBottom: '1px solid #F1F3F5' }}>
-                      <span style={{ fontSize: 11, padding: '2px 8px', borderRadius: 20, background: '#F0FDF4', color: '#16A34A', fontWeight: 500 }}>{k.score}</span>
-                    </td>
+      <>
+        <Banner type="blue">
+          <span>🔧</span>
+          <span>The detailed target / auto-rating configuration below is a preview — these fields aren't wired up yet. The master toggle above is the only setting that actually takes effect right now.</span>
+        </Banner>
+        {/* Preview-only section: visually present so the eventual shape is
+            clear, but rendered with reduced opacity and pointer-events:none
+            so nothing inside can be clicked or edited until it's wired. */}
+        <div style={{ opacity: 0.5, pointerEvents: 'none', userSelect: 'none', filter: 'grayscale(35%)' }} aria-disabled="true">
+        <Card>
+          <CardHead title="Target configuration (coming soon)" />
+          <CardBody>
+            <Grid3>
+              <Field label="Target entry by">
+                <select style={selectStyle} disabled><option>Manager sets targets</option><option>Employee proposes, manager approves</option><option>HR pre-loads targets</option><option>Auto-fetched from system</option></select>
+              </Field>
+              <Field label="Target type allowed">
+                <select style={selectStyle} disabled><option>Numeric only</option><option>Percentage only</option><option>Numeric + Percentage</option><option>All — numeric, %, currency, text</option></select>
+              </Field>
+              <Field label="Achievement entry by">
+                <select style={selectStyle} disabled><option>Employee enters achievement</option><option>Manager enters achievement</option><option>Auto-fetched from system</option><option>Both — employee + manager verify</option></select>
+              </Field>
+            </Grid3>
+            <Banner type="blue"><span>ℹ️</span><span>For each KPI, define whether higher achievement = better (revenue) or lower = better (error rate, attrition). This drives auto-rating calculation.</span></Banner>
+            <div style={{ overflowX: 'auto', marginBottom: 16 }}>
+              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12.5 }}>
+                <thead>
+                  <tr style={{ color: '#9CA3AF', textTransform: 'uppercase', fontSize: 10.5, letterSpacing: '0.05em' }}>
+                    {['KPI Example', 'Direction', 'Target', 'Achievement', 'Auto-rating'].map(h => (
+                      <td key={h} style={{ padding: '6px 10px', borderBottom: '1px solid #F1F3F5', fontWeight: 600 }}>{h}</td>
+                    ))}
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-          <div style={{ borderTop: '1px solid #F1F3F5', paddingTop: 14 }}>
-            <div style={{ fontSize: 12, fontWeight: 600, color: '#374151', textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: 12 }}>Auto-rating thresholds (achievement % → score mapping)</div>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: 12, marginBottom: 14 }}>
-              {[{ label: 'Score 5 — Outstanding', val: '≥ 110%' }, { label: 'Score 4 — Exceeds', val: '90–109%' }, { label: 'Score 3 — Meets', val: '70–89%' }, { label: 'Score 2 — Below', val: '50–69%' }].map(t => (
-                <Field key={t.label} label={t.label}><input style={inputStyle} defaultValue={t.val} /></Field>
-              ))}
+                </thead>
+                <tbody>
+                  {exampleKPIs.map((k, i) => (
+                    <tr key={i}>
+                      <td style={{ padding: '8px 10px', borderBottom: '1px solid #F1F3F5', fontWeight: 500 }}>{k.name}</td>
+                      <td style={{ padding: '8px 10px', borderBottom: '1px solid #F1F3F5' }}>
+                        <select style={{ ...selectStyle, width: 'auto', fontSize: 11.5, padding: '3px 7px' }} defaultValue={k.direction} disabled>
+                          <option>↑ Higher is better</option><option>↓ Lower is better</option><option>= Exact target</option>
+                        </select>
+                      </td>
+                      <td style={{ padding: '8px 10px', borderBottom: '1px solid #F1F3F5' }}><input style={{ ...inputStyle, width: 70 }} defaultValue={k.target} disabled /></td>
+                      <td style={{ padding: '8px 10px', borderBottom: '1px solid #F1F3F5' }}><input style={{ ...inputStyle, width: 70 }} defaultValue={k.achievement} disabled /></td>
+                      <td style={{ padding: '8px 10px', borderBottom: '1px solid #F1F3F5' }}>
+                        <span style={{ fontSize: 11, padding: '2px 8px', borderRadius: 20, background: '#F0FDF4', color: '#16A34A', fontWeight: 500 }}>{k.score}</span>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             </div>
-            <TogRow label="Enable auto-rating from achievement" desc="System auto-suggests rating based on achievement %. Manager can override." on={config.autoRating} onChange={v => update('autoRating', v)} />
-            <TogRow label="Allow manager to override auto-rating" desc="Manager can change the system-suggested score with a mandatory comment." last on={config.managerOverrideAuto} onChange={v => update('managerOverrideAuto', v)} />
-          </div>
-        </CardBody>
-      </Card>
+            <div style={{ borderTop: '1px solid #F1F3F5', paddingTop: 14 }}>
+              <div style={{ fontSize: 12, fontWeight: 600, color: '#374151', textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: 12 }}>Auto-rating thresholds (achievement % → score mapping)</div>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: 12, marginBottom: 14 }}>
+                {[{ label: 'Score 5 — Outstanding', val: '≥ 110%' }, { label: 'Score 4 — Exceeds', val: '90–109%' }, { label: 'Score 3 — Meets', val: '70–89%' }, { label: 'Score 2 — Below', val: '50–69%' }].map(t => (
+                  <Field key={t.label} label={t.label}><input style={inputStyle} defaultValue={t.val} disabled /></Field>
+                ))}
+              </div>
+              <TogRow label="Enable auto-rating from achievement" desc="System auto-suggests rating based on achievement %. Manager can override." on={config.autoRating} onChange={() => {}} />
+              <TogRow label="Allow manager to override auto-rating" desc="Manager can change the system-suggested score with a mandatory comment." last on={config.managerOverrideAuto} onChange={() => {}} />
+            </div>
+          </CardBody>
+        </Card>
+        </div>
+      </>
       )}
     </div>
   );
