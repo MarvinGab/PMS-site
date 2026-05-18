@@ -2057,7 +2057,7 @@ function ModuleComms({ employees, groups, org, config, onUpdate, onConfigPatch, 
     ? { module: 'hr-team', label: 'Add Co-Admin' }
     : activeTemplate === 'scoped-hr-invite'
     ? { module: 'hr-team', label: 'Add Scoped HR' }
-    : { module: 'roster', label: 'Add Helm Managers' };
+    : { module: 'roster', label: 'Add Helm Managers', intent: 'helm-manager' };
 
   useEffect(() => {
     setSelectedCodes([]);
@@ -2759,7 +2759,7 @@ function ModuleComms({ employees, groups, org, config, onUpdate, onConfigPatch, 
               canSelectRecipients={canSelectRecipients}
               showGroupsChip={activeTemplate === 'cycle-launch'}
               addRecipientsLabel={addRecipientsTarget.label}
-              onAddRecipients={() => onNavigate?.(addRecipientsTarget.module)}
+              onAddRecipients={() => onNavigate?.(addRecipientsTarget)}
               lastSentByEmail={lastSentByEmail}
             />
           )}
@@ -4014,7 +4014,7 @@ function ManagerBlock({ code, match, onCodeChange, nameValue, onNameChange, emai
 /* ── Add / Remove ───────────────────────────────────────────── */
 const OUTSIDE_PMS_GROUP_VALUE = '__outside_pms__';
 
-function ModuleRoster({ employees, config, onUpdate, orgKey }) {
+function ModuleRoster({ employees, config, onUpdate, orgKey, initialIntent, onIntentConsumed }) {
   const [rosterTab, setRosterTab] = useState('add');           // 'add' | 'remove'
   const [addMode, setAddMode] = useState('manual');            // 'manual' | 'upload'
   const [removeMode, setRemoveMode] = useState('pick');        // 'pick' | 'bulk'
@@ -4119,6 +4119,25 @@ function ModuleRoster({ employees, config, onUpdate, orgKey }) {
   }
 
   function showToast(msg) { setToast(msg); setTimeout(() => setToast(null), 3000); }
+
+  useEffect(() => {
+    if (initialIntent !== 'helm-manager') return;
+    setRosterTab('add');
+    setAddMode('manual');
+    setAddPreview(null);
+    setManualError('');
+    setBulkDelPreview(null);
+    setConfirmBulkDel(false);
+    setConfirmRemove(false);
+    setRemoveSelected([]);
+    setRemoveSearch('');
+    setManualForm((prev) => ({ ...prev, 'Group Name': OUTSIDE_PMS_GROUP_VALUE }));
+    setShowReportingManager(false);
+    setL1NewMgrInPMS(false);
+    setL1NewMgrGroup('');
+    setL1NewMgrSegment('');
+    onIntentConsumed?.();
+  }, [initialIntent, onIntentConsumed]);
 
   async function handleAddFile(e) {
     const file = e.target.files?.[0]; if (!file) return;
@@ -6875,9 +6894,12 @@ export default function HRCycleDashboard() {
   const [activeModule, setActiveModuleInner] = useState(() => {
     try { return localStorage.getItem(activeModuleKey) || 'overview'; } catch { return 'overview'; }
   });
+  const [rosterIntent, setRosterIntent] = useState(null);
   const setActiveModule = (next) => {
-    setActiveModuleInner(next);
-    try { localStorage.setItem(activeModuleKey, next); } catch { /* ignore */ }
+    const moduleId = typeof next === 'object' && next ? next.module : next;
+    if (typeof next === 'object' && next?.intent) setRosterIntent(next.intent);
+    setActiveModuleInner(moduleId);
+    try { localStorage.setItem(activeModuleKey, moduleId); } catch { /* ignore */ }
   };
   const [showOverview, setShowOverview] = useState(false);
   const [showOrgChart, setShowOrgChart] = useState(false);
@@ -7094,7 +7116,7 @@ export default function HRCycleDashboard() {
           {activeModule === 'stage'      && <ModuleStageControl  employees={empsForModules} onUpdate={handleEmpUpdate} orgKey={orgKey} />}
           {activeModule === 'mgr-change' && <ModuleMgrChange     employees={empsForModules} config={config} onUpdate={handleEmpUpdate} orgKey={orgKey} />}
           {activeModule === 'grp-transfer' && <ModuleGrpTransfer employees={empsForModules} groups={groups} goalLibraries={config?.goalLibraries || []} onUpdate={handleEmpUpdate} orgKey={orgKey} />}
-          {activeModule === 'roster'     && <ModuleRoster employees={empsForModules} config={config} onUpdate={handleEmpUpdate} orgKey={orgKey} />}
+          {activeModule === 'roster'     && <ModuleRoster employees={empsForModules} config={config} onUpdate={handleEmpUpdate} orgKey={orgKey} initialIntent={rosterIntent} onIntentConsumed={() => setRosterIntent(null)} />}
           {activeModule === 'test-creds' && <ModuleTestCreds employees={empsForModules} org={org} orgKey={orgKey} />}
           {activeModule === 'hr-team' && !isScopedHR && (
             <ModuleHRTeam org={org} orgKey={orgKey} employees={liveEmployeesWithStage} groups={groups} onOrgChange={onHRTeamChange} />
