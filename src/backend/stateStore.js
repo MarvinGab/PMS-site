@@ -640,6 +640,44 @@ function isStaleRemoteEcho(recordKey, orgKey = '', payload) {
   return stableJson(payload) !== recent.raw;
 }
 
+function workflowTimestamp(value) {
+  const parsed = Date.parse(String(value?.updatedAt || value?.createdAt || ''));
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function mergeWorkflowPayload(remote, local) {
+  const remoteObj = remote && typeof remote === 'object' ? remote : {};
+  const localObj = local && typeof local === 'object' ? local : {};
+  const submissions = { ...(remoteObj.submissions || {}) };
+  Object.entries(localObj.submissions || {}).forEach(([key, submission]) => {
+    const current = submissions[key];
+    submissions[key] = workflowTimestamp(submission) >= workflowTimestamp(current) ? submission : current;
+  });
+
+  const notifications = new Map();
+  [...(remoteObj.notifications || []), ...(localObj.notifications || [])].forEach((notification) => {
+    if (!notification?.id) return;
+    const current = notifications.get(notification.id);
+    if (!current) {
+      notifications.set(notification.id, notification);
+      return;
+    }
+    notifications.set(notification.id, {
+      ...current,
+      ...notification,
+      read: !!(current.read || notification.read),
+    });
+  });
+
+  return {
+    ...remoteObj,
+    ...localObj,
+    submissions,
+    notifications: Array.from(notifications.values())
+      .sort((left, right) => Date.parse(right?.createdAt || '') - Date.parse(left?.createdAt || '')),
+  };
+}
+
 function removeLocalKey(key, { session = false } = {}) {
   if (typeof window === 'undefined') return;
   try {
@@ -725,17 +763,22 @@ export function subscribeToScopedState(recordKey, orgKey, onChange) {
   };
 }
 
-function writeRemoteState(recordKey, orgKey = '', payload) {
+function writeRemoteState(recordKey, orgKey = '', payload, options = {}) {
   if (!shouldUseSupabase || !supabase) return false;
   const queueKey = `${recordKey}:${orgKey || ''}`;
-  rememberLocalRemoteWrite(recordKey, orgKey, payload);
   const run = async () => {
     try {
+      let nextPayload = payload;
+      if (recordKey === 'workflow' && !options.replace) {
+        const remote = await readRemoteStateScoped(recordKey, orgKey);
+        if (remote) nextPayload = mergeWorkflowPayload(remote, payload);
+      }
+      rememberLocalRemoteWrite(recordKey, orgKey, nextPayload);
       const { error } = await supabase
         .from('app_state')
         .upsert({
           ...stateRecordKey(recordKey, orgKey),
-          payload,
+          payload: nextPayload,
           updated_at: new Date().toISOString(),
         }, { onConflict: 'state_key,org_key' });
       if (error) throw error;
@@ -1071,10 +1114,10 @@ export async function hydrateWorkflow(orgKey = '') {
   return local;
 }
 
-export function persistWorkflow(orgKey, payload) {
+export function persistWorkflow(orgKey, payload, options = {}) {
   const key = `${GOAL_WORKFLOW_KEY}:${orgKey || 'default'}`;
   writeLocalJson(key, payload, { emit: true });
-  void writeRemoteState('workflow', orgKey, payload);
+  void writeRemoteState('workflow', orgKey, payload, options);
 }
 
 export function readMessagesSync(orgKey = '') {

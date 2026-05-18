@@ -56,9 +56,9 @@ function loadWorkflowState(orgKey) {
   if (!orgKey) return { submissions: {}, notifications: [] };
   return readWorkflowSync(orgKey);
 }
-function saveWorkflowState(orgKey, wf) {
+function saveWorkflowState(orgKey, wf, options = {}) {
   if (!orgKey) return;
-  persistWorkflow(orgKey, wf);
+  persistWorkflow(orgKey, wf, options);
 }
 
 function resolveEmployeeEmail(emp = {}) {
@@ -4407,7 +4407,7 @@ function ModuleRoster({ employees, config, onUpdate, orgKey, initialIntent, onIn
         const submission = String(n?.submissionCode || '').trim().toLowerCase();
         return !normalized.has(recipient) && !normalized.has(sender) && !normalized.has(submission);
       });
-      saveWorkflowState(orgKey, { submissions: nextSubs, notifications: nextNotifications });
+      saveWorkflowState(orgKey, { submissions: nextSubs, notifications: nextNotifications }, { replace: true });
     }
 
     // Hydrate the credential blob from remote before deleting entries.
@@ -6920,12 +6920,16 @@ export default function HRCycleDashboard() {
     // storage event might miss if the origin is identical but listener timing differs.
     window.addEventListener('focus', reread);
     document.addEventListener('visibilitychange', reread);
-    const t = setInterval(reread, 4000); // low-frequency catch-all
+    // The earlier 4-second polling interval that lived here was a holdover
+    // from before Supabase realtime was wired up. With the workflow channel
+    // subscribed in EmployeePage, the storage/focus/visibilitychange events
+    // here, AND each tab re-hydrating on remount, the poll just churned a
+    // fresh object every tick, so React re-rendered the whole HR Cycle
+    // surface, causing visible flicker when multiple users were active.
     return () => {
       window.removeEventListener('storage', onStorage);
       window.removeEventListener('focus', reread);
       document.removeEventListener('visibilitychange', reread);
-      clearInterval(t);
     };
   }, [orgKey]);
 

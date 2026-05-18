@@ -1704,6 +1704,8 @@ export default function EmployeePage() {
     };
   }, [brandPalette.primary, brandPalette.primaryDark]);
   const [workflow, setWorkflow] = useState(() => loadWorkflow(session?.orgKey || ''));
+  const [configHydrated, setConfigHydrated] = useState(() => !!config && Array.isArray(config?.employeeUploadData?.employees));
+  const [workflowHydrated, setWorkflowHydrated] = useState(() => !session?.orgKey);
   // Persist the active tab so refresh stays on the same tab.
   const activeSectionKey = `zarohr_emp_active_section:${session?.orgKey || 'default'}:${session?.empCode || 'anon'}`;
   const [activeSection, setActiveSectionInner] = useState(() => {
@@ -1715,15 +1717,25 @@ export default function EmployeePage() {
     const roster = config?.employeeUploadData?.employees || [];
     const rmExists = rmCode && roster.some((e) => normalizeCode(e['Employee Code']) === normalizeCode(rmCode));
     const canSetGoalsNow = !!emp && !!rmCode && !!rmExists;
+    // If config hasn't been pulled from Supabase yet (typical on a fresh
+    // login - localStorage is cold), we can't actually determine whether
+    // this user has goal-setting access. Default to 'goals' optimistically
+    // since that's the home tab for the vast majority of users; the redirect
+    // effect below will bump them to 'team' if it turns out they can't set
+    // goals once config hydrates. This avoids the "land on No direct reports"
+    // empty-state flash for first-time employee logins.
+    const hasRosterConfig = !!config && Array.isArray(config?.employeeUploadData?.employees);
     try {
       const stored = localStorage.getItem(activeSectionKey);
       if (stored) {
         const next = stored === 'dashboard' ? 'goals' : stored;
-        if (next === 'goals' && !canSetGoalsNow) return 'team';
+        if (next === 'goals' && hasRosterConfig && !canSetGoalsNow) return 'team';
         return next;
       }
     } catch (_) {}
-    // First visit: send no-goal users to Team; everyone else to Goals.
+    // First visit: optimistically default to 'goals'. The effect below
+    // corrects to 'team' / 'messages' if the user truly can't set goals.
+    if (!hasRosterConfig) return 'goals';
     return canSetGoalsNow ? 'goals' : 'team';
   });
   const setActiveSection = (next) => {
@@ -1818,6 +1830,8 @@ export default function EmployeePage() {
   useEffect(() => {
     if (!session?.orgKey) return;
     let cancelled = false;
+    setConfigHydrated(false);
+    setWorkflowHydrated(false);
     hydrateAppData().then((data) => {
       if (!cancelled && data) setAppData(data);
     });
@@ -1827,10 +1841,16 @@ export default function EmployeePage() {
       }
     });
     hydrateWizardState(session.orgKey).then((state) => {
-      if (!cancelled && state?.config) setConfig(state.config);
+      if (!cancelled) {
+        if (state?.config) setConfig(state.config);
+        setConfigHydrated(true);
+      }
     });
     hydrateWorkflow(session.orgKey).then((wf) => {
-      if (!cancelled && wf) setWorkflow(wf);
+      if (!cancelled) {
+        if (wf) setWorkflow(wf);
+        setWorkflowHydrated(true);
+      }
     });
     hydrateMessages(session.orgKey).then((data) => {
       if (!cancelled && data) setMessagesData(data);
@@ -1877,15 +1897,15 @@ export default function EmployeePage() {
   }, [session?.orgKey]);
 
   useEffect(() => {
-    if (session?.orgKey) {
+    if (session?.orgKey && workflowHydrated) {
       saveWorkflow(session.orgKey, workflow);
     }
-  }, [session?.orgKey, workflow]);
+  }, [session?.orgKey, workflow, workflowHydrated]);
 
   useEffect(() => {
     // Provision a submission record for every logged-in employee, regardless of phase, so the
     // dashboard always has something to render (goals + status + library, when applicable).
-    if (!session || !config || !employeeCodeKey) return;
+    if (!session || !config || !configHydrated || !workflowHydrated || !employeeCodeKey) return;
     setWorkflow((prev) => {
       const current = prev?.submissions?.[employeeCodeKey];
       if (current) {
@@ -1932,7 +1952,7 @@ export default function EmployeePage() {
         },
       };
     });
-  }, [session, config, employee, employeeCodeKey, currentPhase, managerCode, employeeGroup]);
+  }, [session, config, configHydrated, workflowHydrated, employee, employeeCodeKey, currentPhase, managerCode, employeeGroup]);
 
   useEffect(() => {
     if (!session) {
@@ -2116,11 +2136,15 @@ export default function EmployeePage() {
   // goals (e.g. they were promoted out of an RM-linked group), redirect to a
   // useful landing — Team if they have reports, otherwise Messages.
   useEffect(() => {
+    if (!configHydrated) return;
     if (activeSection === 'goals' && !canSetOwnGoals) {
       setActiveSection(directReports.length > 0 ? 'team' : 'messages');
     }
+    if (activeSection === 'team' && directReports.length === 0 && canSetOwnGoals) {
+      setActiveSection('goals');
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeSection, canSetOwnGoals, directReports.length]);
+  }, [activeSection, canSetOwnGoals, configHydrated, directReports.length]);
   const canEditGoalPlan = canSetOwnGoals && currentPhase === 'goal-setting' && mySubmission && !['pending-manager', 'approved'].includes(mySubmission.status);
   const canAddKra = canEditGoalPlan && (
     effectiveConfig?.goalCreationMode === 'employee-self' ||
@@ -2479,6 +2503,15 @@ export default function EmployeePage() {
 
     setGoalSubmitError('');
     const submittedAt = new Date().toISOString();
+    // Read the prior submit count from the current workflow so the
+    // resubmit-vs-first-submit distinction is available BOTH inside the
+    // updateMySubmission callback AND in the notification block below.
+    // (Previously nextSubmitCount was only scoped to the callback, so
+    // referencing it outside threw a ReferenceError and the manager
+    // notification never fired.)
+    const priorSubmitCount = Number(workflow?.submissions?.[employeeCodeKey]?.submitCount || 0);
+    const nextSubmitCount = priorSubmitCount + 1;
+    const isResubmit = nextSubmitCount > 1;
     updateMySubmission((record) => {
       const noManager = !record.managerCode;
       // Reset previously-rejected goals back to pending review. Approved ones stay locked.
@@ -2489,11 +2522,6 @@ export default function EmployeePage() {
         }
         return goal;
       });
-      // Track how many times the employee has submitted so the UI can
-      // distinguish "Submitted" (first time) from "Re-submitted" (after a
-      // rejection cycle). Stored on the submission so it survives reloads
-      // and syncs across devices via the workflow blob.
-      const nextSubmitCount = Number(record.submitCount || 0) + 1;
       return {
         ...record,
         goals: resetGoals,
@@ -2506,7 +2534,6 @@ export default function EmployeePage() {
       };
     });
     if (managerCode) {
-      const isResubmit = nextSubmitCount > 1;
       addNotification(createNotification({
         type: isResubmit ? 'goal-resubmitted' : 'goal-submitted',
         recipientCode: managerCode,
@@ -2966,6 +2993,9 @@ export default function EmployeePage() {
       ];
 
   function renderGoalSetting() {
+    if (!configHydrated || !workflowHydrated) {
+      return <EmptyState title="Loading your goal plan" subtitle="Fetching the latest roster, workflow, and assigned goal library." />;
+    }
     if (!mySubmission) {
       return <EmptyState title="Preparing your goal plan" subtitle="Your assigned library and permissions are loading." />;
     }
@@ -4615,6 +4645,9 @@ export default function EmployeePage() {
   }
 
   function renderTeam() {
+    if (!configHydrated) {
+      return <EmptyState title="Loading team" subtitle="Fetching the latest employee roster for this workspace." />;
+    }
     if (directReports.length === 0) {
       return <EmptyState title="No direct reports found" subtitle="Employees reporting to you will appear here for reminders and approvals." />;
     }
