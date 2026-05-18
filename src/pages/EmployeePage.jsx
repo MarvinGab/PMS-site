@@ -5725,9 +5725,10 @@ export default function EmployeePage() {
       label: currentPhase === 'self-evaluation' ? 'Self-Eval' : 'My Goals',
       count: currentPhase === 'self-evaluation' ? totalRatable : myGoals.length,
     });
-    // Deleted Goals tab — only surfaced when there's something in the trash.
-    // Stays hidden during normal use so the nav doesn't get cluttered.
-    if (deletedGoals.length > 0 && currentPhase === 'goal-setting') {
+    // Deleted Goals tab — surfaced when there's trash, and kept visible while
+    // the user is already on it so recovering the last goal does not leave the
+    // page on a section with no active tab.
+    if ((deletedGoals.length > 0 || activeSection === 'deleted-goals') && currentPhase === 'goal-setting') {
       tabs.push({
         id: 'deleted-goals',
         label: '🗑 Deleted Goals',
