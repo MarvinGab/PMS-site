@@ -1346,6 +1346,7 @@ const COMMS_CHANNELS = [
 ];
 const COMMS_TOKENS = [
   { key: '{employee_name}', label: 'Employee Name' },
+  { key: '{recipient_email}', label: 'Mail' },
   { key: '{employee_code}', label: 'Employee Code' },
   { key: '{password}', label: 'Password' },
 ];
@@ -1797,7 +1798,7 @@ function ModuleComms({ employees, groups, org, config, onUpdate, onConfigPatch, 
     return {
       'cycle-launch': {
         subject: `Goal setting is open · ${orgLabel}`,
-        body: `Hi {employee_name},\n\nPMS goal-setting for this cycle is live. Sign in to add your goals.\n\nLogin email : {recipient_email}\nEmployee Code : {employee_code}\nPassword : {password}\n\n${signOff}`,
+        body: `Hi {employee_name},\n\nPMS goal-setting for this cycle is live. Sign in to add your goals.\n\nEmployee Code : {employee_code}\nPassword : {password}\n\n${signOff}`,
       },
       'co-admin-invite': {
         subject: `Co-Admin access ready · ${orgLabel}`,
@@ -1827,21 +1828,9 @@ function ModuleComms({ employees, groups, org, config, onUpdate, onConfigPatch, 
       /Your login credentials:\s*\n\s+([A-Za-z][A-Za-z ]*\s*:\s*\{[^}]+\})\s*\n\s+([A-Za-z][A-Za-z ]*\s*:\s*\{[^}]+\})/g,
       '$1\n$2',
     );
-    const ensureLineBefore = (body, line, beforeToken) => {
-      if (typeof body !== 'string' || body.includes(line)) return body;
-      const needle = new RegExp(`(^|\\n)${beforeToken.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`, 'm');
-      if (!needle.test(body)) return body;
-      return body.replace(needle, `$1${line}\n${beforeToken}`);
-    };
     Object.keys(merged).forEach((k) => {
       if (!merged[k]?.body) return;
       let body = dedent(merged[k].body);
-      if (k === 'cycle-launch') {
-        body = ensureLineBefore(body, 'Login email : {recipient_email}', 'Employee Code : {employee_code}');
-      }
-      if (k === 'helm-managers') {
-        body = ensureLineBefore(body, 'Manager code : {employee_code}', 'Password : {password}');
-      }
       merged[k] = { ...merged[k], body };
     });
     return merged;
