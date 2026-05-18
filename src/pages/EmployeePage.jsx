@@ -1931,9 +1931,24 @@ export default function EmployeePage() {
         if (cancelled) return;
         const remoteSubs = remote?.submissions || {};
         const localSubs = workflow?.submissions || {};
-        // Local wins where both sides have a submission (the local user
-        // just edited it). Remote-only submissions are preserved.
-        const mergedSubs = { ...remoteSubs, ...localSubs };
+        // Per-submission "later updatedAt wins". Avoids both stripping
+        // remote-newer changes (e.g. a manager review that landed
+        // between our last hydrate and this save) AND losing local
+        // edits that haven't synced yet. Falls back to local on tie so
+        // the saving client's view is the tiebreaker.
+        const tsOf = (sub) => {
+          const t = Date.parse(sub?.updatedAt || sub?.submittedAt || sub?.createdAt || '');
+          return Number.isFinite(t) ? t : 0;
+        };
+        const allKeys = new Set([...Object.keys(remoteSubs), ...Object.keys(localSubs)]);
+        const mergedSubs = {};
+        allKeys.forEach((key) => {
+          const r = remoteSubs[key];
+          const l = localSubs[key];
+          if (!r) { if (l) mergedSubs[key] = l; return; }
+          if (!l) { mergedSubs[key] = r; return; }
+          mergedSubs[key] = tsOf(r) > tsOf(l) ? r : l;
+        });
         const remoteNotifs = Array.isArray(remote?.notifications) ? remote.notifications : [];
         const localNotifs = Array.isArray(workflow?.notifications) ? workflow.notifications : [];
         const notifMap = new Map();
@@ -2090,22 +2105,37 @@ export default function EmployeePage() {
         const incomingRaw = workflowRaw(wf);
         if (incomingRaw === syncedWorkflowRawRef.current) return;
 
-        // Race-protection merge: the shared workflow is a single blob,
-        // and any client saving with a stale local copy can strip
-        // submissions belonging to other users from Supabase. When the
-        // realtime echo arrives missing ANY submission we still have
-        // locally, splice those back in instead of clobbering. Covers
-        // the cases that caused the "Preparing your goal plan" flash
-        // for active employees AND the team-tile 0%↔100% flicker on a
-        // manager's screen.
+        // Per-submission "later updatedAt wins" merge. The shared
+        // workflow blob race means a delayed realtime echo can arrive
+        // with a STALE copy of this user's own submission — without the
+        // goal they just dragged in or edited a moment ago. We compare
+        // updatedAt timestamps and keep whichever side wrote last.
+        // updateMySubmission stamps a fresh updatedAt on every edit, so
+        // an actively-typing user always beats a stale echo. A manager
+        // who just reviewed after our last save legitimately wins
+        // because their write IS newer. Same goes for missing-on-incoming
+        // submissions: we splice those local-only entries back in so
+        // other users' tiles never blank out on this screen either.
         setWorkflow((prev) => {
           const prevSubs = prev?.submissions || {};
           const incomingSubs = wf.submissions || {};
-          let needsMerge = false;
+          const tsOf = (sub) => {
+            const t = Date.parse(sub?.updatedAt || sub?.submittedAt || sub?.createdAt || '');
+            return Number.isFinite(t) ? t : 0;
+          };
           const mergedSubs = { ...incomingSubs };
+          let needsMerge = false;
           Object.keys(prevSubs).forEach((key) => {
-            if (prevSubs[key] && !incomingSubs[key]) {
-              mergedSubs[key] = prevSubs[key];
+            const localSub = prevSubs[key];
+            if (!localSub) return;
+            const incomingSub = incomingSubs[key];
+            if (!incomingSub) {
+              mergedSubs[key] = localSub;
+              needsMerge = true;
+              return;
+            }
+            if (tsOf(localSub) > tsOf(incomingSub)) {
+              mergedSubs[key] = localSub;
               needsMerge = true;
             }
           });
