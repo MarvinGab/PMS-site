@@ -73,6 +73,7 @@ export function AppProvider({ children }) {
   const [role, setRole]       = useState(initialSession?.role || null);
   const [orgKey, setOrgKey]   = useState(initialSession?.orgKey || null);
   const [userName, setUserName] = useState(initialSession?.userName || '');
+  const [userEmail, setUserEmail] = useState(initialSession?.userEmail || '');
   const [isCoAdmin, setIsCoAdmin] = useState(!!initialSession?.isCoAdmin);
   const [isScopedHR, setIsScopedHR] = useState(!!initialSession?.isScopedHR);
   const [hrTeamId, setHrTeamId] = useState(initialSession?.hrTeamId || null);
@@ -162,9 +163,11 @@ export function AppProvider({ children }) {
   }, [dashboardFlags, pendingActions, feedData, orgs]);
 
   function login(loginRole, data = {}) {
+    const normalizedEmail = String(data.userEmail || '').trim().toLowerCase();
     setRole(loginRole);
     setOrgKey(data.orgKey || null);
     setUserName(data.userName || '');
+    setUserEmail(normalizedEmail);
     setIsCoAdmin(!!data.isCoAdmin);
     setIsScopedHR(!!data.isScopedHR);
     setHrTeamId(data.hrTeamId || null);
@@ -176,6 +179,7 @@ export function AppProvider({ children }) {
       role: loginRole,
       orgKey: data.orgKey || null,
       userName: data.userName || '',
+      userEmail: normalizedEmail,
       isCoAdmin: !!data.isCoAdmin,
       isScopedHR: !!data.isScopedHR,
       hrTeamId: data.hrTeamId || null,
@@ -190,6 +194,7 @@ export function AppProvider({ children }) {
     setRole(null);
     setOrgKey(null);
     setUserName('');
+    setUserEmail('');
     setIsCoAdmin(false);
     setIsScopedHR(false);
     setHrTeamId(null);
@@ -243,7 +248,7 @@ export function AppProvider({ children }) {
   }
 
   const value = {
-    role, orgKey, userName, authReady, serverSessionToken,
+    role, orgKey, userName, userEmail, authReady, serverSessionToken,
     isCoAdmin, isScopedHR, hrTeamId, empCode, allowedModules,
     orgs, setOrgs: updateOrgs,
     pendingActions, setPendingActions: updatePendingActions,

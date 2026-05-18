@@ -605,7 +605,7 @@ export default function LoginPage() {
         orgKey: user.orgKey || '',
       });
       clearEmployeeActiveSection(user.orgKey, user.empCode);
-      login('employee', { userName: user.userName });
+      login('employee', { userName: user.userName, userEmail: identifier });
       const targetTenant = loginTenant?.orgKey ? loginTenant : { ...loginTenant, workspaceSlug: loginTenant?.workspaceSlug || user.workspaceSlug };
       const routeUrl = getScopedRouteUrl(targetTenant, 'employee');
       if (routeUrl.startsWith('#')) window.location.hash = '#employee';
@@ -621,6 +621,7 @@ export default function LoginPage() {
       login('hr-admin', {
         orgKey: user.orgKey,
         userName: user.userName,
+        userEmail: identifier,
         isCoAdmin: !!user.isCoAdmin,
         isScopedHR: !!user.isScopedHR,
         hrTeamId: user.hrTeamId || null,
@@ -633,7 +634,7 @@ export default function LoginPage() {
       if (routeUrl.startsWith('#')) window.location.hash = '#hr-home';
       else window.location.assign(routeUrl);
     } else {
-      login('super-admin', { userName: user.userName, serverSessionToken: user.serverSessionToken || null });
+      login('super-admin', { userName: user.userName, userEmail: identifier, serverSessionToken: user.serverSessionToken || null });
       window.location.assign(getPlatformRouteUrl('organizations'));
     }
   }
@@ -669,10 +670,12 @@ export default function LoginPage() {
         pendingEmp={pendingEmp}
         onComplete={(passwordChangeResult) => {
           const serverSessionToken = passwordChangeResult?.serverSessionToken || pendingEmp.serverSessionToken || null;
+          const pendingEmail = pendingEmp.credentialKey || pendingEmp.email || pendingEmp.userName || '';
           if (pendingUserKind === 'hr-admin') {
             login('hr-admin', {
               orgKey: pendingEmp.orgKey,
               userName: pendingEmp.userName,
+              userEmail: pendingEmail,
               isCoAdmin: !!pendingEmp.isCoAdmin,
               isScopedHR: !!pendingEmp.isScopedHR,
               hrTeamId: pendingEmp.hrTeamId || null,
@@ -693,7 +696,7 @@ export default function LoginPage() {
             orgKey: pendingEmp.orgKey || '',
           });
           clearEmployeeActiveSection(pendingEmp.orgKey, pendingEmp.empCode);
-          login('employee', { userName: pendingEmp.userName, serverSessionToken });
+          login('employee', { userName: pendingEmp.userName, userEmail: pendingEmail, serverSessionToken });
           const routeUrl = getScopedRouteUrl(pendingEmp, 'employee');
           if (routeUrl.startsWith('#')) window.location.hash = '#employee';
           else window.location.assign(routeUrl);
