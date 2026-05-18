@@ -2050,15 +2050,47 @@ export default function EmployeePage() {
     if (!session?.orgKey) return;
     const wfKey = getWorkflowStorageKey(session.orgKey);
     function onWorkflowStorage(e) {
-      if (e.key === wfKey) {
-        const next = loadWorkflow(session.orgKey);
-        syncedWorkflowRawRef.current = workflowRaw(next);
-        setWorkflow(next);
-      }
+      if (e.key !== wfKey) return;
+      // CRITICAL: `hydrateWorkflow` writes the remote snapshot through
+      // `writeLocalJson(..., { emit: true })`, which dispatches a synthetic
+      // `storage` event in the SAME tab. If we naively setWorkflow(loaded)
+      // here we'll overwrite an in-flight local edit with the pre-save
+      // remote snapshot — making the goal the user just dragged/typed
+      // disappear for one frame on every save. The echo guard (set by
+      // markLocalWorkflowMutation before our hydrate) tells us the event
+      // is our own and should be ignored.
+      if (Date.now() < ignoreWorkflowEchoUntilRef.current) return;
+      const next = loadWorkflow(session.orgKey);
+      if (!next) return;
+      const nextRaw = workflowRaw(next);
+      if (nextRaw === syncedWorkflowRawRef.current) return;
+      // Same hands-off-own-submission merge as the Supabase realtime
+      // handler — local always wins for THIS user's submission so a
+      // cross-tab write can't wipe in-flight edits either.
+      setWorkflow((prev) => {
+        const prevSubs = prev?.submissions || {};
+        const incomingSubs = next.submissions || {};
+        const mergedSubs = {};
+        Object.keys(incomingSubs).forEach((key) => {
+          if (key === employeeCodeKey && prevSubs[key]) {
+            mergedSubs[key] = prevSubs[key];
+          } else {
+            mergedSubs[key] = incomingSubs[key];
+          }
+        });
+        Object.keys(prevSubs).forEach((key) => {
+          if (prevSubs[key] && !mergedSubs[key]) mergedSubs[key] = prevSubs[key];
+        });
+        const merged = { ...next, submissions: mergedSubs };
+        const mergedRaw = workflowRaw(merged);
+        if (mergedRaw === syncedWorkflowRawRef.current) return prev;
+        syncedWorkflowRawRef.current = mergedRaw;
+        return merged;
+      });
     }
     window.addEventListener('storage', onWorkflowStorage);
     return () => window.removeEventListener('storage', onWorkflowStorage);
-  }, [session?.orgKey]);
+  }, [session?.orgKey, employeeCodeKey]);
 
   // Live messaging: reload messages from storage when another tab writes
   useEffect(() => {
