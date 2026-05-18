@@ -2254,6 +2254,20 @@ function ModuleComms({ employees, groups, org, config, onUpdate, onConfigPatch, 
   const previewSubject = resolve(subject);
   const previewBody = resolve(body);
   const activeChannel = COMMS_CHANNELS.find((c) => c.id === activeTab) || COMMS_CHANNELS[0];
+  const draftReferenceCatalog = [
+    { key: '{employee_name}', label: 'Employee Name', value: previewContext.name },
+    { key: '{recipient_email}', label: 'Mail', value: previewContext.email },
+    { key: '{employee_code}', label: previewContext.kind === 'helm-manager' ? 'Manager Code' : 'Employee Code', value: previewContext.code },
+    { key: '{password}', label: 'Password', value: previewContext.password || org.temporaryPassword || 'Pass@1234' },
+    { key: '{temporary_password}', label: 'Temporary Password', value: previewContext.password || org.temporaryPassword || 'Pass@1234' },
+    { key: '{reportee_list}', label: 'Reportee List', value: previewContext.sampleReportees.length ? `${previewContext.sampleReportees.length} reportee${previewContext.sampleReportees.length !== 1 ? 's' : ''}` : '—' },
+    { key: '{reportee_count}', label: 'Reportee Count', value: String(previewContext.sampleReportees.length || 0) },
+  ];
+  const draftText = `${subject || ''}\n${body || ''}`;
+  const usedDraftReferences = draftReferenceCatalog.filter((ref) => draftText.includes(ref.key));
+  const knownReferenceKeys = new Set(draftReferenceCatalog.map((ref) => ref.key));
+  const unknownDraftReferences = Array.from(new Set((draftText.match(/\{[a-zA-Z0-9_]+\}/g) || [])
+    .filter((token) => !knownReferenceKeys.has(token))));
 
   const bodyRef = useRef(null);
   const subjectRef = useRef(null);
@@ -2444,6 +2458,57 @@ function ModuleComms({ employees, groups, org, config, onUpdate, onConfigPatch, 
                 <textarea ref={bodyRef} value={body} onChange={(e) => setBody(e.target.value)} rows={14}
                   style={{ width: '100%', boxSizing: 'border-box', border: '1.5px solid #E2E8F0', borderRadius: 9, padding: '12px 14px', fontSize: 13, lineHeight: 1.7, outline: 'none', fontFamily: "'Geist Mono','SF Mono',Menlo,monospace", color: '#0D1117', resize: 'vertical', background: '#fff' }} />
               </div>
+
+              {(usedDraftReferences.length > 0 || unknownDraftReferences.length > 0) && (
+                <div style={{
+                  border: '1px solid #DBEAFE',
+                  background: '#F8FBFF',
+                  borderRadius: 10,
+                  padding: '10px 12px',
+                }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 7, marginBottom: 8 }}>
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#2563EB" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
+                      <path d="M9 11 6 14a3 3 0 1 0 4 4l3-3" />
+                      <path d="m15 13 3-3a3 3 0 1 0-4-4l-3 3" />
+                      <path d="m8 16 8-8" />
+                    </svg>
+                    <div style={{ fontSize: 11.5, fontWeight: 800, color: '#1E3A8A', textTransform: 'uppercase', letterSpacing: '.06em' }}>
+                      References used in this draft
+                    </div>
+                  </div>
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 7 }}>
+                    {usedDraftReferences.map((ref) => (
+                      <div key={ref.key} title={`${ref.key} resolves to ${ref.value || 'blank'}`} style={{
+                        display: 'inline-flex', alignItems: 'center', gap: 7,
+                        padding: '5px 8px',
+                        border: '1px solid #BFDBFE',
+                        background: '#FFFFFF',
+                        borderRadius: 999,
+                        maxWidth: '100%',
+                      }}>
+                        <span style={{ fontSize: 11, fontWeight: 800, color: '#1D4ED8', whiteSpace: 'nowrap' }}>{ref.label}</span>
+                        <code style={{ fontSize: 10.5, color: '#475569', background: '#EFF6FF', padding: '1px 5px', borderRadius: 5 }}>{ref.key}</code>
+                        <span style={{ fontSize: 11.2, color: '#0F172A', fontWeight: 700, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 190 }}>{ref.value || 'blank'}</span>
+                      </div>
+                    ))}
+                    {unknownDraftReferences.map((token) => (
+                      <div key={token} title="This token is not recognized and will remain as plain text." style={{
+                        display: 'inline-flex', alignItems: 'center', gap: 7,
+                        padding: '5px 8px',
+                        border: '1px solid #FECACA',
+                        background: '#FEF2F2',
+                        borderRadius: 999,
+                      }}>
+                        <span style={{ fontSize: 11, fontWeight: 800, color: '#B91C1C' }}>Unknown</span>
+                        <code style={{ fontSize: 10.5, color: '#7F1D1D', background: '#FEE2E2', padding: '1px 5px', borderRadius: 5 }}>{token}</code>
+                      </div>
+                    ))}
+                  </div>
+                  <div style={{ marginTop: 8, fontSize: 11.3, color: '#64748B' }}>
+                    The live preview and the sent email use these same resolved values for the selected recipient.
+                  </div>
+                </div>
+              )}
 
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '6px 2px' }}>
                 <span style={{ fontSize: 12, color: '#64748B' }}>Want a different look or logo?</span>
