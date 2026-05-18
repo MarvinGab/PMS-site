@@ -1210,7 +1210,11 @@ export async function rotateEmployeeOtpsForSend({ orgKey = '', employees = [] } 
       ...(current || {}),
       passwordHash,
       pendingTempPassword: otp,
+      name: String(employee?.['Employee Name'] || current?.name || '').trim(),
+      email: resolveEmployeeEmail(employee) || current?.email || '',
       empCode: code,
+      designation: String(employee?.Designation || employee?.Role || current?.designation || '').trim(),
+      managerCode: normalizeCode(employee?.['Reporting Manager Code'] || current?.managerCode || ''),
       orgKey: normalizedOrgKey,
       isTemp: true,
     };

@@ -408,7 +408,13 @@ export async function sendCustomBroadcast({ org, recipients = [], theme, templat
   const messages = (Array.isArray(recipients) ? recipients : [])
     .map((rcpt) => {
       const recipientEmail = String(
-        rcpt?.['Email ID'] || rcpt?.Email || rcpt?.email || ''
+        rcpt?.['Email ID']
+          || rcpt?.Email
+          || rcpt?.email
+          || rcpt?.['Work Email']
+          || rcpt?.['Official Email']
+          || rcpt?.['Email Address']
+          || ''
       ).trim().toLowerCase();
       if (!recipientEmail) return null;
       const employeeCode = String(rcpt?.['Employee Code'] || '').trim();
