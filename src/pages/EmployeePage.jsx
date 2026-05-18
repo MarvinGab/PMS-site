@@ -1914,69 +1914,23 @@ export default function EmployeePage() {
     if (!session?.orgKey || !workflowHydrated) return undefined;
     const raw = workflowRaw(workflow);
     if (raw && raw === syncedWorkflowRawRef.current) return undefined;
-    // Debounce + pre-save merge with the latest remote workflow. Each
-    // client writes the full shared blob, so without this an active user
-    // can strip submissions/notifications added by other users that
-    // hadn't yet landed in this client's local copy. The 250ms debounce
-    // coalesces rapid local edits into a single save round-trip and
-    // avoids stacking concurrent hydrate→merge→save chains when
-    // setWorkflow gets called many times in quick succession.
-    let cancelled = false;
+    // Simple debounced save. We do NOT pre-hydrate here on purpose:
+    // writeRemoteState already runs its own server-side
+    // mergeWorkflowPayload (timestamp-based per-submission merge,
+    // notifications unioned by id) BEFORE upserting, so concurrent
+    // writes from other clients can't strip data. Doing a pre-save
+    // hydrate in this effect was redundant AND was causing auto-save
+    // to skip entire chunks of edits when the merge result happened
+    // to match syncedRef. 250ms debounce just coalesces rapid edits
+    // into one round-trip.
     const localOrgKey = session.orgKey;
-    const timer = setTimeout(async () => {
-      if (cancelled) return;
+    const localWorkflow = workflow;
+    const timer = setTimeout(() => {
       markLocalWorkflowMutation();
-      try {
-        const remote = await hydrateWorkflow(localOrgKey);
-        if (cancelled) return;
-        const remoteSubs = remote?.submissions || {};
-        const localSubs = workflow?.submissions || {};
-        // Per-submission "later updatedAt wins". Avoids both stripping
-        // remote-newer changes (e.g. a manager review that landed
-        // between our last hydrate and this save) AND losing local
-        // edits that haven't synced yet. Falls back to local on tie so
-        // the saving client's view is the tiebreaker.
-        const tsOf = (sub) => {
-          const t = Date.parse(sub?.updatedAt || sub?.submittedAt || sub?.createdAt || '');
-          return Number.isFinite(t) ? t : 0;
-        };
-        const allKeys = new Set([...Object.keys(remoteSubs), ...Object.keys(localSubs)]);
-        const mergedSubs = {};
-        allKeys.forEach((key) => {
-          const r = remoteSubs[key];
-          const l = localSubs[key];
-          if (!r) { if (l) mergedSubs[key] = l; return; }
-          if (!l) { mergedSubs[key] = r; return; }
-          mergedSubs[key] = tsOf(r) > tsOf(l) ? r : l;
-        });
-        const remoteNotifs = Array.isArray(remote?.notifications) ? remote.notifications : [];
-        const localNotifs = Array.isArray(workflow?.notifications) ? workflow.notifications : [];
-        const notifMap = new Map();
-        remoteNotifs.forEach((n) => { if (n?.id) notifMap.set(n.id, n); });
-        localNotifs.forEach((n) => { if (n?.id) notifMap.set(n.id, n); });
-        const merged = {
-          ...(remote || {}),
-          ...workflow,
-          submissions: mergedSubs,
-          notifications: Array.from(notifMap.values()),
-        };
-        const mergedRaw = workflowRaw(merged);
-        if (mergedRaw === syncedWorkflowRawRef.current) return;
-        syncedWorkflowRawRef.current = mergedRaw;
-        // Reflect any remote-only submissions that just landed.
-        setWorkflow(merged);
-        saveWorkflow(localOrgKey, merged);
-      } catch (_) {
-        if (cancelled) return;
-        // Hydrate failed — fall back to a plain save of local state.
-        syncedWorkflowRawRef.current = raw;
-        saveWorkflow(localOrgKey, workflow);
-      }
+      syncedWorkflowRawRef.current = raw;
+      saveWorkflow(localOrgKey, localWorkflow);
     }, 250);
-    return () => {
-      cancelled = true;
-      clearTimeout(timer);
-    };
+    return () => clearTimeout(timer);
   }, [session?.orgKey, workflow, workflowHydrated]);
 
   useEffect(() => {
