@@ -326,6 +326,14 @@ function saveWorkflow(orgKey, workflow) {
   persistWorkflow(orgKey, workflow);
 }
 
+function workflowRaw(workflow) {
+  try {
+    return JSON.stringify(workflow || { submissions: {}, notifications: [] });
+  } catch (_) {
+    return '';
+  }
+}
+
 function getMessagesStorageKey(orgKey = '') {
   return `${MESSAGES_KEY}:${orgKey || 'default'}`;
 }
@@ -1768,6 +1776,7 @@ export default function EmployeePage() {
   const undoDeleteTimerRef = useRef(null);
   const undoRecoverTimerRef = useRef(null);
   const ignoreWorkflowEchoUntilRef = useRef(0);
+  const syncedWorkflowRawRef = useRef(workflowRaw(loadWorkflow(session?.orgKey || '')));
   useEffect(() => () => {
     moveGoalTimersRef.current.forEach((timer) => clearTimeout(timer));
     moveGoalTimersRef.current.clear();
@@ -1848,7 +1857,10 @@ export default function EmployeePage() {
     });
     hydrateWorkflow(session.orgKey).then((wf) => {
       if (!cancelled) {
-        if (wf) setWorkflow(wf);
+        if (wf) {
+          syncedWorkflowRawRef.current = workflowRaw(wf);
+          setWorkflow(wf);
+        }
         setWorkflowHydrated(true);
       }
     });
@@ -1892,12 +1904,17 @@ export default function EmployeePage() {
 
   useEffect(() => {
     if (session?.orgKey) {
-      setWorkflow(loadWorkflow(session.orgKey));
+      const localWorkflow = loadWorkflow(session.orgKey);
+      syncedWorkflowRawRef.current = workflowRaw(localWorkflow);
+      setWorkflow(localWorkflow);
     }
   }, [session?.orgKey]);
 
   useEffect(() => {
     if (session?.orgKey && workflowHydrated) {
+      const raw = workflowRaw(workflow);
+      if (raw && raw === syncedWorkflowRawRef.current) return;
+      syncedWorkflowRawRef.current = raw;
       saveWorkflow(session.orgKey, workflow);
     }
   }, [session?.orgKey, workflow, workflowHydrated]);
@@ -1967,7 +1984,9 @@ export default function EmployeePage() {
     const wfKey = getWorkflowStorageKey(session.orgKey);
     function onWorkflowStorage(e) {
       if (e.key === wfKey) {
-        setWorkflow(loadWorkflow(session.orgKey));
+        const next = loadWorkflow(session.orgKey);
+        syncedWorkflowRawRef.current = workflowRaw(next);
+        setWorkflow(next);
       }
     }
     window.addEventListener('storage', onWorkflowStorage);
@@ -2015,7 +2034,10 @@ export default function EmployeePage() {
       if (Date.now() < ignoreWorkflowEchoUntilRef.current) return;
       void hydrateWorkflow(orgKey).then((wf) => {
         if (Date.now() < ignoreWorkflowEchoUntilRef.current) return;
-        if (wf) setWorkflow(wf);
+        if (wf) {
+          syncedWorkflowRawRef.current = workflowRaw(wf);
+          setWorkflow(wf);
+        }
       });
     });
     const unsubMessages = subscribeToScopedState('messages', orgKey, () => {
