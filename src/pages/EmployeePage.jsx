@@ -322,8 +322,8 @@ function loadWorkflow(orgKey) {
 }
 
 function saveWorkflow(orgKey, workflow) {
-  if (!orgKey) return;
-  persistWorkflow(orgKey, workflow);
+  if (!orgKey) return Promise.resolve(true);
+  return persistWorkflow(orgKey, workflow);
 }
 
 function workflowRaw(workflow) {
@@ -1777,6 +1777,13 @@ export default function EmployeePage() {
   const undoRecoverTimerRef = useRef(null);
   const ignoreWorkflowEchoUntilRef = useRef(0);
   const syncedWorkflowRawRef = useRef(workflowRaw(loadWorkflow(session?.orgKey || '')));
+  // Save indicator state. 'idle' = no recent edits; 'saving' = a remote
+  // write is in flight; 'saved' = last write succeeded (with timestamp);
+  // 'failed' = the most recent write threw. We surface this in the
+  // top-bar so the user can see at a glance whether their work is
+  // being persisted.
+  const [saveStatus, setSaveStatus] = useState('idle');
+  const [lastSavedAt, setLastSavedAt] = useState(null);
   useEffect(() => () => {
     moveGoalTimersRef.current.forEach((timer) => clearTimeout(timer));
     moveGoalTimersRef.current.clear();
@@ -1910,25 +1917,43 @@ export default function EmployeePage() {
     }
   }, [session?.orgKey]);
 
+  // Step 1 — IMMEDIATE localStorage cache write on every edit. Sync,
+  // no debounce, no remote round-trip. Guarantees that even if Supabase
+  // is unreachable or the user refreshes a millisecond after typing,
+  // the last typed state is in localStorage and rehydrates on next
+  // load (hydrateWorkflow already falls back to localStorage when
+  // remote is empty / errors out).
+  useEffect(() => {
+    if (!session?.orgKey || !workflowHydrated) return;
+    try {
+      const key = `${GOAL_WORKFLOW_KEY}:${session.orgKey}`;
+      window.localStorage.setItem(key, JSON.stringify(workflow));
+    } catch (_) { /* quota or storage blocked */ }
+  }, [session?.orgKey, workflow, workflowHydrated]);
+
+  // Step 2 — Debounced remote save with status tracking. writeRemoteState
+  // already runs its own server-side mergeWorkflowPayload before each
+  // upsert, so concurrent writes from other clients can't strip data.
   useEffect(() => {
     if (!session?.orgKey || !workflowHydrated) return undefined;
     const raw = workflowRaw(workflow);
     if (raw && raw === syncedWorkflowRawRef.current) return undefined;
-    // Simple debounced save. We do NOT pre-hydrate here on purpose:
-    // writeRemoteState already runs its own server-side
-    // mergeWorkflowPayload (timestamp-based per-submission merge,
-    // notifications unioned by id) BEFORE upserting, so concurrent
-    // writes from other clients can't strip data. Doing a pre-save
-    // hydrate in this effect was redundant AND was causing auto-save
-    // to skip entire chunks of edits when the merge result happened
-    // to match syncedRef. 250ms debounce just coalesces rapid edits
-    // into one round-trip.
     const localOrgKey = session.orgKey;
     const localWorkflow = workflow;
     const timer = setTimeout(() => {
       markLocalWorkflowMutation();
       syncedWorkflowRawRef.current = raw;
-      saveWorkflow(localOrgKey, localWorkflow);
+      setSaveStatus('saving');
+      Promise.resolve(saveWorkflow(localOrgKey, localWorkflow))
+        .then((ok) => {
+          if (ok === false) {
+            setSaveStatus('failed');
+          } else {
+            setSaveStatus('saved');
+            setLastSavedAt(Date.now());
+          }
+        })
+        .catch(() => setSaveStatus('failed'));
     }, 250);
     return () => clearTimeout(timer);
   }, [session?.orgKey, workflow, workflowHydrated]);
@@ -5995,6 +6020,39 @@ export default function EmployeePage() {
           )}
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
+          {/* Save-status indicator — gives the user a clear signal that
+              their edits are being persisted (or warned if not). */}
+          {(() => {
+            if (saveStatus === 'idle') return null;
+            const meta = saveStatus === 'saving'
+              ? { label: 'Saving…', color: '#2563EB', bg: '#EFF6FF', border: '#BFDBFE', icon: (
+                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" style={{ animation: 'savePulse 900ms linear infinite' }}>
+                    <circle cx="12" cy="12" r="9" strokeOpacity=".25" />
+                    <path d="M21 12a9 9 0 0 1-9 9" />
+                  </svg>
+                ) }
+              : saveStatus === 'saved'
+              ? { label: lastSavedAt ? `Saved · ${formatRelativeTime(lastSavedAt)}` : 'Saved', color: '#15803D', bg: '#F0FDF4', border: '#BBF7D0', icon: (
+                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+                ) }
+              : { label: 'Save failed — retrying', color: '#B91C1C', bg: '#FEF2F2', border: '#FECACA', icon: (
+                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+                ) };
+            return (
+              <>
+                <style>{`@keyframes savePulse{0%{transform:rotate(0deg)}100%{transform:rotate(360deg)}}`}</style>
+                <div title={meta.label} style={{
+                  display: 'inline-flex', alignItems: 'center', gap: 5,
+                  padding: '4px 10px', borderRadius: 999,
+                  background: meta.bg, border: `1px solid ${meta.border}`, color: meta.color,
+                  fontSize: 11.5, fontWeight: 700, whiteSpace: 'nowrap',
+                }}>
+                  {meta.icon}
+                  {meta.label}
+                </div>
+              </>
+            );
+          })()}
           <button
             type="button"
             onClick={() => setActiveSection('profile')}

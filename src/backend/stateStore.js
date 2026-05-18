@@ -1117,7 +1117,11 @@ export async function hydrateWorkflow(orgKey = '') {
 export function persistWorkflow(orgKey, payload, options = {}) {
   const key = `${GOAL_WORKFLOW_KEY}:${orgKey || 'default'}`;
   writeLocalJson(key, payload, { emit: true });
-  void writeRemoteState('workflow', orgKey, payload, options);
+  // Return the remote-write promise so callers can show a save-status
+  // indicator and react to failure (e.g. surface "Saved" vs "Failed").
+  // Falls back to a resolved-true if Supabase isn't configured.
+  const remote = writeRemoteState('workflow', orgKey, payload, options);
+  return remote && typeof remote.then === 'function' ? remote : Promise.resolve(true);
 }
 
 export function readMessagesSync(orgKey = '') {
