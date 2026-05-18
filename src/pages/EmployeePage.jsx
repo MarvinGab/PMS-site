@@ -2105,46 +2105,45 @@ export default function EmployeePage() {
         const incomingRaw = workflowRaw(wf);
         if (incomingRaw === syncedWorkflowRawRef.current) return;
 
-        // Per-submission "later updatedAt wins" merge. The shared
-        // workflow blob race means a delayed realtime echo can arrive
-        // with a STALE copy of this user's own submission — without the
-        // goal they just dragged in or edited a moment ago. We compare
-        // updatedAt timestamps and keep whichever side wrote last.
-        // updateMySubmission stamps a fresh updatedAt on every edit, so
-        // an actively-typing user always beats a stale echo. A manager
-        // who just reviewed after our last save legitimately wins
-        // because their write IS newer. Same goes for missing-on-incoming
-        // submissions: we splice those local-only entries back in so
-        // other users' tiles never blank out on this screen either.
+        // Bulletproof merge: the user's OWN submission is owned by this
+        // client. Realtime echoes — which can race with in-flight local
+        // edits and arrive with stale data — never overwrite the local
+        // copy of our own submission. For everyone else's submissions
+        // we accept the incoming version (managers, peers etc. own
+        // their own records). Local-only submissions that are missing
+        // from the incoming snapshot are spliced back in too so other
+        // people's tiles don't blank out on this screen.
+        // Trade-off: if a manager reviews our submission while we're
+        // active, we won't see the review status via realtime — we'll
+        // pick it up on the next save's pre-save remote merge (which
+        // still uses timestamp comparison) or on a manual refresh.
+        // That's a much smaller cost than goals flickering away while
+        // someone is trying to type into them.
         setWorkflow((prev) => {
           const prevSubs = prev?.submissions || {};
           const incomingSubs = wf.submissions || {};
-          const tsOf = (sub) => {
-            const t = Date.parse(sub?.updatedAt || sub?.submittedAt || sub?.createdAt || '');
-            return Number.isFinite(t) ? t : 0;
-          };
-          const mergedSubs = { ...incomingSubs };
-          let needsMerge = false;
-          Object.keys(prevSubs).forEach((key) => {
-            const localSub = prevSubs[key];
-            if (!localSub) return;
-            const incomingSub = incomingSubs[key];
-            if (!incomingSub) {
-              mergedSubs[key] = localSub;
-              needsMerge = true;
-              return;
-            }
-            if (tsOf(localSub) > tsOf(incomingSub)) {
-              mergedSubs[key] = localSub;
-              needsMerge = true;
+          const mergedSubs = {};
+          // Start from incoming so we pick up new/updated submissions
+          // for OTHER users.
+          Object.keys(incomingSubs).forEach((key) => {
+            if (key === employeeCodeKey && prevSubs[key]) {
+              // Hands off our own submission — keep local.
+              mergedSubs[key] = prevSubs[key];
+            } else {
+              mergedSubs[key] = incomingSubs[key];
             }
           });
-          if (!needsMerge) {
-            syncedWorkflowRawRef.current = incomingRaw;
-            return wf;
-          }
+          // Splice in any local submissions the incoming snapshot was
+          // missing (covers the "stale client stripped someone" race).
+          Object.keys(prevSubs).forEach((key) => {
+            if (prevSubs[key] && !mergedSubs[key]) {
+              mergedSubs[key] = prevSubs[key];
+            }
+          });
           const merged = { ...wf, submissions: mergedSubs };
-          syncedWorkflowRawRef.current = workflowRaw(merged);
+          const mergedRaw = workflowRaw(merged);
+          if (mergedRaw === syncedWorkflowRawRef.current) return prev;
+          syncedWorkflowRawRef.current = mergedRaw;
           return merged;
         });
       });
