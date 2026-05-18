@@ -1911,12 +1911,57 @@ export default function EmployeePage() {
   }, [session?.orgKey]);
 
   useEffect(() => {
-    if (session?.orgKey && workflowHydrated) {
-      const raw = workflowRaw(workflow);
-      if (raw && raw === syncedWorkflowRawRef.current) return;
-      syncedWorkflowRawRef.current = raw;
-      saveWorkflow(session.orgKey, workflow);
-    }
+    if (!session?.orgKey || !workflowHydrated) return undefined;
+    const raw = workflowRaw(workflow);
+    if (raw && raw === syncedWorkflowRawRef.current) return undefined;
+    // Debounce + pre-save merge with the latest remote workflow. Each
+    // client writes the full shared blob, so without this an active user
+    // can strip submissions/notifications added by other users that
+    // hadn't yet landed in this client's local copy. The 250ms debounce
+    // coalesces rapid local edits into a single save round-trip and
+    // avoids stacking concurrent hydrate→merge→save chains when
+    // setWorkflow gets called many times in quick succession.
+    let cancelled = false;
+    const localOrgKey = session.orgKey;
+    const timer = setTimeout(async () => {
+      if (cancelled) return;
+      markLocalWorkflowMutation();
+      try {
+        const remote = await hydrateWorkflow(localOrgKey);
+        if (cancelled) return;
+        const remoteSubs = remote?.submissions || {};
+        const localSubs = workflow?.submissions || {};
+        // Local wins where both sides have a submission (the local user
+        // just edited it). Remote-only submissions are preserved.
+        const mergedSubs = { ...remoteSubs, ...localSubs };
+        const remoteNotifs = Array.isArray(remote?.notifications) ? remote.notifications : [];
+        const localNotifs = Array.isArray(workflow?.notifications) ? workflow.notifications : [];
+        const notifMap = new Map();
+        remoteNotifs.forEach((n) => { if (n?.id) notifMap.set(n.id, n); });
+        localNotifs.forEach((n) => { if (n?.id) notifMap.set(n.id, n); });
+        const merged = {
+          ...(remote || {}),
+          ...workflow,
+          submissions: mergedSubs,
+          notifications: Array.from(notifMap.values()),
+        };
+        const mergedRaw = workflowRaw(merged);
+        if (mergedRaw === syncedWorkflowRawRef.current) return;
+        syncedWorkflowRawRef.current = mergedRaw;
+        // Reflect any remote-only submissions that just landed.
+        setWorkflow(merged);
+        saveWorkflow(localOrgKey, merged);
+      } catch (_) {
+        if (cancelled) return;
+        // Hydrate failed — fall back to a plain save of local state.
+        syncedWorkflowRawRef.current = raw;
+        saveWorkflow(localOrgKey, workflow);
+      }
+    }, 250);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
   }, [session?.orgKey, workflow, workflowHydrated]);
 
   useEffect(() => {
@@ -1969,7 +2014,14 @@ export default function EmployeePage() {
         },
       };
     });
-  }, [session, config, configHydrated, workflowHydrated, employee, employeeCodeKey, currentPhase, managerCode, employeeGroup]);
+    // Track whether this employee currently has a submission — when a
+    // realtime sync brings down a workflow that's missing our submission
+    // (e.g. we just provisioned it locally and the Supabase round-trip
+    // hasn't returned the updated row yet), we want this effect to
+    // re-fire and re-create the record so the page never shows the
+    // "Preparing your goal plan" empty state while the network catches up.
+    // The idempotent JSON.stringify guard inside protects against loops.
+  }, [session, config, configHydrated, workflowHydrated, employee, employeeCodeKey, currentPhase, managerCode, employeeGroup, !!workflow?.submissions?.[employeeCodeKey]]);
 
   useEffect(() => {
     if (!session) {
@@ -2034,10 +2086,37 @@ export default function EmployeePage() {
       if (Date.now() < ignoreWorkflowEchoUntilRef.current) return;
       void hydrateWorkflow(orgKey).then((wf) => {
         if (Date.now() < ignoreWorkflowEchoUntilRef.current) return;
-        if (wf) {
-          syncedWorkflowRawRef.current = workflowRaw(wf);
-          setWorkflow(wf);
-        }
+        if (!wf) return;
+        const incomingRaw = workflowRaw(wf);
+        if (incomingRaw === syncedWorkflowRawRef.current) return;
+
+        // Race-protection merge: the shared workflow is a single blob,
+        // and any client saving with a stale local copy can strip
+        // submissions belonging to other users from Supabase. When the
+        // realtime echo arrives missing ANY submission we still have
+        // locally, splice those back in instead of clobbering. Covers
+        // the cases that caused the "Preparing your goal plan" flash
+        // for active employees AND the team-tile 0%↔100% flicker on a
+        // manager's screen.
+        setWorkflow((prev) => {
+          const prevSubs = prev?.submissions || {};
+          const incomingSubs = wf.submissions || {};
+          let needsMerge = false;
+          const mergedSubs = { ...incomingSubs };
+          Object.keys(prevSubs).forEach((key) => {
+            if (prevSubs[key] && !incomingSubs[key]) {
+              mergedSubs[key] = prevSubs[key];
+              needsMerge = true;
+            }
+          });
+          if (!needsMerge) {
+            syncedWorkflowRawRef.current = incomingRaw;
+            return wf;
+          }
+          const merged = { ...wf, submissions: mergedSubs };
+          syncedWorkflowRawRef.current = workflowRaw(merged);
+          return merged;
+        });
       });
     });
     const unsubMessages = subscribeToScopedState('messages', orgKey, () => {
