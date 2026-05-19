@@ -52,6 +52,15 @@ function formatRelativeDate(iso) {
 /* ── Workflow helpers (shared shape with EmployeePage) ───── */
 function normalizeCodeStr(value) { return String(value || '').trim().toLowerCase(); }
 function workflowStorageKey(orgKey) { return `${GOAL_WORKFLOW_KEY}:${orgKey || 'default'}`; }
+function getWorkflowActiveGoals(goals = []) {
+  return (Array.isArray(goals) ? goals : []).filter((goal) => !goal?.deletedAt);
+}
+function getWorkflowGoalWeight(goals = []) {
+  return getWorkflowActiveGoals(goals).reduce((sum, goal) => {
+    const weight = Number(goal?.weight);
+    return Number.isFinite(weight) && weight > 0 ? sum + weight : sum;
+  }, 0);
+}
 function loadWorkflowState(orgKey) {
   if (!orgKey) return { submissions: {}, notifications: [] };
   return readWorkflowSync(orgKey);
@@ -965,7 +974,7 @@ async function downloadEmpStatusExcel({ employees, credentials, workflow, orgNam
   employees.forEach((emp, i) => {
     const code = String(emp['Employee Code'] || '').trim();
     const sub  = workflow?.submissions?.[code.toLowerCase()] || workflow?.submissions?.[code] || {};
-    const goals = Array.isArray(sub.goals) ? sub.goals.length : 0;
+    const goals = getWorkflowActiveGoals(sub.goals).length;
     const stage = EMP_STAGES.find((s) => s.id === getEmpStage(emp))?.label || getEmpStage(emp);
 
     const dataRow = ws.addRow({
@@ -2866,6 +2875,17 @@ function ModuleStageControl({ employees, onUpdate, orgKey }) {
       const existing = nextSubs[key] || null;
       const prevStatus = existing?.status || null;
       const newStatus = stageToStatus(targetStage);
+      const activeGoalCount = getWorkflowActiveGoals(existing?.goals).length;
+      const activeGoalWeight = getWorkflowGoalWeight(existing?.goals);
+      if ((newStatus === 'pending-manager' || newStatus === 'approved') && (!activeGoalCount || Math.abs(activeGoalWeight - 100) > 0.01)) {
+        newNotifs.push(makeNotif('stage-change-blocked', {
+          recipientCode: emp['Employee Code'],
+          submissionCode: emp['Employee Code'],
+          title: 'Stage change skipped',
+          message: `HR tried to move this record to ${targetStage}, but the active goals total ${activeGoalWeight || 0}%. Complete the goal plan to 100% first.`,
+        }));
+        return;
+      }
       const managerCode = String(emp['Reporting Manager Code'] || '').trim();
       const employeeName = emp['Employee Name'] || emp['Employee Code'];
       const next = {
@@ -2957,6 +2977,21 @@ function ModuleStageControl({ employees, onUpdate, orgKey }) {
     });
   }, [employees, search, filterStage]);
 
+  function stageChangeInvalidForCode(code, stageId, wf = loadWorkflowState(orgKey)) {
+    const nextStatus = stageToStatus(stageId);
+    if (nextStatus !== 'pending-manager' && nextStatus !== 'approved') return false;
+    const key = normalizeCodeStr(code);
+    const sub = wf?.submissions?.[key] || null;
+    const activeCount = getWorkflowActiveGoals(sub?.goals).length;
+    const activeWeight = getWorkflowGoalWeight(sub?.goals);
+    return !activeCount || Math.abs(activeWeight - 100) > 0.01;
+  }
+
+  function stageSelectionInvalidCount(stageId) {
+    const wf = loadWorkflowState(orgKey);
+    return Array.from(selected).filter((code) => stageChangeInvalidForCode(code, stageId, wf)).length;
+  }
+
   function toggleAllVisible() {
     const allCodes = new Set(filtered.map((e) => e['Employee Code']));
     const allSelected = filtered.length > 0 && filtered.every((e) => selected.has(e['Employee Code']));
@@ -2966,13 +3001,23 @@ function ModuleStageControl({ employees, onUpdate, orgKey }) {
 
   function applySelected() {
     if (!selected.size) return;
-    const updated = employees.map((e) => selected.has(e['Employee Code']) ? { ...e, _pmsStage: targetStage } : e);
+    const wf = loadWorkflowState(orgKey);
+    const validSelected = Array.from(selected).filter((code) => !stageChangeInvalidForCode(code, targetStage, wf));
+    const blockedCount = selected.size - validSelected.length;
+    if (validSelected.length === 0) {
+      showToast('Stage change skipped: active goals must total 100% first');
+      return;
+    }
+    const validSet = new Set(validSelected);
+    const updated = employees.map((e) => validSet.has(e['Employee Code']) ? { ...e, _pmsStage: targetStage } : e);
     onUpdate(updated);
     // Keep the workflow submissions + notifications in sync with the stage change.
     const codeToTarget = new Map();
-    selected.forEach((code) => { codeToTarget.set(code, targetStage); });
+    validSelected.forEach((code) => { codeToTarget.set(code, targetStage); });
     syncWorkflowForStageChange(codeToTarget);
-    showToast(`${selected.size} employee${selected.size !== 1 ? 's' : ''} moved to "${EMP_STAGES.find((s) => s.id === targetStage)?.label}"`);
+    showToast(blockedCount
+      ? `${validSelected.length} moved · ${blockedCount} skipped until goals total 100%`
+      : `${validSelected.length} employee${validSelected.length !== 1 ? 's' : ''} moved to "${EMP_STAGES.find((s) => s.id === targetStage)?.label}"`);
     setSelected(new Set());
   }
 
@@ -3073,8 +3118,16 @@ function ModuleStageControl({ employees, onUpdate, orgKey }) {
     if (!bulkPreview) return;
     const okRows = bulkPreview.filter((r) => r.status === 'ok' && (r.toId || bulkOverride));
     if (!okRows.length) return;
+    const wf = loadWorkflowState(orgKey);
+    const validRows = okRows.filter((r) => !stageChangeInvalidForCode(r.code, r.toId || bulkOverride, wf));
+    const blockedCount = okRows.length - validRows.length;
+    if (!validRows.length) {
+      showToast('Stage changes skipped: active goals must total 100% first');
+      setBulkPreview(null);
+      return;
+    }
     const codeToTarget = new Map();
-    okRows.forEach((r) => { codeToTarget.set(r.code.toLowerCase(), r.toId || bulkOverride); });
+    validRows.forEach((r) => { codeToTarget.set(r.code.toLowerCase(), r.toId || bulkOverride); });
     const updated = employees.map((e) => {
       const code = String(e['Employee Code'] || '').trim().toLowerCase();
       const target = codeToTarget.get(code);
@@ -3082,7 +3135,7 @@ function ModuleStageControl({ employees, onUpdate, orgKey }) {
     });
     onUpdate(updated);
     syncWorkflowForStageChange(codeToTarget);
-    showToast(`${okRows.length} employee${okRows.length !== 1 ? 's' : ''} updated`);
+    showToast(blockedCount ? `${validRows.length} updated · ${blockedCount} skipped until goals total 100%` : `${validRows.length} employee${validRows.length !== 1 ? 's' : ''} updated`);
     setBulkPreview(null);
   }
 
@@ -3109,6 +3162,7 @@ function ModuleStageControl({ employees, onUpdate, orgKey }) {
   const okCount = bulkPreview ? bulkPreview.filter((r) => r.status === 'ok').length : 0;
   const mismatchCount = bulkPreview ? bulkPreview.filter((r) => r.status === 'mismatch').length : 0;
   const errorCount = bulkPreview ? bulkPreview.filter((r) => r.status === 'error').length : 0;
+  const invalidStageSelectionCount = selected.size > 0 ? stageSelectionInvalidCount(targetStage) : 0;
 
   return (
     <div style={{ position: 'relative', paddingBottom: selected.size > 0 ? 90 : 0 }}>
@@ -3299,6 +3353,11 @@ function ModuleStageControl({ employees, onUpdate, orgKey }) {
                 <select value={targetStage} onChange={(e) => setTargetStage(e.target.value)} style={{ ...inputStyle, minWidth: 200, fontWeight: 600 }}>
                   {EMP_STAGES.filter((s) => s.id !== 'exempt').map((s) => <option key={s.id} value={s.id}>{s.label}</option>)}
                 </select>
+                {invalidStageSelectionCount > 0 && (
+                  <span style={{ fontSize: 11.5, fontWeight: 700, color: '#B45309', background: '#FFFBEB', border: '1px solid #FDE68A', borderRadius: 999, padding: '5px 10px' }}>
+                    {invalidStageSelectionCount} need active goals at 100%
+                  </span>
+                )}
                 <button type="button" onClick={applySelected} style={btnP}>Apply change</button>
                 <button type="button" onClick={() => setSelected(new Set())} style={btnS}>Clear</button>
                 {/* Danger zone — visually separated so it can't be misclicked
@@ -3710,11 +3769,26 @@ function ModuleGrpTransfer({ employees, groups, goalLibraries = [], onUpdate, or
     saveWorkflowState(orgKey, { ...wf, submissions });
     return { cleared: true, kept: false };
   }
+  function getTransferResetImpact(code) {
+    if (!orgKey || !code) return { clears: false, kept: false, activeGoals: 0 };
+    const wf = loadWorkflowState(orgKey) || { submissions: {}, notifications: [] };
+    const submissions = wf.submissions || {};
+    const key = normalizeCodeStr(code);
+    const matchKey = Object.keys(submissions).find((k) => normalizeCodeStr(k) === key);
+    if (!matchKey) return { clears: false, kept: false, activeGoals: 0 };
+    const submission = submissions[matchKey] || {};
+    const activeGoals = getWorkflowActiveGoals(submission.goals).length;
+    if (submission.status === 'approved' || submission.status === 'manager_approved' || submission.status === 'completed') {
+      return { clears: false, kept: true, activeGoals };
+    }
+    return { clears: activeGoals > 0 || !!submission.status, kept: false, activeGoals };
+  }
   const [mode, setMode]       = useState('single');
   const [search, setSearch]   = useState('');
   const [selected, setSelected] = useState(null);
   const [targetGrp, setTargetGrp] = useState('');
   const [routingValue, setRoutingValue] = useState('');
+  const [confirmDraftReset, setConfirmDraftReset] = useState(false);
   const [bulkPreview, setBulkPreview] = useState(null);
   const [toast, setToast]     = useState(null);
   const fileRef = useRef(null);
@@ -3750,10 +3824,16 @@ function ModuleGrpTransfer({ employees, groups, goalLibraries = [], onUpdate, or
     setRoutingValue(valid ? current : '');
   }, [needsRouting, selected, targetSegmentAttr, targetSegmentValues]);
 
+  useEffect(() => {
+    setConfirmDraftReset(false);
+  }, [selected, targetGrp, routingValue]);
+
   function applyChange() {
     if (!selected || !targetGrp) return;
     if (needsRouting && !routingValue) return;
     const code = selected['Employee Code'];
+    const resetImpact = getTransferResetImpact(code);
+    if (resetImpact.clears && !confirmDraftReset) return;
     const baseForMeta = { ...selected, 'Group Name': targetGrp, assignedGoalGroupName: targetGrp };
     if (needsRouting) baseForMeta[targetSegmentAttr] = routingValue;
     const patch = {
@@ -3769,7 +3849,7 @@ function ModuleGrpTransfer({ employees, groups, goalLibraries = [], onUpdate, or
       ? `${selected['Employee Name'] || code} → "${targetGrp}" as ${targetSegmentAttr} "${routingValue}"`
       : `${selected['Employee Name'] || code} transferred to "${targetGrp}"`;
     showToast(resetResult.kept ? `${baseMsg} · existing approved goals kept` : baseMsg);
-    setSelected(null); setSearch(''); setTargetGrp(''); setRoutingValue('');
+    setSelected(null); setSearch(''); setTargetGrp(''); setRoutingValue(''); setConfirmDraftReset(false);
   }
 
   async function handleFile(e) {
@@ -3795,10 +3875,11 @@ function ModuleGrpTransfer({ employees, groups, goalLibraries = [], onUpdate, or
       const sheetRoutingVal = String(r.col3 || '').trim();
       const currentVal = needsAttr && emp ? String(sheetRoutingVal || emp[attr] || '').trim() : '';
       const routingOk = !needsAttr || allowed.some((v) => v.toLowerCase() === currentVal.toLowerCase());
+      const resetImpact = emp && grpValid && routingOk ? getTransferResetImpact(emp['Employee Code']) : { clears: false, kept: false, activeGoals: 0 };
       return {
         code: r.col1, name: emp?.['Employee Name'], newGroup: r.col2,
         found: !!emp, grpValid,
-        needsAttr, attr, currentVal, routingOk, allowed,
+        needsAttr, attr, currentVal, routingOk, allowed, resetImpact,
       };
     }));
     e.target.value = '';
@@ -3853,7 +3934,8 @@ function ModuleGrpTransfer({ employees, groups, goalLibraries = [], onUpdate, or
 
   const currentGrp = selected?.['Group Name'] || selected?.assignedGoalGroupName || '';
   const sameGroup = !!(selected && targetGrp && String(currentGrp).trim() === String(targetGrp).trim());
-  const canSubmit = !!selected && !!targetGrp && !sameGroup && (!needsRouting || !!routingValue);
+  const selectedResetImpact = selected && targetGrp && !sameGroup ? getTransferResetImpact(selected['Employee Code']) : { clears: false, kept: false, activeGoals: 0 };
+  const canSubmit = !!selected && !!targetGrp && !sameGroup && (!needsRouting || !!routingValue) && (!selectedResetImpact.clears || confirmDraftReset);
 
   return (
     <div style={{ position: 'relative', maxWidth: 580 }}>
@@ -3974,6 +4056,21 @@ function ModuleGrpTransfer({ employees, groups, goalLibraries = [], onUpdate, or
               </span>
             </div>
           )}
+          {selected && targetGrp && !sameGroup && selectedResetImpact.clears && (
+            <label style={{ display: 'flex', gap: 10, alignItems: 'flex-start', padding: '12px 14px', background: '#FFF7ED', border: '1.5px solid #FED7AA', borderRadius: 12, color: '#9A3412', fontSize: 12.5, lineHeight: 1.45 }}>
+              <input
+                type="checkbox"
+                checked={confirmDraftReset}
+                onChange={(e) => setConfirmDraftReset(e.target.checked)}
+                style={{ marginTop: 2, accentColor: '#EA580C' }}
+              />
+              <span>
+                This transfer will clear the employee&apos;s current draft/pending goal plan
+                {selectedResetImpact.activeGoals ? ` (${selectedResetImpact.activeGoals} active goal${selectedResetImpact.activeGoals === 1 ? '' : 's'})` : ''}.
+                The new group library will be loaded when they open My Goals.
+              </span>
+            </label>
+          )}
           {sameGroup && (
             <div style={{ padding: '10px 14px', background: '#FFF7ED', border: '1px solid #FED7AA', borderRadius: 10, fontSize: 12.5, color: '#9A3412' }}>
               This employee is already in <strong>{targetGrp}</strong>. Pick a different group.
@@ -4028,10 +4125,20 @@ function ModuleGrpTransfer({ employees, groups, goalLibraries = [], onUpdate, or
                         </span>
                       )}
                       {r.found && r.grpValid && r.routingOk && <span style={{ fontSize: 11, fontWeight: 600, color: '#15803D', background: '#F0FDF4', borderRadius: 5, padding: '2px 7px' }}>✓ Valid</span>}
+                      {r.found && r.grpValid && r.routingOk && r.resetImpact?.clears && (
+                        <span style={{ marginLeft: 6, fontSize: 11, fontWeight: 700, color: '#9A3412', background: '#FFF7ED', borderRadius: 5, padding: '2px 7px' }}>
+                          clears draft goals
+                        </span>
+                      )}
                     </td>
                   </tr>)}</tbody>
                 </table>
               </div>
+              {bulkPreview.some((r) => r.found && r.grpValid && r.routingOk && r.resetImpact?.clears) && (
+                <div style={{ marginBottom: 10, padding: '10px 12px', borderRadius: 10, background: '#FFF7ED', border: '1px solid #FED7AA', color: '#9A3412', fontSize: 12.5, fontWeight: 600 }}>
+                  Valid rows marked "clears draft goals" will reset draft/pending goal plans so the new group library can load cleanly.
+                </div>
+              )}
               <div style={{ display: 'flex', gap: 8 }}><button type="button" onClick={applyBulk} style={btnP}>Apply</button><button type="button" onClick={() => setBulkPreview(null)} style={btnS}>Cancel</button></div>
             </div>
           )}

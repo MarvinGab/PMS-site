@@ -3263,7 +3263,7 @@ export default function EmployeePage() {
       <div>
         {/* Critical alerts only — no "Draft in progress" tile when status is draft */}
         {mySubmission.status !== 'draft' && (() => {
-          const reviewed = (mySubmission.goals || []).filter((g) => g.reviewStatus === 'approved' || g.reviewStatus === 'rejected');
+          const reviewed = getReviewableGoals(mySubmission.goals || []).filter((g) => g.reviewStatus === 'approved' || g.reviewStatus === 'rejected');
           const approvedCount = reviewed.filter((g) => g.reviewStatus === 'approved').length;
           const rejectedCount = reviewed.filter((g) => g.reviewStatus === 'rejected').length;
           const hasBreakdown = reviewed.length > 0;
