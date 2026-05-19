@@ -42,6 +42,14 @@ function isDeletedGoalExpired(goal, now = Date.now()) {
   return (now - ts) >= DELETED_GOAL_RETENTION_MS;
 }
 
+function getActiveGoals(goals = []) {
+  return (goals || []).filter((goal) => !goal?.deletedAt);
+}
+
+function getReviewableGoals(goals = []) {
+  return getActiveGoals(goals).filter((goal) => !isDeletedGoalExpired(goal));
+}
+
 function deletedGoalDaysRemaining(goal, now = Date.now()) {
   if (!goal?.deletedAt) return null;
   const ts = Date.parse(goal.deletedAt);
@@ -2173,7 +2181,7 @@ export default function EmployeePage() {
   // filter so expired entries are invisible in the UI even before the
   // periodic purge effect runs.
   const allMyGoals = mySubmission?.goals || [];
-  const myGoals = allMyGoals.filter((g) => !g.deletedAt);
+  const myGoals = getActiveGoals(allMyGoals);
   const deletedGoals = allMyGoals.filter((g) => g.deletedAt && !isDeletedGoalExpired(g));
   const goalMetrics = getGoalPlanMetrics(myGoals, effectiveConfig, accessMode);
   const myStatusMeta = getSubmissionStatusMeta(mySubmission);
@@ -2683,6 +2691,7 @@ export default function EmployeePage() {
 
     const decidedAt = new Date().toISOString();
     const updatedGoals = (current.goals || []).map((goal) => {
+      if (goal.deletedAt) return goal;
       // Already approved in a prior round — locked, unchanged.
       if (goal.reviewStatus === 'approved') return goal;
       let status = 'approved';
@@ -2715,10 +2724,11 @@ export default function EmployeePage() {
       };
     });
 
-    const anyRejected = updatedGoals.some((g) => g.reviewStatus === 'rejected');
+    const activeUpdatedGoals = getReviewableGoals(updatedGoals);
+    const anyRejected = activeUpdatedGoals.some((g) => g.reviewStatus === 'rejected');
     const submissionStatus = anyRejected ? 'sent-back' : 'approved';
-    const rejectedCount = updatedGoals.filter((g) => g.reviewStatus === 'rejected').length;
-    const approvedCount = updatedGoals.length - rejectedCount;
+    const rejectedCount = activeUpdatedGoals.filter((g) => g.reviewStatus === 'rejected').length;
+    const approvedCount = activeUpdatedGoals.length - rejectedCount;
 
     workflowDirtyRef.current = true;
     markLocalWorkflowMutation();
@@ -4877,7 +4887,7 @@ export default function EmployeePage() {
 
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(300px, 1fr))', gap: 8 }}>
         {visible.map(({ report, reportCode, submission, bucket }) => {
-          const reportGoals = submission?.goals || [];
+          const reportGoals = getReviewableGoals(submission?.goals || []);
           const reportGroup = getEmployeeGoalGroup(config, report);
           const reportOverrides = resolveGroupAccess(reportGroup);
           const reportEffectiveConfig = reportOverrides ? { ...config, ...reportOverrides } : config;
@@ -4960,8 +4970,9 @@ export default function EmployeePage() {
                   // Stops propagation so the row's click-to-toggle doesn't
                   // collapse the panel while you're acting on it.
                   const picksLocal = goalReviewPicks[reportCode] || {};
-                  const pendingGoalsLocal = (submission.goals || []).filter((g) => g.reviewStatus !== 'approved');
-                  const lockedGoalsLocal = (submission.goals || []).filter((g) => g.reviewStatus === 'approved');
+                  const reviewableGoalsLocal = getReviewableGoals(submission.goals || []);
+                  const pendingGoalsLocal = reviewableGoalsLocal.filter((g) => g.reviewStatus !== 'approved');
+                  const lockedGoalsLocal = reviewableGoalsLocal.filter((g) => g.reviewStatus === 'approved');
                   const rejectedCount = Object.values(picksLocal).filter((p) => p.status === 'reject').length;
                   const approvedCount = pendingGoalsLocal.filter((g) => picksLocal[g.id]?.status === 'approve').length;
                   const brokenCount = pendingGoalsLocal.filter((g) => !isGoalStructurallyValid(g, reportEffectiveConfig)).length;
@@ -5173,8 +5184,9 @@ export default function EmployeePage() {
     };
 
     const picks = goalReviewPicks[submission.employeeCode] || {};
-    const pendingGoals = (submission.goals || []).filter((g) => g.reviewStatus !== 'approved');
-    const lockedGoals = (submission.goals || []).filter((g) => g.reviewStatus === 'approved');
+    const reviewableGoals = getReviewableGoals(submission.goals || []);
+    const pendingGoals = reviewableGoals.filter((g) => g.reviewStatus !== 'approved');
+    const lockedGoals = reviewableGoals.filter((g) => g.reviewStatus === 'approved');
     const rejectedPickCount = Object.values(picks).filter((p) => p.status === 'reject').length;
     const approvedPickCount = pendingGoals.filter((g) => picks[g.id]?.status === 'approve').length;
     // Pending goals that are structurally broken — they can never be approved. "Approve all"
@@ -5198,7 +5210,7 @@ export default function EmployeePage() {
             Tip: you can approve or reject individual goals as well — pick per-goal, then hit Submit.
           </div>
         )}
-        {(submission.goals || []).map((goal, goalIndex) => {
+        {reviewableGoals.map((goal, goalIndex) => {
           const color = getPerspectiveColor(goal, activePerspectives, goalIndex);
           const locked = goal.reviewStatus === 'approved';
           const broken = !isGoalStructurallyValid(goal, reviewEffectiveConfig);
