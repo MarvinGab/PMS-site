@@ -280,12 +280,13 @@ function getEmpStage(emp) {
   return emp?._pmsStage || 'goal-creation';
 }
 
-function getEmployeeDisplayGroup(emp, fallback = '—') {
+function getEmployeeDisplayGroup(emp, fallback = '—', groups = []) {
   const raw = String(emp?.['Group Name'] || emp?.assignedGoalGroupName || '').trim();
   if (emp?._outsidePms || raw === OUTSIDE_PMS_GROUP_VALUE || raw.toUpperCase() === OUTSIDE_PMS_GROUP_LABEL) {
     return OUTSIDE_PMS_GROUP_LABEL;
   }
-  return raw || fallback;
+  const canonical = (groups || []).find((group) => String(group?.name || '').trim().toLowerCase() === raw.toLowerCase());
+  return String(canonical?.name || '').trim() || raw || fallback;
 }
 
 /* ── persistence ─────────────────────────────────────────── */
@@ -939,7 +940,7 @@ const EMP_STATUS_EXCEL_COLUMNS = [
   { header: 'Submission Status',  key: 'subStatus',  width: 20 },
 ];
 
-async function downloadEmpStatusExcel({ employees, credentials, workflow, orgName, columnKeys }) {
+async function downloadEmpStatusExcel({ employees, credentials, workflow, orgName, columnKeys, groups = [] }) {
   const ExcelJS = (await import('exceljs')).default;
   const wb = new ExcelJS.Workbook();
   wb.creator = 'Zaro HR';
@@ -992,7 +993,7 @@ async function downloadEmpStatusExcel({ employees, credentials, workflow, orgNam
       name:       emp['Employee Name'] || '',
       code,
       desig:      emp.Designation || emp.Role || '',
-      group:      getEmployeeDisplayGroup(emp, ''),
+      group:      getEmployeeDisplayGroup(emp, '', groups),
       mgrName:    emp['Reporting Manager Name'] || '',
       mgrCode:    emp['Reporting Manager Code'] || '',
       stage,
@@ -1057,12 +1058,12 @@ function ModuleEmpStatus({ employees, groups, orgKey, org }) {
     return employees.filter((e) => {
       const matchSearch = !q || `${e['Employee Name'] || ''} ${e['Employee Code'] || ''}`.toLowerCase().includes(q);
       const matchStage  = !filterStage || getEmpStage(e) === filterStage;
-      const matchGroup  = !filterGroup || getEmployeeDisplayGroup(e, '') === filterGroup;
+      const matchGroup  = !filterGroup || getEmployeeDisplayGroup(e, '', groups) === filterGroup;
       const matchLogin  = !filterLogin || getLoginStatus(e['Employee Code']) === filterLogin;
       return matchSearch && matchStage && matchGroup && matchLogin;
     });
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [employees, search, filterStage, filterGroup, filterLogin, credentials]);
+  }, [employees, search, filterStage, filterGroup, filterLogin, credentials, groups]);
 
   const selectStyle = { border: '1.5px solid #E2E8F0', borderRadius: 8, padding: '7px 10px', fontSize: 12.5, fontFamily: 'inherit', background: '#fff', color: '#0D1117', outline: 'none' };
 
@@ -1072,7 +1073,7 @@ function ModuleEmpStatus({ employees, groups, orgKey, org }) {
       const columnKeys = EMP_STATUS_EXCEL_COLUMNS
         .map((c) => c.key)
         .filter((key) => selectedCols.has(key));
-      await downloadEmpStatusExcel({ employees: filtered, credentials, workflow, orgName: org?.name, columnKeys });
+      await downloadEmpStatusExcel({ employees: filtered, credentials, workflow, orgName: org?.name, columnKeys, groups });
     } finally { setDownloading(false); }
   }
 
@@ -1207,7 +1208,7 @@ function ModuleEmpStatus({ employees, groups, orgKey, org }) {
               const code = emp['Employee Code'] || '—';
               const name = emp['Employee Name'] || code;
               const desig = emp.Designation || emp.Role || '—';
-              const grp   = getEmployeeDisplayGroup(emp);
+              const grp   = getEmployeeDisplayGroup(emp, '—', groups);
               const mgrCode = String(emp['Reporting Manager Code'] || '').trim();
               const mgrEmp  = mgrCode ? empByCode[mgrCode.toLowerCase()] : null;
               const mgrName = mgrEmp?.['Employee Name'] || String(emp['Reporting Manager Name'] || '').trim() || mgrCode || '—';
@@ -3943,7 +3944,7 @@ function ModuleGrpTransfer({ employees, groups, goalLibraries = [], onUpdate, or
     </div>
   );
 
-  const currentGrp = getEmployeeDisplayGroup(selected, '');
+  const currentGrp = getEmployeeDisplayGroup(selected, '', groups);
   const sameGroup = !!(selected && targetGrp && String(currentGrp).trim() === String(targetGrp).trim());
   const selectedResetImpact = selected && targetGrp && !sameGroup ? getTransferResetImpact(selected['Employee Code']) : { clears: false, kept: false, activeGoals: 0 };
   const canSubmit = !!selected && !!targetGrp && !sameGroup && (!needsRouting || !!routingValue) && (!selectedResetImpact.clears || confirmDraftReset);
@@ -3991,7 +3992,7 @@ function ModuleGrpTransfer({ employees, groups, goalLibraries = [], onUpdate, or
                         style={{ width: '100%', display: 'flex', alignItems: 'center', gap: 10, padding: '10px 14px', background: '#fff', border: 'none', borderBottom: '1px solid #F1F5F9', cursor: 'pointer', fontFamily: 'inherit', textAlign: 'left' }}>
                         <span style={{ fontSize: 13, fontWeight: 700, color: '#0F172A' }}>{emp['Employee Name']}</span>
                         <span style={{ fontSize: 11.5, color: '#94A3B8', background: '#F1F5F9', padding: '1px 7px', borderRadius: 999, fontWeight: 600 }}>{emp['Employee Code']}</span>
-                        <span style={{ marginLeft: 'auto', fontSize: 11.5, color: '#64748B' }}>{getEmployeeDisplayGroup(emp, 'No group')}</span>
+                        <span style={{ marginLeft: 'auto', fontSize: 11.5, color: '#64748B' }}>{getEmployeeDisplayGroup(emp, 'No group', groups)}</span>
                       </button>
                     ))}
                   </div>
@@ -5069,7 +5070,7 @@ function ModuleRoster({ employees, config, onUpdate, orgKey, initialIntent, onIn
                             )}
                           </div>
                           <span style={{ fontSize: 12.2, color: '#64748B', fontFamily: 'monospace', flexShrink: 0 }}>{code}</span>
-                          <span style={{ fontSize: 11.8, color: '#64748B', flexShrink: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{getEmployeeDisplayGroup(emp)}</span>
+                          <span style={{ fontSize: 11.8, color: '#64748B', flexShrink: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{getEmployeeDisplayGroup(emp, '—', goalGroups)}</span>
                         </button>
                       );
                     })
@@ -5236,7 +5237,7 @@ function ModuleRoster({ employees, config, onUpdate, orgKey, initialIntent, onIn
 }
 
 /* ── Test Credentials ───────────────────────────────────────── */
-function ModuleTestCreds({ employees, org, orgKey }) {
+function ModuleTestCreds({ employees, org, orgKey, groups = [] }) {
   const [search, setSearch] = useState('');
   const [filterGroup, setFilterGroup] = useState('');
   const [filterStage, setFilterStage] = useState('');
@@ -5309,11 +5310,11 @@ function ModuleTestCreds({ employees, org, orgKey }) {
   const groupOptions = useMemo(() => {
     const set = new Set();
     employees.forEach((e) => {
-      const g = getEmployeeDisplayGroup(e, '');
+      const g = getEmployeeDisplayGroup(e, '', groups);
       if (g) set.add(g);
     });
     return Array.from(set).sort();
-  }, [employees]);
+  }, [employees, groups]);
   const managerOptions = useMemo(() => {
     const map = new Map(); // mgrCode → display label
     employees.forEach((e) => {
@@ -5332,24 +5333,24 @@ function ModuleTestCreds({ employees, org, orgKey }) {
     const q = search.trim().toLowerCase();
     return allRows.filter((e) => {
       const matchSearch = !q || `${e['Employee Name'] || ''} ${e['Employee Code'] || ''} ${e.Designation || ''}`.toLowerCase().includes(q);
-      const grp = getEmployeeDisplayGroup(e, '');
+      const grp = getEmployeeDisplayGroup(e, '', groups);
       // External managers have no group / stage — they pass group/stage filters only when no filter is set.
       const matchGroup = !filterGroup || (e._external ? false : grp === filterGroup);
       const matchStage = !filterStage || (e._external ? false : getEmpStage(e) === filterStage);
       const matchMgr = !filterManager || String(e['Reporting Manager Code'] || '').trim() === filterManager;
       return matchSearch && matchGroup && matchStage && matchMgr;
     });
-  }, [allRows, search, filterGroup, filterStage, filterManager]);
+  }, [allRows, search, filterGroup, filterStage, filterManager, groups]);
 
   // Group counts for the chip-row
   const groupCounts = useMemo(() => {
     const c = {};
     employees.forEach((e) => {
-      const g = getEmployeeDisplayGroup(e);
+      const g = getEmployeeDisplayGroup(e, '—', groups);
       c[g] = (c[g] || 0) + 1;
     });
     return c;
-  }, [employees]);
+  }, [employees, groups]);
 
   const GROUP_COLORS = ['#4F46E5', '#0891B2', '#16A34A', '#D97706', '#7C3AED', '#EC4899', '#EF4444', '#14B8A6'];
   const groupColor = (name) => {
@@ -5464,7 +5465,7 @@ function ModuleTestCreds({ employees, org, orgKey }) {
             {filtered.slice(0, 100).map((emp, i) => {
               const code = emp['Employee Code'] || '—';
               const name = emp['Employee Name'] || '—';
-              const grp = getEmployeeDisplayGroup(emp);
+              const grp = getEmployeeDisplayGroup(emp, '—', groups);
               const mgrCode = String(emp['Reporting Manager Code'] || '').trim();
               const mgrEmp = mgrCode ? empByCode[mgrCode.toLowerCase()] : null;
               const mgrName = mgrEmp?.['Employee Name'] || String(emp['Reporting Manager Name'] || '').trim() || '';
@@ -7304,7 +7305,7 @@ export default function HRCycleDashboard() {
           {activeModule === 'mgr-change' && <ModuleMgrChange     employees={empsForModules} config={config} onUpdate={handleEmpUpdate} orgKey={orgKey} />}
           {activeModule === 'grp-transfer' && <ModuleGrpTransfer employees={empsForModules} groups={groups} goalLibraries={config?.goalLibraries || []} onUpdate={handleEmpUpdate} orgKey={orgKey} />}
           {activeModule === 'roster'     && <ModuleRoster employees={empsForModules} config={config} onUpdate={handleEmpUpdate} orgKey={orgKey} initialIntent={rosterIntent} onIntentConsumed={() => setRosterIntent(null)} />}
-          {activeModule === 'test-creds' && <ModuleTestCreds employees={empsForModules} org={org} orgKey={orgKey} />}
+          {activeModule === 'test-creds' && <ModuleTestCreds employees={empsForModules} org={org} orgKey={orgKey} groups={groups} />}
           {activeModule === 'hr-team' && !isScopedHR && (
             <ModuleHRTeam org={org} orgKey={orgKey} employees={liveEmployeesWithStage} groups={groups} onOrgChange={onHRTeamChange} />
           )}

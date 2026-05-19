@@ -331,7 +331,10 @@ function buildEmployeeRows(organizationId, config) {
       if (!employeeCode) return null;
       const rawGroupName = String(employee.assignedGoalGroupName || employee['Group Name'] || '').trim();
       const isOutsidePms = !!employee._outsidePms || rawGroupName.toUpperCase() === 'NONE' || rawGroupName === '__outside_pms__';
-      const groupName = isOutsidePms ? 'NONE' : rawGroupName;
+      const canonicalGroup = (config?.goalGroups || []).find((group) =>
+        String(group?.name || '').trim().toLowerCase() === rawGroupName.toLowerCase()
+      );
+      const groupName = isOutsidePms ? 'NONE' : (String(canonicalGroup?.name || '').trim() || rawGroupName);
       return {
         organization_id: organizationId,
         employee_code: employeeCode,
