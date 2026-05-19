@@ -289,6 +289,31 @@ function getEmployeeDisplayGroup(emp, fallback = '—', groups = []) {
   return String(canonical?.name || '').trim() || raw || fallback;
 }
 
+function normalizeEmployeeRosterGroup(employee, groups = []) {
+  if (!employee) return employee;
+  const raw = String(employee.assignedGoalGroupName || employee['Group Name'] || '').trim();
+  const isOutsidePms = !!employee._outsidePms || raw === OUTSIDE_PMS_GROUP_VALUE || raw.toUpperCase() === OUTSIDE_PMS_GROUP_LABEL;
+  if (isOutsidePms) {
+    return {
+      ...employee,
+      'Group Name': OUTSIDE_PMS_GROUP_LABEL,
+      assignedGoalGroupName: OUTSIDE_PMS_GROUP_LABEL,
+      _outsidePms: true,
+    };
+  }
+  const canonical = (groups || []).find((group) => String(group?.name || '').trim().toLowerCase() === raw.toLowerCase());
+  if (!canonical?.name) return employee;
+  return {
+    ...employee,
+    'Group Name': canonical.name,
+    assignedGoalGroupName: canonical.name,
+  };
+}
+
+function normalizeEmployeeRosterGroups(employees = [], groups = []) {
+  return (Array.isArray(employees) ? employees : []).map((employee) => normalizeEmployeeRosterGroup(employee, groups));
+}
+
 /* ── persistence ─────────────────────────────────────────── */
 function loadWizardConfig(orgKey) {
   const p = readWizardStateSync(orgKey);
@@ -4351,7 +4376,7 @@ function ModuleRoster({ employees, config, onUpdate, orgKey, initialIntent, onIn
       const clean = { ...row };
       delete clean._duplicate;
       delete clean._missing;
-      return clean;
+      return normalizeEmployeeRosterGroup(clean, goalGroups);
     });
     const updated = [...employees, ...cleanedRows];
     onUpdate(updated);
@@ -4385,6 +4410,9 @@ function ModuleRoster({ employees, config, onUpdate, orgKey, initialIntent, onIn
       newEmp['Group Name'] = OUTSIDE_PMS_GROUP_LABEL;
       newEmp.assignedGoalGroupName = OUTSIDE_PMS_GROUP_LABEL;
       newEmp._outsidePms = true;
+    } else if (selectedGroup?.name) {
+      newEmp['Group Name'] = selectedGroup.name;
+      newEmp.assignedGoalGroupName = selectedGroup.name;
     }
     if (segmentAttr) newEmp[segmentAttr] = String(manualForm[segmentAttr] || '').trim();
 
@@ -4409,7 +4437,10 @@ function ModuleRoster({ employees, config, onUpdate, orgKey, initialIntent, onIn
       mgrEmp['Employee Code'] = l1Code;
       mgrEmp['Employee Name'] = mgrName;
       if (meta.needsEmail) mgrEmp['Email ID'] = String(manualForm['Reporting Manager Email'] || '').trim();
-      if (meta.hasGoalGroups) mgrEmp['Group Name'] = l1MgrGroupObj?.name || '';
+      if (meta.hasGoalGroups) {
+        mgrEmp['Group Name'] = l1MgrGroupObj?.name || '';
+        mgrEmp.assignedGoalGroupName = l1MgrGroupObj?.name || '';
+      }
       if (l1MgrSegmentAttr) mgrEmp[l1MgrSegmentAttr] = l1NewMgrSegment;
     }
 
@@ -4433,7 +4464,7 @@ function ModuleRoster({ employees, config, onUpdate, orgKey, initialIntent, onIn
         : String(manualForm['L2 Manager Name'] || '').trim();
     }
 
-    const additions = mgrEmp ? [mgrEmp, newEmp] : [newEmp];
+    const additions = (mgrEmp ? [mgrEmp, newEmp] : [newEmp]).map((emp) => normalizeEmployeeRosterGroup(emp, goalGroups));
     onUpdate([...employees, ...additions]);
     showToast(mgrEmp ? `${name} added · manager ${mgrEmp['Employee Name']} also added to PMS` : `${name} added`);
     setManualForm({});
@@ -6939,10 +6970,16 @@ export default function HRCycleDashboard() {
   }, [orgKey]);
 
   const [liveEmployees, setLiveEmployees] = useState(() =>
-    Array.isArray(config?.employeeUploadData?.employees) ? config.employeeUploadData.employees : []
+    normalizeEmployeeRosterGroups(
+      Array.isArray(config?.employeeUploadData?.employees) ? config.employeeUploadData.employees : [],
+      config?.goalGroups || [],
+    )
   );
   useEffect(() => {
-    setLiveEmployees(Array.isArray(config?.employeeUploadData?.employees) ? config.employeeUploadData.employees : []);
+    setLiveEmployees(normalizeEmployeeRosterGroups(
+      Array.isArray(config?.employeeUploadData?.employees) ? config.employeeUploadData.employees : [],
+      config?.goalGroups || [],
+    ));
   }, [config]);
 
   // Ensure every employee in this org has a credential entry so they can log in via LoginPage.
@@ -6989,9 +7026,10 @@ export default function HRCycleDashboard() {
   }, [liveEmployees, org?.temporaryPassword, orgKey]);
 
   function handleEmpUpdate(updated) {
-    setLiveEmployees(updated);
+    const normalized = normalizeEmployeeRosterGroups(updated, groups);
+    setLiveEmployees(normalized);
     if (config) {
-      const nextConfig = { ...config, employeeUploadData: { ...config.employeeUploadData, employees: updated } };
+      const nextConfig = { ...config, employeeUploadData: { ...config.employeeUploadData, employees: normalized } };
       setConfig(nextConfig);
       saveWizardConfig(orgKey, nextConfig);
     }
