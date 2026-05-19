@@ -289,7 +289,7 @@ function getEmployeeDisplayGroup(emp, fallback = '—', groups = []) {
   return String(canonical?.name || '').trim() || raw || fallback;
 }
 
-function normalizeEmployeeRosterGroup(employee, groups = []) {
+function normalizeEmployeeRosterGroup(employee, groups = [], libraries = []) {
   if (!employee) return employee;
   const raw = String(employee.assignedGoalGroupName || employee['Group Name'] || '').trim();
   const isOutsidePms = !!employee._outsidePms || raw === OUTSIDE_PMS_GROUP_VALUE || raw.toUpperCase() === OUTSIDE_PMS_GROUP_LABEL;
@@ -303,15 +303,19 @@ function normalizeEmployeeRosterGroup(employee, groups = []) {
   }
   const canonical = (groups || []).find((group) => String(group?.name || '').trim().toLowerCase() === raw.toLowerCase());
   if (!canonical?.name) return employee;
-  return {
+  const withGroup = {
     ...employee,
     'Group Name': canonical.name,
     assignedGoalGroupName: canonical.name,
   };
+  return {
+    ...withGroup,
+    ...resolveEmployeeGoalLibraryMeta(withGroup, canonical, libraries),
+  };
 }
 
-function normalizeEmployeeRosterGroups(employees = [], groups = []) {
-  return (Array.isArray(employees) ? employees : []).map((employee) => normalizeEmployeeRosterGroup(employee, groups));
+function normalizeEmployeeRosterGroups(employees = [], groups = [], libraries = []) {
+  return (Array.isArray(employees) ? employees : []).map((employee) => normalizeEmployeeRosterGroup(employee, groups, libraries));
 }
 
 /* ── persistence ─────────────────────────────────────────── */
@@ -744,11 +748,14 @@ function ModuleOverview({ employees, groups, orgName, congratsDismissed, onDismi
     const c = {}; EMP_STAGES.forEach((s) => { c[s.id] = 0; });
     pmsEmployees.forEach((e) => { const s = getEmpStage(e); c[s] = (c[s] || 0) + 1; });
     return c;
-  }, [pmsEmployees]);
+  }, [pmsEmployees, groups]);
 
   const groupCounts = useMemo(() => {
     const c = {};
-    pmsEmployees.forEach((e) => { const g = e['Group Name'] || e.assignedGoalGroupName || 'Unassigned'; c[g] = (c[g] || 0) + 1; });
+    pmsEmployees.forEach((e) => {
+      const g = getEmployeeDisplayGroup(e, 'Unassigned', groups);
+      c[g] = (c[g] || 0) + 1;
+    });
     return c;
   }, [pmsEmployees]);
   const GROUP_COLORS = ['#4F46E5', '#0891B2', '#16A34A', '#D97706', '#7C3AED', '#EC4899', '#EF4444', '#14B8A6'];
@@ -3581,7 +3588,8 @@ function ModuleMgrChange({ employees, config, onUpdate, orgKey }) {
   function applyChange() {
     if (!selected || !newL1.trim()) return;
     const code = selected['Employee Code'];
-    const updated = employees.map((e) => e['Employee Code'] === code ? { ...e, 'Reporting Manager Code': newL1.trim(), ...(newL2 ? { 'L2 Manager Code': newL2.trim() } : {}) } : e);
+    const codeKey = String(code || '').trim().toLowerCase();
+    const updated = employees.map((e) => String(e['Employee Code'] || '').trim().toLowerCase() === codeKey ? { ...e, 'Reporting Manager Code': newL1.trim(), ...(newL2 ? { 'L2 Manager Code': newL2.trim() } : {}) } : e);
     onUpdate(updated); showToast(`Manager updated for ${selected['Employee Name'] || code}`);
     setSelected(null); setSearch(''); setNewL1(''); setNewL2('');
   }
@@ -3879,7 +3887,8 @@ function ModuleGrpTransfer({ employees, groups, goalLibraries = [], onUpdate, or
       ...resolveEmployeeGoalLibraryMeta(baseForMeta, targetGroupObj, goalLibraries),
     };
     if (needsRouting) patch[targetSegmentAttr] = routingValue;
-    const updated = employees.map((e) => e['Employee Code'] === code ? { ...e, ...patch } : e);
+    const codeKey = String(code || '').trim().toLowerCase();
+    const updated = employees.map((e) => String(e['Employee Code'] || '').trim().toLowerCase() === codeKey ? { ...e, ...patch } : e);
     onUpdate(updated);
     const resetResult = resetEmployeeSubmissionForTransfer(code);
     const baseMsg = needsRouting
@@ -3934,7 +3943,8 @@ function ModuleGrpTransfer({ employees, groups, goalLibraries = [], onUpdate, or
       const transfer = transferByCode[String(e['Employee Code'] || '').trim().toLowerCase()];
       if (!transfer) return e;
       const group = groupByName[String(transfer.newGroup || '').trim().toLowerCase()] || null;
-      const patched = { ...e, 'Group Name': transfer.newGroup, assignedGoalGroupName: transfer.newGroup };
+      const canonicalGroupName = group?.name || transfer.newGroup;
+      const patched = { ...e, 'Group Name': canonicalGroupName, assignedGoalGroupName: canonicalGroupName };
       if (transfer.needsAttr && transfer.attr) patched[transfer.attr] = transfer.currentVal;
       return {
         ...patched,
@@ -4376,7 +4386,7 @@ function ModuleRoster({ employees, config, onUpdate, orgKey, initialIntent, onIn
       const clean = { ...row };
       delete clean._duplicate;
       delete clean._missing;
-      return normalizeEmployeeRosterGroup(clean, goalGroups);
+      return normalizeEmployeeRosterGroup(clean, goalGroups, config?.goalLibraries || []);
     });
     const updated = [...employees, ...cleanedRows];
     onUpdate(updated);
@@ -4464,7 +4474,7 @@ function ModuleRoster({ employees, config, onUpdate, orgKey, initialIntent, onIn
         : String(manualForm['L2 Manager Name'] || '').trim();
     }
 
-    const additions = (mgrEmp ? [mgrEmp, newEmp] : [newEmp]).map((emp) => normalizeEmployeeRosterGroup(emp, goalGroups));
+    const additions = (mgrEmp ? [mgrEmp, newEmp] : [newEmp]).map((emp) => normalizeEmployeeRosterGroup(emp, goalGroups, config?.goalLibraries || []));
     onUpdate([...employees, ...additions]);
     showToast(mgrEmp ? `${name} added · manager ${mgrEmp['Employee Name']} also added to PMS` : `${name} added`);
     setManualForm({});
@@ -6973,12 +6983,14 @@ export default function HRCycleDashboard() {
     normalizeEmployeeRosterGroups(
       Array.isArray(config?.employeeUploadData?.employees) ? config.employeeUploadData.employees : [],
       config?.goalGroups || [],
+      config?.goalLibraries || [],
     )
   );
   useEffect(() => {
     setLiveEmployees(normalizeEmployeeRosterGroups(
       Array.isArray(config?.employeeUploadData?.employees) ? config.employeeUploadData.employees : [],
       config?.goalGroups || [],
+      config?.goalLibraries || [],
     ));
   }, [config]);
 
@@ -7026,7 +7038,7 @@ export default function HRCycleDashboard() {
   }, [liveEmployees, org?.temporaryPassword, orgKey]);
 
   function handleEmpUpdate(updated) {
-    const normalized = normalizeEmployeeRosterGroups(updated, groups);
+    const normalized = normalizeEmployeeRosterGroups(updated, groups, config?.goalLibraries || []);
     setLiveEmployees(normalized);
     if (config) {
       const nextConfig = { ...config, employeeUploadData: { ...config.employeeUploadData, employees: normalized } };
@@ -7167,14 +7179,14 @@ export default function HRCycleDashboard() {
     if (scopeType === 'all') return liveEmployeesWithStage;
     if (scopeType === 'group') {
       const groupSet = new Set(scopeGroups);
-      return liveEmployeesWithStage.filter((e) => groupSet.has(e.Group || e['Goal Group'] || e.Department || ''));
+      return liveEmployeesWithStage.filter((e) => groupSet.has(getEmployeeDisplayGroup(e, '', groups)));
     }
     if (scopeType === 'manual') {
       const codeSet = new Set(scopeEmpCodes.map((c) => String(c).trim()));
       return liveEmployeesWithStage.filter((e) => codeSet.has(String(e['Employee Code'] || '').trim()));
     }
     return liveEmployeesWithStage;
-  }, [isScopedHR, hrTeamMember, liveEmployeesWithStage]);
+  }, [isScopedHR, hrTeamMember, liveEmployeesWithStage, groups]);
 
   const empsForModules = isScopedHR ? scopedEmployees : liveEmployeesWithStage;
 

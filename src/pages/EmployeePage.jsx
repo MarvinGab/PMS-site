@@ -412,13 +412,13 @@ function createNotification({
 
 function getEmployeeRecord(config, empCode) {
   const employees = config?.employeeUploadData?.employees || [];
-  return employees.find((employee) => String(employee['Employee Code'] || '').trim() === String(empCode).trim()) || null;
+  return employees.find((employee) => normalizeCode(employee['Employee Code']) === normalizeCode(empCode)) || null;
 }
 
 function getManagerName(config, managerCode, storedName = '') {
   if (!managerCode) return null;
   const employees = config?.employeeUploadData?.employees || [];
-  const manager = employees.find((employee) => String(employee['Employee Code'] || '').trim() === String(managerCode).trim());
+  const manager = employees.find((employee) => normalizeCode(employee['Employee Code']) === normalizeCode(managerCode));
   if (manager) return String(manager['Employee Name'] || '').trim() || storedName || managerCode;
   return storedName || managerCode;
 }
@@ -1186,7 +1186,7 @@ function getEmployeeGroupAndLibrary(config, employee) {
   }
 
   // Prefer explicit Group Name (written into employee record during upload).
-  const groupNameVal = String(employee['Group Name'] || '').trim();
+  const groupNameVal = String(employee.assignedGoalGroupName || employee['Group Name'] || '').trim();
   if (groupNameVal) {
     const namedGroup = groups.find(
       (g) => String(g.name || '').trim().toLowerCase() === groupNameVal.toLowerCase()
@@ -1203,7 +1203,7 @@ function getEmployeeGroupAndLibrary(config, employee) {
     const attrVal = String(employee[group.segmentAttr] || '').trim();
     if (!attrVal) continue;
     const inGroup = (group.segmentValues || []).some(
-      (v) => v.trim().toLowerCase() === attrVal.toLowerCase()
+      (v) => String(v?.name || v || '').trim().toLowerCase() === attrVal.toLowerCase()
     );
     if (!inGroup) continue;
     const library = resolveLibrary(group);
