@@ -261,6 +261,9 @@ function UploadSheetButton({ onDownload, fileRef, phase = 'idle' }) {
 }
 
 /* ── PMS employee stages ─────────────────────────────────── */
+const OUTSIDE_PMS_GROUP_VALUE = '__outside_pms__';
+const OUTSIDE_PMS_GROUP_LABEL = 'NONE';
+
 const EMP_STAGES = [
   { id: 'goal-creation',    label: 'Goal creation',       short: 'Goal creation',    color: '#4F46E5', bg: '#EEF2FF', border: '#C7D2FE' },
   { id: 'pending-approval', label: 'Pending approval',    short: 'Pending approval', color: '#D97706', bg: '#FFFBEB', border: '#FDE68A' },
@@ -275,6 +278,14 @@ const EMP_STAGES = [
 function getEmpStage(emp) {
   if (emp?._pmsExempt || emp?._outsidePms) return 'exempt';
   return emp?._pmsStage || 'goal-creation';
+}
+
+function getEmployeeDisplayGroup(emp, fallback = '—') {
+  const raw = String(emp?.['Group Name'] || emp?.assignedGoalGroupName || '').trim();
+  if (emp?._outsidePms || raw === OUTSIDE_PMS_GROUP_VALUE || raw.toUpperCase() === OUTSIDE_PMS_GROUP_LABEL) {
+    return OUTSIDE_PMS_GROUP_LABEL;
+  }
+  return raw || fallback;
 }
 
 /* ── persistence ─────────────────────────────────────────── */
@@ -981,7 +992,7 @@ async function downloadEmpStatusExcel({ employees, credentials, workflow, orgNam
       name:       emp['Employee Name'] || '',
       code,
       desig:      emp.Designation || emp.Role || '',
-      group:      emp['Group Name'] || emp.assignedGoalGroupName || '',
+      group:      getEmployeeDisplayGroup(emp, ''),
       mgrName:    emp['Reporting Manager Name'] || '',
       mgrCode:    emp['Reporting Manager Code'] || '',
       stage,
@@ -1046,7 +1057,7 @@ function ModuleEmpStatus({ employees, groups, orgKey, org }) {
     return employees.filter((e) => {
       const matchSearch = !q || `${e['Employee Name'] || ''} ${e['Employee Code'] || ''}`.toLowerCase().includes(q);
       const matchStage  = !filterStage || getEmpStage(e) === filterStage;
-      const matchGroup  = !filterGroup || (e['Group Name'] || e.assignedGoalGroupName || '') === filterGroup;
+      const matchGroup  = !filterGroup || getEmployeeDisplayGroup(e, '') === filterGroup;
       const matchLogin  = !filterLogin || getLoginStatus(e['Employee Code']) === filterLogin;
       return matchSearch && matchStage && matchGroup && matchLogin;
     });
@@ -1196,7 +1207,7 @@ function ModuleEmpStatus({ employees, groups, orgKey, org }) {
               const code = emp['Employee Code'] || '—';
               const name = emp['Employee Name'] || code;
               const desig = emp.Designation || emp.Role || '—';
-              const grp   = emp['Group Name'] || emp.assignedGoalGroupName || '—';
+              const grp   = getEmployeeDisplayGroup(emp);
               const mgrCode = String(emp['Reporting Manager Code'] || '').trim();
               const mgrEmp  = mgrCode ? empByCode[mgrCode.toLowerCase()] : null;
               const mgrName = mgrEmp?.['Employee Name'] || String(emp['Reporting Manager Name'] || '').trim() || mgrCode || '—';
@@ -3329,7 +3340,7 @@ function ModuleStageControl({ employees, onUpdate, orgKey }) {
                       <td style={{ padding: '10px 14px' }}><input type="checkbox" checked={isChecked} onChange={() => {}} /></td>
                       <td style={{ padding: '10px 14px', fontWeight: 500, color: '#0D1117' }}>{emp['Employee Name'] || code}</td>
                       <td style={{ padding: '10px 14px', fontFamily: 'monospace', fontWeight: 700, color: '#4F46E5' }}>{code}</td>
-                      <td style={{ padding: '10px 14px', color: '#64748B' }}>{emp['Group Name'] || emp.assignedGoalGroupName || '—'}</td>
+                      <td style={{ padding: '10px 14px', color: '#64748B' }}>{getEmployeeDisplayGroup(emp)}</td>
                       <td style={{ padding: '10px 14px' }}><StagePill stageId={getEmpStage(emp)} /></td>
                     </tr>
                   );
@@ -3932,7 +3943,7 @@ function ModuleGrpTransfer({ employees, groups, goalLibraries = [], onUpdate, or
     </div>
   );
 
-  const currentGrp = selected?.['Group Name'] || selected?.assignedGoalGroupName || '';
+  const currentGrp = getEmployeeDisplayGroup(selected, '');
   const sameGroup = !!(selected && targetGrp && String(currentGrp).trim() === String(targetGrp).trim());
   const selectedResetImpact = selected && targetGrp && !sameGroup ? getTransferResetImpact(selected['Employee Code']) : { clears: false, kept: false, activeGoals: 0 };
   const canSubmit = !!selected && !!targetGrp && !sameGroup && (!needsRouting || !!routingValue) && (!selectedResetImpact.clears || confirmDraftReset);
@@ -3980,7 +3991,7 @@ function ModuleGrpTransfer({ employees, groups, goalLibraries = [], onUpdate, or
                         style={{ width: '100%', display: 'flex', alignItems: 'center', gap: 10, padding: '10px 14px', background: '#fff', border: 'none', borderBottom: '1px solid #F1F5F9', cursor: 'pointer', fontFamily: 'inherit', textAlign: 'left' }}>
                         <span style={{ fontSize: 13, fontWeight: 700, color: '#0F172A' }}>{emp['Employee Name']}</span>
                         <span style={{ fontSize: 11.5, color: '#94A3B8', background: '#F1F5F9', padding: '1px 7px', borderRadius: 999, fontWeight: 600 }}>{emp['Employee Code']}</span>
-                        <span style={{ marginLeft: 'auto', fontSize: 11.5, color: '#64748B' }}>{emp['Group Name'] || 'No group'}</span>
+                        <span style={{ marginLeft: 'auto', fontSize: 11.5, color: '#64748B' }}>{getEmployeeDisplayGroup(emp, 'No group')}</span>
                       </button>
                     ))}
                   </div>
@@ -4186,9 +4197,6 @@ function ManagerBlock({ code, match, onCodeChange, nameValue, onNameChange, emai
   );
 }
 
-/* ── Add / Remove ───────────────────────────────────────────── */
-const OUTSIDE_PMS_GROUP_VALUE = '__outside_pms__';
-
 function ModuleRoster({ employees, config, onUpdate, orgKey, initialIntent, onIntentConsumed }) {
   const [rosterTab, setRosterTab] = useState('add');           // 'add' | 'remove'
   const [addMode, setAddMode] = useState('manual');            // 'manual' | 'upload'
@@ -4373,8 +4381,8 @@ function ModuleRoster({ employees, config, onUpdate, orgKey, initialIntent, onIn
     // Basic + group + segment from form / template headers.
     meta.headers.forEach((h) => { newEmp[h] = String(manualForm[h] || '').trim(); });
     if (isOutsidePmsGroup) {
-      newEmp['Group Name'] = '';
-      newEmp.assignedGoalGroupName = '';
+      newEmp['Group Name'] = OUTSIDE_PMS_GROUP_LABEL;
+      newEmp.assignedGoalGroupName = OUTSIDE_PMS_GROUP_LABEL;
       newEmp._outsidePms = true;
     }
     if (segmentAttr) newEmp[segmentAttr] = String(manualForm[segmentAttr] || '').trim();
@@ -4810,7 +4818,7 @@ function ModuleRoster({ employees, config, onUpdate, orgKey, initialIntent, onIn
                         </label>
                         <select value={value} onChange={(e) => setGroupAndResetRouting(e.target.value)} style={inputBase}>
                           <option value="">Select a group…</option>
-                          <option value={OUTSIDE_PMS_GROUP_VALUE}>NONE</option>
+                          <option value={OUTSIDE_PMS_GROUP_VALUE}>{OUTSIDE_PMS_GROUP_LABEL}</option>
                           {meta.groupNames.map((g) => <option key={g} value={g}>{g}</option>)}
                         </select>
                       </div>
@@ -5061,7 +5069,7 @@ function ModuleRoster({ employees, config, onUpdate, orgKey, initialIntent, onIn
                             )}
                           </div>
                           <span style={{ fontSize: 12.2, color: '#64748B', fontFamily: 'monospace', flexShrink: 0 }}>{code}</span>
-                          <span style={{ fontSize: 11.8, color: '#64748B', flexShrink: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{emp._outsidePms ? 'NONE' : (emp['Group Name'] || emp.assignedGoalGroupName || '—')}</span>
+                          <span style={{ fontSize: 11.8, color: '#64748B', flexShrink: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{getEmployeeDisplayGroup(emp)}</span>
                         </button>
                       );
                     })
@@ -5301,7 +5309,7 @@ function ModuleTestCreds({ employees, org, orgKey }) {
   const groupOptions = useMemo(() => {
     const set = new Set();
     employees.forEach((e) => {
-      const g = String(e['Group Name'] || e.assignedGoalGroupName || '').trim();
+      const g = getEmployeeDisplayGroup(e, '');
       if (g) set.add(g);
     });
     return Array.from(set).sort();
@@ -5324,7 +5332,7 @@ function ModuleTestCreds({ employees, org, orgKey }) {
     const q = search.trim().toLowerCase();
     return allRows.filter((e) => {
       const matchSearch = !q || `${e['Employee Name'] || ''} ${e['Employee Code'] || ''} ${e.Designation || ''}`.toLowerCase().includes(q);
-      const grp = String(e['Group Name'] || e.assignedGoalGroupName || '').trim();
+      const grp = getEmployeeDisplayGroup(e, '');
       // External managers have no group / stage — they pass group/stage filters only when no filter is set.
       const matchGroup = !filterGroup || (e._external ? false : grp === filterGroup);
       const matchStage = !filterStage || (e._external ? false : getEmpStage(e) === filterStage);
@@ -5337,7 +5345,7 @@ function ModuleTestCreds({ employees, org, orgKey }) {
   const groupCounts = useMemo(() => {
     const c = {};
     employees.forEach((e) => {
-      const g = String(e['Group Name'] || e.assignedGoalGroupName || '').trim() || '—';
+      const g = getEmployeeDisplayGroup(e);
       c[g] = (c[g] || 0) + 1;
     });
     return c;
@@ -5456,7 +5464,7 @@ function ModuleTestCreds({ employees, org, orgKey }) {
             {filtered.slice(0, 100).map((emp, i) => {
               const code = emp['Employee Code'] || '—';
               const name = emp['Employee Name'] || '—';
-              const grp = String(emp['Group Name'] || emp.assignedGoalGroupName || '').trim() || '—';
+              const grp = getEmployeeDisplayGroup(emp);
               const mgrCode = String(emp['Reporting Manager Code'] || '').trim();
               const mgrEmp = mgrCode ? empByCode[mgrCode.toLowerCase()] : null;
               const mgrName = mgrEmp?.['Employee Name'] || String(emp['Reporting Manager Name'] || '').trim() || '';

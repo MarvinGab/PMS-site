@@ -329,6 +329,9 @@ function buildEmployeeRows(organizationId, config) {
     .map((employee) => {
       const employeeCode = normalizeCode(employee['Employee Code']);
       if (!employeeCode) return null;
+      const rawGroupName = String(employee.assignedGoalGroupName || employee['Group Name'] || '').trim();
+      const isOutsidePms = !!employee._outsidePms || rawGroupName.toUpperCase() === 'NONE' || rawGroupName === '__outside_pms__';
+      const groupName = isOutsidePms ? 'NONE' : rawGroupName;
       return {
         organization_id: organizationId,
         employee_code: employeeCode,
@@ -337,12 +340,12 @@ function buildEmployeeRows(organizationId, config) {
         password_hash: null,
         designation: String(employee.Designation || employee.Role || '').trim() || null,
         department: String(employee.Department || '').trim() || null,
-        group_name: String(employee.assignedGoalGroupName || employee['Group Name'] || '').trim() || null,
+        group_name: groupName || null,
         manager_code: normalizeCode(employee['Reporting Manager Code']) || null,
         manager_name: String(employee['Reporting Manager Name'] || '').trim() || null,
         manager_email: String(employee['Reporting Manager Email'] || '').trim().toLowerCase() || null,
         pms_stage: String(employee._pmsStage || 'goal-creation').trim() || 'goal-creation',
-        is_in_pms: employee.isInPMS !== false,
+        is_in_pms: employee.isInPMS !== false && !isOutsidePms,
         raw_payload: employee,
       };
     })
