@@ -1102,13 +1102,14 @@ export function readWorkflowSync(orgKey = '') {
   return readLocalJson(`${GOAL_WORKFLOW_KEY}:${orgKey || 'default'}`, { submissions: {}, notifications: [] });
 }
 
-export async function hydrateWorkflow(orgKey = '') {
+export async function hydrateWorkflow(orgKey = '', options = {}) {
+  const { emit = true } = options || {};
   const local = readWorkflowSync(orgKey);
   if (!shouldUseSupabase) return local;
   const remote = await readRemoteStateScoped('workflow', orgKey);
   if (remote) {
     if (isStaleRemoteEcho('workflow', orgKey, remote)) return local;
-    writeLocalJson(`${GOAL_WORKFLOW_KEY}:${orgKey || 'default'}`, remote, { emit: true });
+    writeLocalJson(`${GOAL_WORKFLOW_KEY}:${orgKey || 'default'}`, remote, { emit });
     return remote;
   }
   return local;

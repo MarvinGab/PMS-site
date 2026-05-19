@@ -257,10 +257,6 @@ function deepClone(value) {
   return JSON.parse(JSON.stringify(value));
 }
 
-function getWorkflowStorageKey(orgKey = '') {
-  return `${GOAL_WORKFLOW_KEY}:${orgKey || 'default'}`;
-}
-
 function loadSession() {
   try {
     return readEmployeeSessionSync();
@@ -332,6 +328,39 @@ function workflowRaw(workflow) {
   } catch (_) {
     return '';
   }
+}
+
+function mergeWorkflowForEmployeeEditor(incoming, current, ownKey, protectOwn = true) {
+  const incomingObj = incoming && typeof incoming === 'object' ? incoming : {};
+  const currentObj = current && typeof current === 'object' ? current : {};
+  const currentSubs = currentObj.submissions || {};
+  const incomingSubs = incomingObj.submissions || {};
+  const submissions = {};
+
+  Object.keys(incomingSubs).forEach((key) => {
+    submissions[key] = protectOwn && key === ownKey && currentSubs[key]
+      ? currentSubs[key]
+      : incomingSubs[key];
+  });
+  Object.keys(currentSubs).forEach((key) => {
+    if (currentSubs[key] && !submissions[key]) submissions[key] = currentSubs[key];
+  });
+
+  const notifications = new Map();
+  [...(currentObj.notifications || []), ...(incomingObj.notifications || [])].forEach((notification) => {
+    if (!notification?.id) return;
+    const existing = notifications.get(notification.id);
+    notifications.set(notification.id, existing
+      ? { ...existing, ...notification, read: !!(existing.read || notification.read) }
+      : notification);
+  });
+
+  return {
+    ...incomingObj,
+    submissions,
+    notifications: Array.from(notifications.values())
+      .sort((left, right) => Date.parse(right?.createdAt || '') - Date.parse(left?.createdAt || '')),
+  };
 }
 
 function getMessagesStorageKey(orgKey = '') {
@@ -1777,6 +1806,9 @@ export default function EmployeePage() {
   const undoRecoverTimerRef = useRef(null);
   const ignoreWorkflowEchoUntilRef = useRef(0);
   const syncedWorkflowRawRef = useRef(workflowRaw(loadWorkflow(session?.orgKey || '')));
+  const workflowDirtyRef = useRef(false);
+  const latestWorkflowRawRef = useRef(syncedWorkflowRawRef.current);
+  const pendingSaveRawRef = useRef('');
   // Save indicator state. 'idle' = no recent edits; 'saving' = a remote
   // write is in flight; 'saved' = last write succeeded (with timestamp);
   // 'failed' = the most recent write threw. We surface this in the
@@ -1866,6 +1898,8 @@ export default function EmployeePage() {
       if (!cancelled) {
         if (wf) {
           syncedWorkflowRawRef.current = workflowRaw(wf);
+          latestWorkflowRawRef.current = syncedWorkflowRawRef.current;
+          workflowDirtyRef.current = false;
           setWorkflow(wf);
         }
         setWorkflowHydrated(true);
@@ -1913,9 +1947,15 @@ export default function EmployeePage() {
     if (session?.orgKey) {
       const localWorkflow = loadWorkflow(session.orgKey);
       syncedWorkflowRawRef.current = workflowRaw(localWorkflow);
+      latestWorkflowRawRef.current = syncedWorkflowRawRef.current;
+      workflowDirtyRef.current = false;
       setWorkflow(localWorkflow);
     }
   }, [session?.orgKey]);
+
+  useEffect(() => {
+    latestWorkflowRawRef.current = workflowRaw(workflow);
+  }, [workflow]);
 
   // Step 1 — IMMEDIATE localStorage cache write on every edit. Sync,
   // no debounce, no remote round-trip. Guarantees that even if Supabase
@@ -1924,7 +1964,7 @@ export default function EmployeePage() {
   // load (hydrateWorkflow already falls back to localStorage when
   // remote is empty / errors out).
   useEffect(() => {
-    if (!session?.orgKey || !workflowHydrated) return;
+    if (!session?.orgKey || !workflowHydrated || !workflowDirtyRef.current) return;
     try {
       const key = `${GOAL_WORKFLOW_KEY}:${session.orgKey}`;
       window.localStorage.setItem(key, JSON.stringify(workflow));
@@ -1936,19 +1976,27 @@ export default function EmployeePage() {
   // upsert, so concurrent writes from other clients can't strip data.
   useEffect(() => {
     if (!session?.orgKey || !workflowHydrated) return undefined;
+    if (!workflowDirtyRef.current) return undefined;
     const raw = workflowRaw(workflow);
-    if (raw && raw === syncedWorkflowRawRef.current) return undefined;
+    if (raw && raw === syncedWorkflowRawRef.current) {
+      workflowDirtyRef.current = false;
+      return undefined;
+    }
     const localOrgKey = session.orgKey;
     const localWorkflow = workflow;
     const timer = setTimeout(() => {
       markLocalWorkflowMutation();
-      syncedWorkflowRawRef.current = raw;
+      pendingSaveRawRef.current = raw;
       setSaveStatus('saving');
       Promise.resolve(saveWorkflow(localOrgKey, localWorkflow))
         .then((ok) => {
           if (ok === false) {
             setSaveStatus('failed');
           } else {
+            if (latestWorkflowRawRef.current === raw && pendingSaveRawRef.current === raw) {
+              workflowDirtyRef.current = false;
+              syncedWorkflowRawRef.current = raw;
+            }
             setSaveStatus('saved');
             setLastSavedAt(Date.now());
           }
@@ -1983,6 +2031,8 @@ export default function EmployeePage() {
           goals: cleanedGoals,
         };
         if (JSON.stringify(patched) === JSON.stringify(current)) return prev;
+        workflowDirtyRef.current = true;
+        markLocalWorkflowMutation();
         return {
           ...prev,
           submissions: {
@@ -1992,6 +2042,8 @@ export default function EmployeePage() {
         };
       }
 
+      workflowDirtyRef.current = true;
+      markLocalWorkflowMutation();
       return {
         ...prev,
         submissions: {
@@ -2023,54 +2075,6 @@ export default function EmployeePage() {
     }
   }, [session]);
 
-  // Live workflow sync: when the employee submits (or manager approves) in another tab,
-  // reload so this tab (e.g. the manager) sees the updated submissions + notifications.
-  useEffect(() => {
-    if (!session?.orgKey) return;
-    const wfKey = getWorkflowStorageKey(session.orgKey);
-    function onWorkflowStorage(e) {
-      if (e.key !== wfKey) return;
-      // CRITICAL: `hydrateWorkflow` writes the remote snapshot through
-      // `writeLocalJson(..., { emit: true })`, which dispatches a synthetic
-      // `storage` event in the SAME tab. If we naively setWorkflow(loaded)
-      // here we'll overwrite an in-flight local edit with the pre-save
-      // remote snapshot — making the goal the user just dragged/typed
-      // disappear for one frame on every save. The echo guard (set by
-      // markLocalWorkflowMutation before our hydrate) tells us the event
-      // is our own and should be ignored.
-      if (Date.now() < ignoreWorkflowEchoUntilRef.current) return;
-      const next = loadWorkflow(session.orgKey);
-      if (!next) return;
-      const nextRaw = workflowRaw(next);
-      if (nextRaw === syncedWorkflowRawRef.current) return;
-      // Same hands-off-own-submission merge as the Supabase realtime
-      // handler — local always wins for THIS user's submission so a
-      // cross-tab write can't wipe in-flight edits either.
-      setWorkflow((prev) => {
-        const prevSubs = prev?.submissions || {};
-        const incomingSubs = next.submissions || {};
-        const mergedSubs = {};
-        Object.keys(incomingSubs).forEach((key) => {
-          if (key === employeeCodeKey && prevSubs[key]) {
-            mergedSubs[key] = prevSubs[key];
-          } else {
-            mergedSubs[key] = incomingSubs[key];
-          }
-        });
-        Object.keys(prevSubs).forEach((key) => {
-          if (prevSubs[key] && !mergedSubs[key]) mergedSubs[key] = prevSubs[key];
-        });
-        const merged = { ...next, submissions: mergedSubs };
-        const mergedRaw = workflowRaw(merged);
-        if (mergedRaw === syncedWorkflowRawRef.current) return prev;
-        syncedWorkflowRawRef.current = mergedRaw;
-        return merged;
-      });
-    }
-    window.addEventListener('storage', onWorkflowStorage);
-    return () => window.removeEventListener('storage', onWorkflowStorage);
-  }, [session?.orgKey, employeeCodeKey]);
-
   // Live messaging: reload messages from storage when another tab writes
   useEffect(() => {
     if (!session?.orgKey) return;
@@ -2099,59 +2103,24 @@ export default function EmployeePage() {
     return () => window.removeEventListener('storage', onStorage);
   }, [session?.orgKey]);
 
-  // Cross-device realtime: the storage listeners above only fire for
-  // same-device writes. When a manager / HR / proxy admin updates state on
-  // a different machine, Supabase Realtime delivers the change here and we
-  // re-hydrate the affected slice. The hydrate calls write through to
-  // localStorage with `emit: true`, so the existing same-tab listeners
-  // pick up the change and update React state — no duplicate setState.
+  // Cross-device realtime: keep notifications and other users' submissions fresh
+  // without ever replacing the active employee's own draft. Goal editing must
+  // feel local and stable; this screen saves its own submission outward, but
+  // does not let remote workflow snapshots pull that submission backward.
   useEffect(() => {
     if (!session?.orgKey) return undefined;
     const orgKey = session.orgKey;
     const unsubWorkflow = subscribeToScopedState('workflow', orgKey, () => {
       if (Date.now() < ignoreWorkflowEchoUntilRef.current) return;
-      void hydrateWorkflow(orgKey).then((wf) => {
+      void hydrateWorkflow(orgKey, { emit: false }).then((wf) => {
         if (Date.now() < ignoreWorkflowEchoUntilRef.current) return;
         if (!wf) return;
         const incomingRaw = workflowRaw(wf);
         if (incomingRaw === syncedWorkflowRawRef.current) return;
 
-        // Bulletproof merge: the user's OWN submission is owned by this
-        // client. Realtime echoes — which can race with in-flight local
-        // edits and arrive with stale data — never overwrite the local
-        // copy of our own submission. For everyone else's submissions
-        // we accept the incoming version (managers, peers etc. own
-        // their own records). Local-only submissions that are missing
-        // from the incoming snapshot are spliced back in too so other
-        // people's tiles don't blank out on this screen.
-        // Trade-off: if a manager reviews our submission while we're
-        // active, we won't see the review status via realtime — we'll
-        // pick it up on the next save's pre-save remote merge (which
-        // still uses timestamp comparison) or on a manual refresh.
-        // That's a much smaller cost than goals flickering away while
-        // someone is trying to type into them.
         setWorkflow((prev) => {
-          const prevSubs = prev?.submissions || {};
-          const incomingSubs = wf.submissions || {};
-          const mergedSubs = {};
-          // Start from incoming so we pick up new/updated submissions
-          // for OTHER users.
-          Object.keys(incomingSubs).forEach((key) => {
-            if (key === employeeCodeKey && prevSubs[key]) {
-              // Hands off our own submission — keep local.
-              mergedSubs[key] = prevSubs[key];
-            } else {
-              mergedSubs[key] = incomingSubs[key];
-            }
-          });
-          // Splice in any local submissions the incoming snapshot was
-          // missing (covers the "stale client stripped someone" race).
-          Object.keys(prevSubs).forEach((key) => {
-            if (prevSubs[key] && !mergedSubs[key]) {
-              mergedSubs[key] = prevSubs[key];
-            }
-          });
-          const merged = { ...wf, submissions: mergedSubs };
+          const protectOwnSubmission = workflowDirtyRef.current;
+          const merged = mergeWorkflowForEmployeeEditor(wf, prev, employeeCodeKey, protectOwnSubmission);
           const mergedRaw = workflowRaw(merged);
           if (mergedRaw === syncedWorkflowRawRef.current) return prev;
           syncedWorkflowRawRef.current = mergedRaw;
@@ -2312,6 +2281,8 @@ export default function EmployeePage() {
   }
 
   function updateMySubmission(mutator) {
+    workflowDirtyRef.current = true;
+    markLocalWorkflowMutation();
     setWorkflow((prev) => {
       const base = prev?.submissions?.[employeeCodeKey] || {
         employeeCode: session.empCode,
@@ -2356,6 +2327,8 @@ export default function EmployeePage() {
   }
 
   function addNotification(notification) {
+    workflowDirtyRef.current = true;
+    markLocalWorkflowMutation();
     setWorkflow((prev) => ({
       submissions: prev?.submissions || {},
       notifications: [notification, ...(prev?.notifications || [])],
@@ -2364,6 +2337,8 @@ export default function EmployeePage() {
 
   function markNotificationsRead(ids) {
     if (!ids || ids.length === 0) return;
+    workflowDirtyRef.current = true;
+    markLocalWorkflowMutation();
     const idSet = new Set(ids);
     setWorkflow((prev) => ({
       submissions: prev?.submissions || {},
@@ -2536,6 +2511,8 @@ export default function EmployeePage() {
           return rest;
         }).filter((goal) => !isDeletedGoalExpired(goal, now));
         if (!changed) return prev;
+        workflowDirtyRef.current = true;
+        markLocalWorkflowMutation();
         return {
           ...prev,
           submissions: {
@@ -2743,6 +2720,8 @@ export default function EmployeePage() {
     const rejectedCount = updatedGoals.filter((g) => g.reviewStatus === 'rejected').length;
     const approvedCount = updatedGoals.length - rejectedCount;
 
+    workflowDirtyRef.current = true;
+    markLocalWorkflowMutation();
     setWorkflow((prev) => ({
       ...prev,
       submissions: {
