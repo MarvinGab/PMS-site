@@ -1292,8 +1292,12 @@ function GoalLibraryPanel({ kras, libraryType, libraryName, canAdd, onAdd, added
   const [collapsed, setCollapsed] = useState(false);
   const [carouselOverflow, setCarouselOverflow] = useState(false);
   const [carouselPaused, setCarouselPaused] = useState(false);
+  const [carouselLoopWidth, setCarouselLoopWidth] = useState(0);
   const carouselRef = useRef(null);
   const carouselTrackRef = useRef(null);
+  const carouselOffsetRef = useRef(0);
+  const carouselFrameRef = useRef(null);
+  const carouselLastFrameRef = useRef(0);
 
   // Only show KRAs not yet in the plan (match by tracked libraryKraId or by name)
   const visibleKras = kras.filter((k) => {
@@ -1303,7 +1307,14 @@ function GoalLibraryPanel({ kras, libraryType, libraryName, canAdd, onAdd, added
 
   const hasAnyKpis = visibleKras.some((k) => (k.kpis || []).length > 0);
   const carouselItems = carouselOverflow ? [...visibleKras, ...visibleKras] : visibleKras;
-  const carouselDuration = Math.max(34, visibleKras.length * 7);
+
+  const applyCarouselOffset = (value) => {
+    const track = carouselTrackRef.current;
+    const loop = carouselLoopWidth || 1;
+    const wrapped = ((value % loop) + loop) % loop;
+    carouselOffsetRef.current = wrapped;
+    if (track) track.style.transform = `translate3d(${-wrapped}px,0,0)`;
+  };
 
   useEffect(() => {
     if (collapsed) return undefined;
@@ -1315,6 +1326,8 @@ function GoalLibraryPanel({ kras, libraryType, libraryName, canAdd, onAdd, added
       const firstSetWidth = track.dataset.looping === 'true' ? renderedWidth / 2 : renderedWidth;
       const nextOverflow = firstSetWidth > viewport.clientWidth + 8;
       setCarouselOverflow((current) => (current === nextOverflow ? current : nextOverflow));
+      setCarouselLoopWidth(firstSetWidth);
+      if (!nextOverflow) applyCarouselOffset(0);
     };
     measure();
     const observer = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(measure) : null;
@@ -1328,6 +1341,27 @@ function GoalLibraryPanel({ kras, libraryType, libraryName, canAdd, onAdd, added
       window.removeEventListener('resize', measure);
     };
   }, [collapsed, visibleKras.length]);
+
+  useEffect(() => {
+    if (carouselFrameRef.current) {
+      cancelAnimationFrame(carouselFrameRef.current);
+      carouselFrameRef.current = null;
+    }
+    if (!carouselOverflow || carouselPaused || returnDropActive || collapsed || carouselLoopWidth <= 0) return undefined;
+    const speedPxPerSecond = 18;
+    carouselLastFrameRef.current = performance.now();
+    const tick = (now) => {
+      const delta = Math.min(64, now - carouselLastFrameRef.current);
+      carouselLastFrameRef.current = now;
+      applyCarouselOffset(carouselOffsetRef.current + (speedPxPerSecond * delta) / 1000);
+      carouselFrameRef.current = requestAnimationFrame(tick);
+    };
+    carouselFrameRef.current = requestAnimationFrame(tick);
+    return () => {
+      if (carouselFrameRef.current) cancelAnimationFrame(carouselFrameRef.current);
+      carouselFrameRef.current = null;
+    };
+  }, [carouselOverflow, carouselPaused, returnDropActive, collapsed, carouselLoopWidth]);
 
   const handleReturnDragOver = (e) => {
     if (!canAdd || !hasDragType(e.dataTransfer, 'application/goal-id')) return;
@@ -1412,15 +1446,6 @@ function GoalLibraryPanel({ kras, libraryType, libraryName, canAdd, onAdd, added
       {/* Card grid — hidden when the panel is collapsed via the −/+ toggle. */}
       {!collapsed && (
       <>
-      <style>{`
-        @keyframes goalLibraryMarquee {
-          from { transform: translateX(0); }
-          to { transform: translateX(-50%); }
-        }
-        .goal-library-carousel::-webkit-scrollbar { height: 8px; }
-        .goal-library-carousel::-webkit-scrollbar-thumb { background: #CBD5E1; border-radius: 999px; }
-        .goal-library-carousel::-webkit-scrollbar-track { background: transparent; }
-      `}</style>
       <div
         ref={carouselRef}
         className="goal-library-carousel"
@@ -1428,12 +1453,19 @@ function GoalLibraryPanel({ kras, libraryType, libraryName, canAdd, onAdd, added
         onMouseLeave={() => setCarouselPaused(false)}
         onFocus={() => setCarouselPaused(true)}
         onBlur={() => setCarouselPaused(false)}
+        onWheel={(e) => {
+          if (!carouselOverflow || carouselLoopWidth <= 0) return;
+          e.preventDefault();
+          const delta = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
+          applyCarouselOffset(carouselOffsetRef.current + delta);
+        }}
         style={{
-          overflowX: carouselOverflow && carouselPaused ? 'auto' : 'hidden',
+          overflowX: 'hidden',
           overflowY: 'hidden',
-          paddingBottom: carouselOverflow && carouselPaused ? 8 : 0,
+          paddingBottom: 0,
           WebkitMaskImage: carouselOverflow ? 'linear-gradient(90deg, transparent 0, #000 28px, #000 calc(100% - 28px), transparent 100%)' : 'none',
           maskImage: carouselOverflow ? 'linear-gradient(90deg, transparent 0, #000 28px, #000 calc(100% - 28px), transparent 100%)' : 'none',
+          cursor: carouselOverflow ? (carouselPaused ? 'ew-resize' : 'default') : 'default',
         }}
       >
       <div
@@ -1442,10 +1474,9 @@ function GoalLibraryPanel({ kras, libraryType, libraryName, canAdd, onAdd, added
         style={{
           display: 'flex',
           flexWrap: 'nowrap',
+          alignItems: 'flex-start',
           gap: 12,
           width: 'max-content',
-          animation: carouselOverflow ? `goalLibraryMarquee ${carouselDuration}s linear infinite` : 'none',
-          animationPlayState: carouselPaused || returnDropActive ? 'paused' : 'running',
           willChange: carouselOverflow ? 'transform' : 'auto',
         }}
       >
@@ -1478,16 +1509,16 @@ function GoalLibraryPanel({ kras, libraryType, libraryName, canAdd, onAdd, added
                 borderRadius: 10,
                 padding: '12px',
                 width: 244,
-                minHeight: 86,
+                minHeight: isSelected ? 184 : 112,
                 flex: '0 0 244px',
                 cursor: canAdd ? 'grab' : 'default',
                 boxShadow: hoveredId === cardId ? '0 7px 16px rgba(15,23,42,.08)' : '0 2px 7px rgba(15,23,42,.04)',
-                transform: 'none',
+                transform: isSelected ? 'translateY(-1px)' : 'none',
                 userSelect: 'none',
                 display: 'flex',
                 flexDirection: 'column',
                 gap: 10,
-                transition: 'box-shadow .15s, border-color .15s',
+                transition: 'box-shadow .15s, border-color .15s, min-height .18s ease, transform .18s ease',
               }}
             >
               {/* Icon + Name */}
@@ -2660,6 +2691,16 @@ export default function EmployeePage() {
     });
   }
 
+  function returnGoalToLibraryNow(goalId) {
+    updateMySubmission((record) => {
+      const now = Date.now();
+      record.goals = (record.goals || [])
+        .filter((goal) => goal.id !== goalId)
+        .filter((goal) => !isDeletedGoalExpired(goal, now));
+      return record;
+    });
+  }
+
   function addKpi(goalId) {
     if (!canAddKpi) return;
     const source = config?.goalCreationMode === 'admin-library' && config?.goalKpiMode === 'kra-kpi' && accessMode === 'add-kpis'
@@ -3340,7 +3381,7 @@ export default function EmployeePage() {
 
     function returnGoalToLibrary(goalId) {
       if (!canReturnGoalToLibrary(goalId)) return;
-      removeGoal(goalId);
+      returnGoalToLibraryNow(goalId);
       setDragGoalId(null);
       setDragOverGoalId(null);
     }
