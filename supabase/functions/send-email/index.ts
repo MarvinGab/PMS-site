@@ -466,8 +466,17 @@ async function requireAuthorizedSession(
     return { ok: false, error: 'Server session has expired.' }
   }
   const role = String(payload.role || '')
-  if (role !== 'super-admin' && role !== 'hr-admin') {
+  if (role !== 'super-admin' && role !== 'hr-admin' && role !== 'employee') {
     return { ok: false, error: 'This session is not allowed to send email.' }
+  }
+  if (role === 'employee') {
+    if (String(payload.orgKey || '') !== organizationKey) {
+      return { ok: false, error: 'This session is not allowed to send mail for another organization.' }
+    }
+    const onlyManagerMessages = messages.every((message) => message.type === 'custom-broadcast')
+    if (!onlyManagerMessages) {
+      return { ok: false, error: 'Employee sessions can only send manager reminder emails.' }
+    }
   }
   if (role !== 'super-admin' && String(payload.orgKey || '') !== organizationKey) {
     return { ok: false, error: 'This session is not allowed to send mail for another organization.' }
@@ -878,6 +887,31 @@ async function isAllowedRecipient(
   return Array.isArray(data) && data.length > 0
 }
 
+async function isAllowedRecipientForActor(
+  client: ReturnType<typeof createClient>,
+  org: OrgRow,
+  message: MessageRequest,
+  actor: Record<string, unknown> | null,
+) {
+  const role = String(actor?.role || '')
+  if (role !== 'employee') return await isAllowedRecipient(client, org, message)
+
+  if (message.type !== 'custom-broadcast') return false
+  const recipientEmail = normalizeEmail(message.recipientEmail)
+  const managerCode = String(actor?.empCode || '').trim()
+  if (!recipientEmail || !managerCode) return false
+
+  const { data, error } = await client
+    .from('employees')
+    .select('employee_code')
+    .eq('organization_id', org.id)
+    .eq('email', recipientEmail)
+    .eq('manager_code', managerCode)
+    .limit(1)
+  if (error) throw error
+  return Array.isArray(data) && data.length > 0
+}
+
 async function logDelivery(
   client: ReturnType<typeof createClient>,
   org: OrgRow,
@@ -1001,7 +1035,7 @@ Deno.serve(async (req: Request) => {
   }
 
   async function processMessage(message: MessageRequest) {
-    const allowed = await isAllowedRecipient(adminClient, org, message)
+    const allowed = await isAllowedRecipientForActor(adminClient, org, message, sessionPayload)
     if (!allowed) {
       const content = buildContent(message)
       await logDelivery(adminClient, org, message, content, 'failed', {

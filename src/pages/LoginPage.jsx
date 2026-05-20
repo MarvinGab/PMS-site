@@ -605,7 +605,13 @@ export default function LoginPage() {
         orgKey: user.orgKey || '',
       });
       clearEmployeeActiveSection(user.orgKey, user.empCode);
-      login('employee', { userName: user.userName, userEmail: identifier });
+      login('employee', {
+        orgKey: user.orgKey,
+        userName: user.userName,
+        userEmail: identifier,
+        empCode: user.empCode,
+        serverSessionToken: user.serverSessionToken || null,
+      });
       const targetTenant = loginTenant?.orgKey ? loginTenant : { ...loginTenant, workspaceSlug: loginTenant?.workspaceSlug || user.workspaceSlug };
       const routeUrl = getScopedRouteUrl(targetTenant, 'employee');
       if (routeUrl.startsWith('#')) window.location.hash = '#employee';
