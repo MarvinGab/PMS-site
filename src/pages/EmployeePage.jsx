@@ -1159,6 +1159,17 @@ function buildEmptyKra(perspectives) {
   });
 }
 
+function isBlankManualGoal(goal) {
+  if (!goal || goal.libraryKraId || goal.deletedAt || goal.reviewStatus || goal.managerStatus || goal.status) return false;
+  const hasGoalContent = !!sanitizeText(goal.name) || !!String(goal.weight ?? '').trim();
+  if (hasGoalContent) return false;
+  return (goal.kpis || []).every((kpi) => (
+    !sanitizeText(kpi.name)
+    && !String(kpi.weight ?? '').trim()
+    && !sanitizeText(kpi.target)
+  ));
+}
+
 function buildEmptyKpi(source = 'employee') {
   return createKpi({ name: '', weight: '', target: '' }, source);
 }
@@ -2594,6 +2605,11 @@ export default function EmployeePage() {
 
   function addGoal() {
     if (!canAddKra) return;
+    const reusableBlank = myGoals.find(isBlankManualGoal);
+    if (reusableBlank) {
+      setEditingGoalId(reusableBlank.id);
+      return;
+    }
     updateMySubmission((record) => {
       record.goals = [...(record.goals || []), buildEmptyKra(activePerspectives)];
       return record;
@@ -2602,6 +2618,15 @@ export default function EmployeePage() {
 
   function addGoalAndEdit() {
     if (!canAddKra) return;
+    const reusableBlank = myGoals.find(isBlankManualGoal);
+    if (reusableBlank) {
+      updateMySubmission((record) => {
+        record.goals = (record.goals || []).filter((goal) => goal.id === reusableBlank.id || !isBlankManualGoal(goal));
+        return record;
+      });
+      setEditingGoalId(reusableBlank.id);
+      return;
+    }
     const newKra = buildEmptyKra(activePerspectives);
     updateMySubmission((record) => {
       record.goals = [...(record.goals || []), newKra];
@@ -2613,6 +2638,16 @@ export default function EmployeePage() {
   function addGoalToPerspective(perspName) {
     if (!canAddKra) return;
     if (isFlatFramework) return addGoalAndEdit();
+    const targetPerspective = sanitizeText(perspName || '');
+    const reusableBlank = myGoals.find((goal) => isBlankManualGoal(goal) && sanitizeText(goal.perspName) === targetPerspective);
+    if (reusableBlank) {
+      updateMySubmission((record) => {
+        record.goals = (record.goals || []).filter((goal) => goal.id === reusableBlank.id || !isBlankManualGoal(goal));
+        return record;
+      });
+      setEditingGoalId(reusableBlank.id);
+      return;
+    }
     const newKra = createKra({ name: '', weight: '', perspName: perspName || '', kpis: [] });
     updateMySubmission((record) => {
       record.goals = [...(record.goals || []), newKra];
@@ -3918,6 +3953,12 @@ export default function EmployeePage() {
               const hasAttemptedDone = attemptedDoneIds.has(goal.id);
               const hasBlockingErrors = modalIssues.some((i) => i.kind === 'error');
               const closeModal = () => {
+                if (isBlankManualGoal(goal)) {
+                  updateMySubmission((record) => {
+                    record.goals = (record.goals || []).filter((item) => item.id !== goal.id);
+                    return record;
+                  });
+                }
                 setAttemptedDoneIds((prev) => {
                   if (!prev.has(goal.id)) return prev;
                   const next = new Set(prev); next.delete(goal.id); return next;
