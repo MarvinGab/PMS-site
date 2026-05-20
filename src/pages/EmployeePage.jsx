@@ -238,6 +238,21 @@ function getGoalIdentity(goal) {
   return libraryKey || nameKey;
 }
 
+function getGoalLibraryClaimKeys(goal = {}) {
+  return [
+    goal.libraryKraId,
+    goal.sourceKraId,
+    goal.originalKraId,
+    goal.id,
+    goal.name,
+    sanitizeText(goal.libraryKraId),
+    sanitizeText(goal.sourceKraId),
+    sanitizeText(goal.originalKraId),
+    sanitizeText(goal.id),
+    sanitizeText(goal.name),
+  ].map((value) => String(value || '').trim()).filter(Boolean);
+}
+
 function dedupeGoals(goals = []) {
   const seen = new Set();
   return (goals || []).filter((goal) => {
@@ -1281,9 +1296,8 @@ function GoalLibraryPanel({ kras, libraryType, libraryName, canAdd, onAdd, added
 
   // Only show KRAs not yet in the plan (match by tracked libraryKraId or by name)
   const visibleKras = kras.filter((k) => {
-    const kid = k.id || k.name;
-    const kname = sanitizeText(k.name);
-    return !addedIds.has(kid) && !addedIds.has(kname);
+    const claimKeys = getGoalLibraryClaimKeys(k);
+    return !claimKeys.some((key) => addedIds.has(key));
   });
 
   const hasAnyKpis = visibleKras.some((k) => (k.kpis || []).length > 0);
@@ -3313,15 +3327,14 @@ export default function EmployeePage() {
     }
 
     const libraryReturnKeys = new Set(libraryKras.flatMap((kra) => [
-      kra.id || kra.name,
-      sanitizeText(kra.name),
+      ...getGoalLibraryClaimKeys(kra),
     ]).filter(Boolean));
 
     function canReturnGoalToLibrary(goalId) {
       if (!canEditGoalPlan) return false;
       const goal = myGoals.find((item) => item.id === goalId);
       if (!goal) return false;
-      return libraryReturnKeys.has(goal.libraryKraId) || libraryReturnKeys.has(sanitizeText(goal.name));
+      return getGoalLibraryClaimKeys(goal).some((key) => libraryReturnKeys.has(key));
     }
 
     function returnGoalToLibrary(goalId) {
@@ -3336,10 +3349,7 @@ export default function EmployeePage() {
     // goals stay hidden from the library to avoid showing the same KRA in both
     // Goal Library and Deleted Goals.
     const claimedGoalsForLibrary = allMyGoals.filter((goal) => !isDeletedGoalExpired(goal));
-    const addedLibraryIds = new Set([
-      ...claimedGoalsForLibrary.map((g) => g.libraryKraId).filter(Boolean),
-      ...claimedGoalsForLibrary.map((g) => sanitizeText(g.name)).filter(Boolean),
-    ]);
+    const addedLibraryIds = new Set(claimedGoalsForLibrary.flatMap((goal) => getGoalLibraryClaimKeys(goal)));
 
     return (
       <div>
