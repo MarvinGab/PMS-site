@@ -5212,13 +5212,15 @@ export default function EmployeePage() {
         )}
         {reviewableGoals.map((goal, goalIndex) => {
           const color = getPerspectiveColor(goal, activePerspectives, goalIndex);
-          const locked = goal.reviewStatus === 'approved';
+          const goalReviewStatus = getGoalReviewStatus(goal, submission);
+          const locked = goalReviewStatus === 'approved';
+          const sentBack = goalReviewStatus === 'rejected';
           const broken = !isGoalStructurallyValid(goal, reviewEffectiveConfig);
           const pick = picks[goal.id];
           const markedApprove = !readOnly && !locked && pick?.status === 'approve';
           const markedReject = !readOnly && !locked && pick?.status === 'reject';
-          const stateColor = locked || markedApprove ? '#16A34A' : markedReject ? '#DC2626' : '#E2E8F0';
-          const stateBg = locked ? '#F0FDF4' : markedApprove ? '#F0FDF4' : markedReject ? '#FEF2F2' : '#fff';
+          const stateColor = locked || markedApprove ? '#16A34A' : sentBack || markedReject ? '#DC2626' : '#E2E8F0';
+          const stateBg = locked ? '#F0FDF4' : sentBack || markedReject ? '#FEF2F2' : '#fff';
           return (
             <div key={goal.id} style={{
               border: `1.5px solid ${stateColor}`,
@@ -5244,6 +5246,11 @@ export default function EmployeePage() {
                     <div style={{ display: 'inline-flex', alignItems: 'center', gap: 3, padding: '3px 8px', borderRadius: 999, background: '#DCFCE7', border: '1px solid #86EFAC', color: '#15803D', fontSize: 11, fontWeight: 700 }}>
                       <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
                       Approved
+                    </div>
+                  ) : readOnly && sentBack ? (
+                    <div style={{ display: 'inline-flex', alignItems: 'center', gap: 3, padding: '3px 8px', borderRadius: 999, background: '#FEE2E2', border: '1px solid #FECACA', color: '#B91C1C', fontSize: 11, fontWeight: 700 }}>
+                      <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                      Sent back
                     </div>
                   ) : readOnly ? null : (
                     <>
@@ -5321,6 +5328,11 @@ export default function EmployeePage() {
                     placeholder="Tell them what to change (optional)…"
                     style={{ width: '100%', padding: '7px 10px', borderRadius: 7, border: '1.5px solid #FECACA', fontFamily: 'inherit', fontSize: 12.5, resize: 'vertical', background: '#fff', color: '#0F172A', boxSizing: 'border-box' }}
                   />
+                </div>
+              )}
+              {readOnly && sentBack && goal.reviewNote && (
+                <div style={{ marginTop: 8, padding: '8px 10px', background: '#fff', border: '1px solid #FECACA', borderRadius: 7, color: '#991B1B', fontSize: 12.5, lineHeight: 1.45 }}>
+                  <span style={{ fontWeight: 700 }}>Manager:</span> {goal.reviewNote}
                 </div>
               )}
             </div>
