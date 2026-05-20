@@ -30,8 +30,8 @@ const MESSAGES_KEY = 'zarohr_messages_v1';
 const REMINDER_COOLDOWN_MS = 4 * 60 * 60 * 1000;
 
 // How long a soft-deleted goal sits in the Deleted Goals trash before being
-// purged from storage. Library-sourced goals (those carrying `libraryKraId`)
-// are not soft-deleted — they hard-delete and re-appear in the Goal Library.
+// purged from storage. While a library-sourced goal sits in Deleted Goals, it
+// stays hidden from the Goal Library so employees do not see it in two places.
 const DELETED_GOAL_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 
 function isDeletedGoalExpired(goal, now = Date.now()) {
@@ -892,7 +892,7 @@ function getSubmissionStatusMeta(record) {
 // Returns the per-goal review status. Goals that have explicit reviewStatus use that. Legacy
 // submissions (no per-goal marks) fall back to the submission-level status applied to every goal.
 function getGoalReviewStatus(goal, submission) {
-  if (goal?.reviewStatus === 'pending') return 'pending';
+  if (goal?.reviewStatus === 'pending') return null;
   if (goal?.reviewStatus === 'approved' || goal?.reviewStatus === 'rejected') return goal.reviewStatus;
   if (submission?.status === 'approved') return 'approved';
   if (submission?.status === 'sent-back') return 'rejected';
@@ -2519,6 +2519,7 @@ export default function EmployeePage() {
           const {
             deletedAt: _drop,
             deletedBy: _drop2,
+            reviewStatus: _reviewStatus,
             reviewNote: _reviewNote,
             reviewedAt: _reviewedAt,
             ...rest
@@ -3260,10 +3261,14 @@ export default function EmployeePage() {
       setDragOverGoalId(null);
     }
 
-    // Which library KRAs are already in the plan — by explicit stamp or by name match (covers pre-filled goals)
+    // Which library KRAs already exist in the plan or trash — by explicit
+    // stamp or by name match (covers pre-filled goals). Deleted-but-recoverable
+    // goals stay hidden from the library to avoid showing the same KRA in both
+    // Goal Library and Deleted Goals.
+    const claimedGoalsForLibrary = allMyGoals.filter((goal) => !isDeletedGoalExpired(goal));
     const addedLibraryIds = new Set([
-      ...myGoals.map((g) => g.libraryKraId).filter(Boolean),
-      ...myGoals.map((g) => sanitizeText(g.name)).filter(Boolean),
+      ...claimedGoalsForLibrary.map((g) => g.libraryKraId).filter(Boolean),
+      ...claimedGoalsForLibrary.map((g) => sanitizeText(g.name)).filter(Boolean),
     ]);
 
     return (
