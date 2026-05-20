@@ -1274,6 +1274,10 @@ function GoalLibraryPanel({ kras, libraryType, libraryName, canAdd, onAdd, added
   const [hoveredId, setHoveredId] = useState(null);
   const [returnDropActive, setReturnDropActive] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
+  const [carouselOverflow, setCarouselOverflow] = useState(false);
+  const [carouselPaused, setCarouselPaused] = useState(false);
+  const carouselRef = useRef(null);
+  const carouselTrackRef = useRef(null);
 
   // Only show KRAs not yet in the plan (match by tracked libraryKraId or by name)
   const visibleKras = kras.filter((k) => {
@@ -1283,6 +1287,31 @@ function GoalLibraryPanel({ kras, libraryType, libraryName, canAdd, onAdd, added
   });
 
   const hasAnyKpis = visibleKras.some((k) => (k.kpis || []).length > 0);
+  const carouselItems = carouselOverflow ? [...visibleKras, ...visibleKras] : visibleKras;
+  const carouselDuration = Math.max(34, visibleKras.length * 7);
+
+  useEffect(() => {
+    if (collapsed) return undefined;
+    const measure = () => {
+      const viewport = carouselRef.current;
+      const track = carouselTrackRef.current;
+      if (!viewport || !track) return;
+      const renderedWidth = track.scrollWidth || 0;
+      const firstSetWidth = carouselOverflow ? renderedWidth / 2 : renderedWidth;
+      setCarouselOverflow(firstSetWidth > viewport.clientWidth + 8);
+    };
+    measure();
+    const observer = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(measure) : null;
+    if (observer) {
+      if (carouselRef.current) observer.observe(carouselRef.current);
+      if (carouselTrackRef.current) observer.observe(carouselTrackRef.current);
+    }
+    window.addEventListener('resize', measure);
+    return () => {
+      observer?.disconnect();
+      window.removeEventListener('resize', measure);
+    };
+  }, [carouselOverflow, collapsed, visibleKras.length]);
 
   const handleReturnDragOver = (e) => {
     if (!canAdd || !hasDragType(e.dataTransfer, 'application/goal-id')) return;
@@ -1366,9 +1395,46 @@ function GoalLibraryPanel({ kras, libraryType, libraryName, canAdd, onAdd, added
 
       {/* Card grid — hidden when the panel is collapsed via the −/+ toggle. */}
       {!collapsed && (
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(172px,1fr))', gap: 12 }}>
-        {visibleKras.map((kra, index) => {
+      <>
+      <style>{`
+        @keyframes goalLibraryMarquee {
+          from { transform: translateX(0); }
+          to { transform: translateX(-50%); }
+        }
+        .goal-library-carousel::-webkit-scrollbar { height: 8px; }
+        .goal-library-carousel::-webkit-scrollbar-thumb { background: #CBD5E1; border-radius: 999px; }
+        .goal-library-carousel::-webkit-scrollbar-track { background: transparent; }
+      `}</style>
+      <div
+        ref={carouselRef}
+        className="goal-library-carousel"
+        onMouseEnter={() => setCarouselPaused(true)}
+        onMouseLeave={() => setCarouselPaused(false)}
+        onFocus={() => setCarouselPaused(true)}
+        onBlur={() => setCarouselPaused(false)}
+        style={{
+          overflowX: carouselOverflow && carouselPaused ? 'auto' : 'hidden',
+          overflowY: 'hidden',
+          paddingBottom: carouselOverflow && carouselPaused ? 8 : 0,
+          WebkitMaskImage: carouselOverflow ? 'linear-gradient(90deg, transparent 0, #000 28px, #000 calc(100% - 28px), transparent 100%)' : 'none',
+          maskImage: carouselOverflow ? 'linear-gradient(90deg, transparent 0, #000 28px, #000 calc(100% - 28px), transparent 100%)' : 'none',
+        }}
+      >
+      <div
+        ref={carouselTrackRef}
+        style={{
+          display: 'flex',
+          flexWrap: 'nowrap',
+          gap: 12,
+          width: 'max-content',
+          animation: carouselOverflow ? `goalLibraryMarquee ${carouselDuration}s linear infinite` : 'none',
+          animationPlayState: carouselPaused || returnDropActive ? 'paused' : 'running',
+          willChange: carouselOverflow ? 'transform' : 'auto',
+        }}
+      >
+        {carouselItems.map((kra, index) => {
           const cardId = kra.id || kra.name;
+          const instanceKey = `${cardId || index}_${index >= visibleKras.length ? 'loop' : 'main'}_${index}`;
           const isSelected = selectedId === cardId;
           const kpiList = kra.kpis || [];
           const sourceIndex = kras.findIndex((item) => (item.id || item.name) === cardId || sanitizeText(item.name) === sanitizeText(kra.name));
@@ -1378,7 +1444,7 @@ function GoalLibraryPanel({ kras, libraryType, libraryName, canAdd, onAdd, added
 
           return (
             <div
-              key={cardId}
+              key={instanceKey}
               draggable={canAdd}
               onDragStart={(e) => {
                 e.dataTransfer.setData('application/kra', JSON.stringify(kra));
@@ -1394,7 +1460,9 @@ function GoalLibraryPanel({ kras, libraryType, libraryName, canAdd, onAdd, added
                 border: `1.5px solid ${isSelected ? `${color}66` : hoveredId === cardId ? '#D6E4FF' : '#DCE6F2'}`,
                 borderRadius: 10,
                 padding: '12px',
+                width: 244,
                 minHeight: 86,
+                flex: '0 0 244px',
                 cursor: canAdd ? 'grab' : 'default',
                 boxShadow: hoveredId === cardId ? '0 7px 16px rgba(15,23,42,.08)' : '0 2px 7px rgba(15,23,42,.04)',
                 transform: 'none',
@@ -1467,6 +1535,8 @@ function GoalLibraryPanel({ kras, libraryType, libraryName, canAdd, onAdd, added
           );
         })}
 	          </div>
+          </div>
+          </>
       )}
 	        </div>
 	      );
@@ -3428,8 +3498,29 @@ export default function EmployeePage() {
 
             {/* Empty state when no goals but can add */}
             {myGoals.length === 0 && canAddKra && (
-              <div style={{ padding: '36px', textAlign: 'center', border: '2px dashed #E2E8F0', borderRadius: 14, marginBottom: 16, color: '#94A3B8', fontSize: 14 }}>
-                Click "+ Create Goal" to add your first KRA{empGroupLib !== null && libraryKras.length > 0 ? ', or drag a card from the Goal Library above' : ''}.
+              <div style={{
+                padding: '30px 34px',
+                textAlign: 'center',
+                border: libDropActive ? '2px dashed #6366F1' : '2px dashed #CBD5E1',
+                borderRadius: 14,
+                marginBottom: 16,
+                color: '#334155',
+                background: libDropActive ? '#EEF2FF' : 'linear-gradient(135deg,#FFFFFF 0%,#F8FAFC 100%)',
+                boxShadow: libDropActive ? '0 12px 28px rgba(99,102,241,.14)' : 'inset 0 0 0 1px rgba(255,255,255,.7)',
+              }}>
+                <div style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: 42, height: 42, borderRadius: 12, background: libDropActive ? '#E0E7FF' : '#F1F5F9', color: libDropActive ? '#4338CA' : '#475569', marginBottom: 12 }}>
+                  <svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.3" strokeLinecap="round" strokeLinejoin="round"><path d="M12 5v14"/><path d="M5 12h14"/></svg>
+                </div>
+                <div style={{ fontSize: 18, fontWeight: 900, color: '#0F172A', marginBottom: 6 }}>
+                  Start your goal plan
+                </div>
+                <div style={{ fontSize: 14.5, fontWeight: 700, color: '#475569', lineHeight: 1.55 }}>
+                  Drag a card from the Goal Library into this area{empGroupLib !== null && libraryKras.length > 0 ? ', or click' : ' or click'} <span style={{ color: '#EA580C', fontWeight: 900 }}>+ Create Goal</span> to write your own KRA.
+                </div>
+                <div style={{ display: 'inline-flex', alignItems: 'center', gap: 8, marginTop: 14, padding: '7px 12px', borderRadius: 999, background: '#FFF7ED', border: '1px solid #FED7AA', color: '#C2410C', fontSize: 12.5, fontWeight: 800 }}>
+                  <span style={{ width: 7, height: 7, borderRadius: '50%', background: '#EA580C' }} />
+                  Your submitted plan needs at least one goal.
+                </div>
               </div>
             )}
 
