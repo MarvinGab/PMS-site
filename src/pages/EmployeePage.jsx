@@ -2158,6 +2158,7 @@ export default function EmployeePage() {
   const employee = useMemo(() => session && config ? getEmployeeRecord(config, session.empCode) : null, [session, config]);
   const managerCode = String(employee?.['Reporting Manager Code'] || session?.managerCode || '').trim();
   const managerName = useMemo(() => config && managerCode ? getManagerName(config, managerCode, String(employee?.['Reporting Manager Name'] || '').trim()) : null, [config, managerCode, employee]);
+  const managerRecord = useMemo(() => config && managerCode ? getEmployeeRecord(config, managerCode) : null, [config, managerCode]);
   const employeeCodeKey = normalizeCode(session?.empCode);
   const perspectives = useMemo(() => (config?.perspectives || []).filter((item) => item?.name && Number(item?.weight) > 0), [config]);
 
@@ -5885,74 +5886,52 @@ export default function EmployeePage() {
   }
 
   function renderProfile() {
-    const initials = employeeName.split(' ').map((w) => w[0]).filter(Boolean).slice(0, 2).join('').toUpperCase();
+    const phaseLabel = PHASES[phaseIndex]?.label || currentPhase || '—';
+    const employeeEmail = employee?.['Email ID'] || employee?.email || '—';
+    const rmEmail = managerRecord?.['Email ID'] || managerRecord?.email || '—';
+    const companyIdentifierLabel = employeeGroup?.segmentAttr || config?.goalSegmentAttr || 'Configured identifier';
+    const companyIdentifierValue = companyIdentifierLabel
+      ? (employee?.[companyIdentifierLabel] || employee?.assignedGoalLibraryKey || '—')
+      : '—';
+    const detailGroups = [
+      {
+        title: 'Employee',
+        rows: [
+          { label: 'Employee code', value: session.empCode },
+          { label: 'Email ID', value: employeeEmail },
+          { label: companyIdentifierLabel, value: companyIdentifierValue },
+          { label: 'Current phase', value: phaseLabel },
+        ],
+      },
+      {
+        title: 'Reporting Manager',
+        rows: [
+          { label: 'Name', value: managerName || '—' },
+          { label: 'Employee code', value: managerCode || '—' },
+          { label: 'Email ID', value: rmEmail },
+        ],
+      },
+    ];
     return (
-      <div>
-        {/* Hero card */}
-        <div style={{ background: 'linear-gradient(135deg,#7C3AED 0%,#EC4899 100%)', borderRadius: 16, padding: '36px 28px', marginBottom: 20, color: '#fff', textAlign: 'center' }}>
-          <div style={{ width: 78, height: 78, borderRadius: '50%', background: 'rgba(255,255,255,0.22)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 30, fontWeight: 800, margin: '0 auto 14px', border: '3px solid rgba(255,255,255,0.4)' }}>
-            {initials}
-          </div>
-          <div style={{ fontSize: 22, fontWeight: 800, marginBottom: 5 }}>{employeeName}</div>
-          <div style={{ fontSize: 15, opacity: 0.88 }}>{employeeDesignation || 'Employee'}</div>
+      <div style={{ display: 'grid', gap: 14 }}>
+        <div style={{ background: '#fff', border: '1px solid #E2E8F0', borderRadius: 12, padding: '18px 20px' }}>
+          <div style={{ fontSize: 18, fontWeight: 850, color: '#0F172A', marginBottom: 4 }}>My details</div>
+          <div style={{ fontSize: 13, color: '#64748B' }}>PMS identity and reporting information for the current cycle.</div>
         </div>
-
-        {/* Contact Information */}
-        <div style={{ background: '#fff', border: '1px solid #E2E8F0', borderRadius: 14, padding: '22px 24px', marginBottom: 14 }}>
-          <div style={{ fontSize: 13, fontWeight: 700, color: '#94A3B8', textTransform: 'uppercase', letterSpacing: '.07em', marginBottom: 16 }}>Contact Information</div>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 18 }}>
-            {[
-              { label: 'Employee Code', value: session.empCode },
-              { label: 'Email', value: employee?.['Email ID'] || employee?.email || '—' },
-              { label: 'Phone', value: employee?.Phone || employee?.['Phone Number'] || '—' },
-              { label: 'Location', value: employee?.Location || employee?.City || '—' },
-            ].map(({ label, value }) => (
-              <div key={label}>
-                <div style={{ fontSize: 12, fontWeight: 600, color: '#94A3B8', textTransform: 'uppercase', letterSpacing: '.05em', marginBottom: 5 }}>{label}</div>
-                <div style={{ fontSize: 14.5, fontWeight: 500, color: '#0D1117' }}>{value}</div>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: 14 }}>
+          {detailGroups.map((group) => (
+            <div key={group.title} style={{ background: '#fff', border: '1px solid #E2E8F0', borderRadius: 12, padding: '18px 20px', boxShadow: '0 10px 28px rgba(15,23,42,.04)' }}>
+              <div style={{ fontSize: 12, fontWeight: 850, color: '#475569', textTransform: 'uppercase', letterSpacing: '.07em', marginBottom: 14 }}>{group.title}</div>
+              <div style={{ display: 'grid', gap: 12 }}>
+                {group.rows.map(({ label, value }) => (
+                  <div key={label} style={{ display: 'grid', gridTemplateColumns: '145px minmax(0,1fr)', gap: 14, alignItems: 'baseline', paddingBottom: 10, borderBottom: '1px solid #F1F5F9' }}>
+                    <div style={{ fontSize: 12.5, fontWeight: 750, color: '#94A3B8' }}>{label}</div>
+                    <div style={{ fontSize: 14, fontWeight: 700, color: '#172033', minWidth: 0, overflowWrap: 'anywhere' }}>{value || '—'}</div>
+                  </div>
+                ))}
               </div>
-            ))}
-          </div>
-        </div>
-
-        {/* Professional Details */}
-        <div style={{ background: '#fff', border: '1px solid #E2E8F0', borderRadius: 14, padding: '22px 24px', marginBottom: 14 }}>
-          <div style={{ fontSize: 13, fontWeight: 700, color: '#94A3B8', textTransform: 'uppercase', letterSpacing: '.07em', marginBottom: 16 }}>Professional Details</div>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 18 }}>
-            {[
-              { label: 'Designation / Role', value: employeeDesignation || '—' },
-              { label: 'Department', value: employee?.Department || '—' },
-              { label: employeeGroup?.segmentAttr || 'Role', value: (employeeGroup?.segmentAttr ? (employee?.[employeeGroup.segmentAttr] || '—') : (employeeDesignation || '—')) },
-              { label: 'Reporting Manager', value: managerName || '—' },
-              { label: 'Framework', value: config?.frameworkId?.toUpperCase() || '—' },
-            ].map(({ label, value }) => (
-              <div key={label}>
-                <div style={{ fontSize: 12, fontWeight: 600, color: '#94A3B8', textTransform: 'uppercase', letterSpacing: '.05em', marginBottom: 5 }}>{label}</div>
-                <div style={{ fontSize: 14.5, fontWeight: 500, color: '#0D1117' }}>{value}</div>
-              </div>
-            ))}
-          </div>
-        </div>
-
-        {/* Cycle Status */}
-        <div style={{ background: '#fff', border: '1px solid #E2E8F0', borderRadius: 14, padding: '22px 24px' }}>
-          <div style={{ fontSize: 13, fontWeight: 700, color: '#94A3B8', textTransform: 'uppercase', letterSpacing: '.07em', marginBottom: 16 }}>Current Cycle Status</div>
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
-            {PHASES.map((phase, index) => {
-              const isDone = index < phaseIndex;
-              const isActive = index === phaseIndex;
-              return (
-                <div key={phase.id} style={{
-                  padding: '8px 16px', borderRadius: 20, fontSize: 13, fontWeight: 600,
-                  background: isActive ? '#EFF6FF' : isDone ? '#F0FDF4' : '#F8FAFC',
-                  color: isActive ? '#2563EB' : isDone ? '#16A34A' : '#94A3B8',
-                  border: `1px solid ${isActive ? '#BFDBFE' : isDone ? '#BBF7D0' : '#E2E8F0'}`,
-                }}>
-                  {isDone ? '✓ ' : isActive ? '▶ ' : ''}{phase.label}
-                </div>
-              );
-            })}
-          </div>
+            </div>
+          ))}
         </div>
       </div>
     );
@@ -6449,35 +6428,12 @@ export default function EmployeePage() {
             {profileDropdownOpen && (
               <div style={{
                 position: 'absolute', top: 'calc(100% + 10px)', right: 0,
-                width: 286,
+                width: 190,
                 background: '#fff', border: '1px solid #E2E8F0', borderRadius: 14,
                 boxShadow: '0 18px 50px rgba(15,23,42,.16)', zIndex: 210,
                 overflow: 'hidden',
               }}>
-                <div style={{ padding: '14px 15px', borderBottom: '1px solid #F1F5F9', background: 'linear-gradient(135deg,#F8FAFF,#fff)' }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                    <div style={{ width: 38, height: 38, borderRadius: '50%', background: 'linear-gradient(135deg,#2563EB,#7C3AED)', color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 800 }}>
-                      {employeeName.charAt(0).toUpperCase()}
-                    </div>
-                    <div style={{ minWidth: 0 }}>
-                      <div style={{ fontSize: 14, fontWeight: 800, color: '#0F172A', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{employeeName}</div>
-                      <div style={{ fontSize: 12, color: '#64748B', marginTop: 2 }}>{session.empCode}</div>
-                    </div>
-                  </div>
-                </div>
-                <div style={{ padding: '10px 14px 8px', display: 'grid', gap: 7 }}>
-                  {[
-                    ['Role', employeeDesignation || 'Employee'],
-                    ['Reporting Manager', managerName || '—'],
-                    ['Email', employee?.['Email ID'] || employee?.email || '—'],
-                  ].map(([label, value]) => (
-                    <div key={label} style={{ display: 'flex', justifyContent: 'space-between', gap: 12, fontSize: 12.5 }}>
-                      <span style={{ color: '#94A3B8', fontWeight: 700 }}>{label}</span>
-                      <span style={{ color: '#334155', fontWeight: 600, textAlign: 'right', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{value}</span>
-                    </div>
-                  ))}
-                </div>
-                <div style={{ padding: 8, borderTop: '1px solid #F1F5F9', display: 'grid', gap: 6 }}>
+                <div style={{ padding: 8, display: 'grid', gap: 6 }}>
                   <button
                     type="button"
                     onClick={() => {
@@ -6486,7 +6442,7 @@ export default function EmployeePage() {
                     }}
                     style={{ width: '100%', padding: '9px 10px', border: '1px solid #E2E8F0', borderRadius: 10, background: '#fff', color: '#334155', cursor: 'pointer', fontFamily: 'inherit', fontSize: 13, fontWeight: 700, textAlign: 'left' }}
                   >
-                    View PMS details
+                    My details
                   </button>
                   <button
                     type="button"
