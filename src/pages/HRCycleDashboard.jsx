@@ -34,6 +34,9 @@ import {
   sendOrgSmtpTestEmail,
   verifyOrgSmtpConnection,
 } from '../backend/emailSmtpService';
+import PhaseSettingsEditor from '../components/PhaseSettingsEditor';
+import { validateCycleWindows, defaultWindowsForFiscalYear } from '../backend/cyclePhase';
+import { useCyclePhase } from '../hooks/useCyclePhase';
 
 const WIZARD_STATE_KEY = 'zarohr_pms_wizard_state_v1';
 const GOAL_WORKFLOW_KEY = 'zarohr_goal_workflow_v1';
@@ -652,6 +655,7 @@ function applyEmailPatch(employees, code, newEmail) {
 const NAV_MODULES = [
   { id: 'overview',    icon: '🏠', label: 'Overview',            group: 'main' },
   { id: 'emp-status',  icon: '👥', label: 'Employee Status',     group: 'main' },
+  { id: 'cycle-calendar', icon: '📅', label: 'Cycle Calendar',   group: 'main' },
   { id: 'comms',       icon: '✉️',  label: 'Communications',      group: 'ops' },
   { id: 'stage',       icon: '🔀', label: 'Stage Control',       group: 'ops' },
   { id: 'mgr-change',  icon: '👤', label: 'Manager Change',      group: 'ops' },
@@ -671,6 +675,9 @@ function NavIcon({ id, color = 'currentColor' }) {
     ),
     'emp-status': (
       <svg {...common}><path d="M16 20v-1.5a3.5 3.5 0 0 0-3.5-3.5h-4A3.5 3.5 0 0 0 5 18.5V20" /><circle cx="10.5" cy="8" r="3" /><path d="M18.5 20v-1.2a3 3 0 0 0-2-2.9" /><path d="M16.5 5.3a3 3 0 0 1 0 5.4" /></svg>
+    ),
+    'cycle-calendar': (
+      <svg {...common}><rect x="3.5" y="5" width="17" height="15" rx="2" /><path d="M3.5 9.5h17" /><path d="M8 3.5v3" /><path d="M16 3.5v3" /><path d="M7.5 13.5h2" /><path d="M12 13.5h2" /><path d="M7.5 17h2" /><path d="M12 17h4.5" /></svg>
     ),
     comms: (
       <svg {...common}><rect x="3.5" y="5.5" width="17" height="13" rx="2" /><path d="m4.5 7 7.5 5.5L19.5 7" /></svg>
@@ -6094,6 +6101,176 @@ function cardAccentStylePreview(mode, tint) {
   };
 }
 
+function ModuleCycleCalendar({ org, onOrgChange }) {
+  const [draft, setDraft] = useState(() => org?.cyclePhaseWindows || null);
+  const [saveState, setSaveState] = useState({ status: 'idle', message: '' });
+  const phase = useCyclePhase(org);
+
+  // Keep the editor's draft in sync if the parent org changes externally (e.g.
+  // realtime push from another tab) — but don't clobber edits in progress.
+  useEffect(() => {
+    if (saveState.status === 'editing') return;
+    setDraft(org?.cyclePhaseWindows || null);
+  }, [org?.cyclePhaseWindows, saveState.status]);
+
+  const fyStart = String(org?.customPmsStartDate || '').trim();
+  const fyEnd   = String(org?.customPmsEndDate   || '').trim();
+
+  function handleChange(next) {
+    setDraft(next);
+    setSaveState({ status: 'editing', message: '' });
+  }
+
+  function handleSeedDefaults() {
+    const range = fyStart && fyEnd ? { startsOn: fyStart, endsOn: fyEnd } : null;
+    if (!range) {
+      setSaveState({ status: 'failed', message: 'Set fiscal-year start and end dates first.' });
+      return;
+    }
+    const defaults = defaultWindowsForFiscalYear(range);
+    if (defaults) {
+      setDraft(defaults);
+      setSaveState({ status: 'editing', message: '' });
+    }
+  }
+
+  function handleSave() {
+    const check = validateCycleWindows(draft);
+    if (!check.ok) {
+      setSaveState({ status: 'failed', message: check.errors[0] || 'Invalid calendar.' });
+      return;
+    }
+    const ok = onOrgChange({ cyclePhaseWindows: draft });
+    setSaveState(ok
+      ? { status: 'saved', message: 'Cycle calendar updated. New windows are active immediately.' }
+      : { status: 'failed', message: 'Could not save changes.' });
+  }
+
+  function handleDiscard() {
+    setDraft(org?.cyclePhaseWindows || null);
+    setSaveState({ status: 'idle', message: '' });
+  }
+
+  const dirty = JSON.stringify(draft || null) !== JSON.stringify(org?.cyclePhaseWindows || null);
+  const validation = validateCycleWindows(draft);
+
+  return (
+    <div style={{ padding: '24px 28px 40px' }}>
+      <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 18, flexWrap: 'wrap', marginBottom: 18 }}>
+        <div style={{ minWidth: 0, flex: 1 }}>
+          <h2 style={{ fontSize: 20, fontWeight: 700, color: '#0F172A', margin: 0 }}>Cycle Calendar</h2>
+          <p style={{ margin: '6px 0 0', fontSize: 13, color: '#64748B', lineHeight: 1.55 }}>
+            Edit when goal-setting and evaluation open. Changes take effect immediately — the active phase is computed from these dates.
+          </p>
+        </div>
+        <CurrentPhaseChip phase={phase} />
+      </div>
+
+      <PhaseSettingsEditor
+        value={draft}
+        onChange={handleChange}
+        fiscalYearStartsOn={fyStart}
+        fiscalYearEndsOn={fyEnd}
+      />
+
+      {!draft && (
+        <div style={{ marginTop: 14, padding: '12px 14px', borderRadius: 9, border: '1px dashed #CBD5E1', background: '#F8FAFC', color: '#475569', fontSize: 12.5 }}>
+          No cycle calendar configured yet.{' '}
+          <button
+            type="button"
+            onClick={handleSeedDefaults}
+            style={{ background: 'none', border: 'none', color: '#2563EB', fontWeight: 700, cursor: 'pointer', padding: 0, fontFamily: 'inherit' }}
+          >
+            Seed defaults from the fiscal year
+          </button>
+          .
+        </div>
+      )}
+
+      {(saveState.status === 'saved' || saveState.status === 'failed') && (
+        <div
+          style={{
+            marginTop: 14,
+            padding: '10px 13px',
+            borderRadius: 8,
+            background: saveState.status === 'saved' ? '#ECFDF5' : '#FEF2F2',
+            color: saveState.status === 'saved' ? '#065F46' : '#991B1B',
+            border: `1px solid ${saveState.status === 'saved' ? '#A7F3D0' : '#FCA5A5'}`,
+            fontSize: 12.5,
+          }}
+        >
+          {saveState.message}
+        </div>
+      )}
+
+      <div style={{ marginTop: 18, display: 'flex', justifyContent: 'flex-end', gap: 10 }}>
+        {dirty && (
+          <button
+            type="button"
+            onClick={handleDiscard}
+            style={{ padding: '9px 16px', borderRadius: 8, border: '1px solid #CBD5E1', background: '#fff', color: '#0F172A', fontSize: 13, fontWeight: 700, cursor: 'pointer', fontFamily: 'inherit' }}
+          >
+            Discard changes
+          </button>
+        )}
+        <button
+          type="button"
+          onClick={handleSave}
+          disabled={!dirty || !validation.ok}
+          style={{
+            padding: '9px 18px',
+            borderRadius: 8,
+            border: 'none',
+            background: dirty && validation.ok ? '#2563EB' : '#CBD5E1',
+            color: '#fff',
+            fontSize: 13,
+            fontWeight: 800,
+            cursor: dirty && validation.ok ? 'pointer' : 'not-allowed',
+            fontFamily: 'inherit',
+            boxShadow: dirty && validation.ok ? '0 8px 18px rgba(37,99,235,.22)' : 'none',
+          }}
+        >
+          Save calendar
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function CurrentPhaseChip({ phase }) {
+  if (!phase?.hasWindows) {
+    return (
+      <span style={{ padding: '6px 12px', borderRadius: 999, background: '#F1F5F9', color: '#64748B', fontSize: 11.5, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '.05em' }}>
+        Not configured
+      </span>
+    );
+  }
+  const color = phase.isInGoalCreation || phase.isInManagerApproval
+    ? { bg: '#DBEAFE', border: '#93C5FD', text: '#1E3A8A' }
+    : phase.isInSelfEvaluation || phase.isInManagerEvaluation
+      ? { bg: '#EDE9FE', border: '#C4B5FD', text: '#4C1D95' }
+      : phase.isPostCycle
+        ? { bg: '#F1F5F9', border: '#CBD5E1', text: '#475569' }
+        : { bg: '#FEF3C7', border: '#FCD34D', text: '#92400E' };
+  return (
+    <div style={{ display: 'grid', gap: 4, justifyItems: 'end' }}>
+      <span style={{ padding: '6px 12px', borderRadius: 999, background: color.bg, border: `1px solid ${color.border}`, color: color.text, fontSize: 11.5, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '.05em' }}>
+        {phase.label}
+      </span>
+      {phase.activeWindow && phase.daysRemainingInPhase != null && (
+        <span style={{ fontSize: 11.5, color: '#64748B', fontWeight: 600 }}>
+          {phase.daysRemainingInPhase === 0 ? 'Closes today' : `Closes in ${phase.daysRemainingInPhase} day${phase.daysRemainingInPhase === 1 ? '' : 's'}`}
+        </span>
+      )}
+      {!phase.activeWindow && phase.nextWindow && phase.daysUntilNextPhase != null && (
+        <span style={{ fontSize: 11.5, color: '#64748B', fontWeight: 600 }}>
+          Next opens in {phase.daysUntilNextPhase} day{phase.daysUntilNextPhase === 1 ? '' : 's'}
+        </span>
+      )}
+    </div>
+  );
+}
+
 function ModuleConfig({ config, org, onEditSetup, onBrandChange }) {
   const [logoError, setLogoError] = useState('');
   // Local mirror of brandName so typing doesn't thrash parent state / localStorage on every keystroke.
@@ -7350,6 +7527,7 @@ export default function HRCycleDashboard() {
             <ModuleOverview employees={empsForModules} groups={groups} orgName={org.name} congratsDismissed={congratsDismissed} onDismiss={() => setCongratsDismissed(true)} showConfetti={showConfetti} />
           )}
           {activeModule === 'emp-status' && <ModuleEmpStatus employees={empsForModules} groups={groups} orgKey={orgKey} org={org} />}
+          {activeModule === 'cycle-calendar' && <ModuleCycleCalendar org={org} onOrgChange={updateOrgBrand} />}
           {activeModule === 'comms'      && <ModuleComms     employees={empsForModules} groups={groups} org={org} config={config} onUpdate={handleEmpUpdate} onConfigPatch={handleConfigPatch} orgKey={orgKey} onNavigate={setActiveModule} />}
           {activeModule === 'stage'      && <ModuleStageControl  employees={empsForModules} onUpdate={handleEmpUpdate} orgKey={orgKey} />}
           {activeModule === 'mgr-change' && <ModuleMgrChange     employees={empsForModules} config={config} onUpdate={handleEmpUpdate} orgKey={orgKey} />}
