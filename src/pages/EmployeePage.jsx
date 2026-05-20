@@ -2591,7 +2591,9 @@ export default function EmployeePage() {
       setTeamFilter('pending');
       setActiveSection('team');
     } else if (n.type === 'goal-approved' || n.type === 'goal-rejected' || n.type === 'goal-reminder') {
-      setActiveSection('dashboard');
+      setActiveSection('goals');
+    } else {
+      setActiveSection('notifications');
     }
   }
 
@@ -6553,6 +6555,7 @@ export default function EmployeePage() {
           {activeSection === 'team' && renderTeam()}
           {activeSection === 'send-mail' && renderSendMail()}
           {activeSection === 'messages' && renderMessages()}
+          {activeSection === 'notifications' && renderNotifications()}
           {activeSection === 'profile' && renderProfile()}
           </div>
         </div>
