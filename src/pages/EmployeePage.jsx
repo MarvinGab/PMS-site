@@ -1293,9 +1293,11 @@ function GoalLibraryPanel({ kras, libraryType, libraryName, canAdd, onAdd, added
   const [carouselOverflow, setCarouselOverflow] = useState(false);
   const [carouselPaused, setCarouselPaused] = useState(false);
   const [carouselLoopWidth, setCarouselLoopWidth] = useState(0);
+  const [previewAnchor, setPreviewAnchor] = useState(null);
   const carouselRef = useRef(null);
   const carouselTrackRef = useRef(null);
   const panelRef = useRef(null);
+  const previewRef = useRef(null);
   const carouselOffsetRef = useRef(0);
   const carouselFrameRef = useRef(null);
   const carouselLastFrameRef = useRef(0);
@@ -1350,7 +1352,7 @@ function GoalLibraryPanel({ kras, libraryType, libraryName, canAdd, onAdd, added
       cancelAnimationFrame(carouselFrameRef.current);
       carouselFrameRef.current = null;
     }
-    if (!carouselOverflow || carouselPaused || returnDropActive || collapsed || carouselLoopWidth <= 0) return undefined;
+    if (!carouselOverflow || carouselPaused || selectedId || returnDropActive || collapsed || carouselLoopWidth <= 0) return undefined;
     const speedPxPerSecond = 18;
     carouselLastFrameRef.current = performance.now();
     const tick = (now) => {
@@ -1364,16 +1366,28 @@ function GoalLibraryPanel({ kras, libraryType, libraryName, canAdd, onAdd, added
       if (carouselFrameRef.current) cancelAnimationFrame(carouselFrameRef.current);
       carouselFrameRef.current = null;
     };
-  }, [carouselOverflow, carouselPaused, returnDropActive, collapsed, carouselLoopWidth]);
+  }, [carouselOverflow, carouselPaused, selectedId, returnDropActive, collapsed, carouselLoopWidth]);
 
   useEffect(() => {
     if (!selectedId) return undefined;
     const closeOnOutside = (event) => {
       if (panelRef.current?.contains(event.target)) return;
+      if (previewRef.current?.contains(event.target)) return;
       setSelectedId(null);
+      setPreviewAnchor(null);
     };
     document.addEventListener('pointerdown', closeOnOutside);
     return () => document.removeEventListener('pointerdown', closeOnOutside);
+  }, [selectedId]);
+
+  useEffect(() => {
+    if (!selectedId) return undefined;
+    const close = () => {
+      setSelectedId(null);
+      setPreviewAnchor(null);
+    };
+    window.addEventListener('resize', close);
+    return () => window.removeEventListener('resize', close);
   }, [selectedId]);
 
   const handleReturnDragOver = (e) => {
@@ -1414,7 +1428,7 @@ function GoalLibraryPanel({ kras, libraryType, libraryName, canAdd, onAdd, added
     );
   }
 
-  return (
+  const panel = (
     <div
       ref={panelRef}
       {...libraryDropProps}
@@ -1515,7 +1529,18 @@ function GoalLibraryPanel({ kras, libraryType, libraryName, canAdd, onAdd, added
               }}
               onMouseEnter={() => setHoveredId(cardId)}
               onMouseLeave={() => setHoveredId(null)}
-              onClick={() => setSelectedId(isSelected ? null : cardId)}
+              onClick={(e) => {
+                if (isSelected) {
+                  setSelectedId(null);
+                  setPreviewAnchor(null);
+                  return;
+                }
+                const rect = e.currentTarget.getBoundingClientRect();
+                const width = 380;
+                const left = Math.max(16, Math.min(rect.left + rect.width / 2 - width / 2, window.innerWidth - width - 16));
+                setSelectedId(cardId);
+                setPreviewAnchor({ top: rect.bottom + 10, left, width });
+              }}
               onDoubleClick={() => { if (canAdd) { onAdd(kra); setSelectedId(null); } }}
               aria-label={canAdd ? `${kra.name || 'KRA'}: drag or double-click to add to plan` : kra.name || 'KRA'}
               style={{
@@ -1561,24 +1586,6 @@ function GoalLibraryPanel({ kras, libraryType, libraryName, canAdd, onAdd, added
                 </div>
               </div>
 
-              {/* KPI list — shown on click */}
-              {isSelected && kpiList.length > 0 && (
-                <div style={{ position: 'absolute', left: 12, right: 12, top: 58, zIndex: 8, background: '#FFFFFF', border: '1px solid #D9E2EC', boxShadow: '0 18px 36px rgba(15,23,42,.16)', borderRadius: 10, padding: '10px 11px', maxHeight: 150, overflowY: 'auto' }}>
-                  <div style={{ fontSize: 10, fontWeight: 800, color: '#94A3B8', textTransform: 'uppercase', letterSpacing: '.07em', marginBottom: 7 }}>KPIs</div>
-                  {kpiList.map((kpi, i) => (
-                    <div key={kpi.id || i} style={{ display: 'flex', justifyContent: 'space-between', gap: 10, fontSize: 11.8, color: '#334155', marginBottom: 5, lineHeight: 1.35 }}>
-                      <span style={{ minWidth: 0 }}>{kpi.name || 'Unnamed KPI'}</span>
-                      {kpi.weight && <span style={{ color, fontWeight: 800, flexShrink: 0, marginLeft: 8 }}>{kpi.weight}%</span>}
-                    </div>
-                  ))}
-                </div>
-              )}
-              {isSelected && kpiList.length === 0 && (
-                <div style={{ position: 'absolute', left: 12, right: 12, top: 58, zIndex: 8, background: '#FFFFFF', border: '1px dashed #CBD5E1', boxShadow: '0 18px 36px rgba(15,23,42,.12)', borderRadius: 10, padding: '10px 11px', color: '#64748B', fontSize: 11.8, fontWeight: 700 }}>
-                  No KPIs configured for this KRA.
-                </div>
-              )}
-
               {/* Footer: weight chip + perspective chip */}
               <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center', marginTop: 'auto' }}>
                 {kra.weight && (
@@ -1614,7 +1621,79 @@ function GoalLibraryPanel({ kras, libraryType, libraryName, canAdd, onAdd, added
           </>
       )}
 	        </div>
-	      );
+  );
+
+  return (
+    <>
+      {panel}
+      {selectedKra && previewAnchor && createPortal((
+        <div
+          ref={previewRef}
+          style={{
+            position: 'fixed',
+            top: previewAnchor.top,
+            left: previewAnchor.left,
+            width: previewAnchor.width,
+            zIndex: 12000,
+            background: '#FFFFFF',
+            border: '1px solid #D9E2EC',
+            borderRadius: 14,
+            boxShadow: '0 24px 60px rgba(15,23,42,.22)',
+            overflow: 'hidden',
+            fontFamily: 'inherit',
+          }}
+        >
+          <div style={{ padding: '14px 16px', borderBottom: '1px solid #EEF2F7', display: 'flex', alignItems: 'flex-start', gap: 12 }}>
+            <div style={{ width: 36, height: 36, borderRadius: 10, background: '#EFF6FF', color: '#2563EB', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, fontWeight: 900 }}>
+              {(selectedKra.name || '?').trim().charAt(0).toUpperCase()}
+            </div>
+            <div style={{ minWidth: 0, flex: 1 }}>
+              <div style={{ fontSize: 13.5, fontWeight: 900, color: '#0F172A', lineHeight: 1.28 }}>{selectedKra.name || 'Untitled KRA'}</div>
+              <div style={{ marginTop: 6, display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                {selectedKra.weight && <span style={{ fontSize: 11, fontWeight: 800, color: '#2563EB', background: '#EFF6FF', border: '1px solid #BFDBFE', padding: '3px 8px', borderRadius: 999 }}>{selectedKra.weight}%</span>}
+                <span style={{ fontSize: 11, fontWeight: 700, color: '#64748B' }}>{selectedKpis.length} KPI{selectedKpis.length === 1 ? '' : 's'}</span>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => { setSelectedId(null); setPreviewAnchor(null); }}
+              aria-label="Close preview"
+              style={{ width: 26, height: 26, borderRadius: 8, border: '1px solid #E2E8F0', background: '#fff', color: '#64748B', cursor: 'pointer', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', padding: 0 }}
+            >
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+            </button>
+          </div>
+          <div style={{ padding: 14, maxHeight: 220, overflowY: 'auto' }}>
+            {selectedKpis.length > 0 ? (
+              <div style={{ display: 'grid', gap: 7 }}>
+                {selectedKpis.map((kpi, i) => (
+                  <div key={kpi.id || i} style={{ display: 'flex', justifyContent: 'space-between', gap: 12, padding: '8px 10px', borderRadius: 9, background: '#F8FAFC', border: '1px solid #E2E8F0' }}>
+                    <span style={{ minWidth: 0, color: '#334155', fontSize: 12.5, fontWeight: 700, lineHeight: 1.35 }}>{kpi.name || 'Unnamed KPI'}</span>
+                    {kpi.weight && <span style={{ flexShrink: 0, color: '#475569', fontSize: 11.5, fontWeight: 900 }}>{kpi.weight}%</span>}
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div style={{ padding: '14px 12px', borderRadius: 10, background: '#F8FAFC', border: '1px dashed #CBD5E1', color: '#64748B', fontSize: 12.5, fontWeight: 700 }}>
+                No KPIs configured for this KRA.
+              </div>
+            )}
+          </div>
+          {canAdd && (
+            <div style={{ padding: '12px 14px', borderTop: '1px solid #EEF2F7', background: '#F8FAFC', display: 'flex', justifyContent: 'flex-end' }}>
+              <button
+                type="button"
+                onClick={() => { onAdd(selectedKra); setSelectedId(null); setPreviewAnchor(null); }}
+                style={{ padding: '8px 13px', borderRadius: 9, border: 'none', background: '#2563EB', color: '#fff', cursor: 'pointer', fontFamily: 'inherit', fontSize: 12.5, fontWeight: 800, boxShadow: '0 8px 18px rgba(37,99,235,.22)' }}
+              >
+                + Add to plan
+              </button>
+            </div>
+          )}
+        </div>
+      ), document.body)}
+    </>
+  );
 	    }
 
 function EmptyState({ title, subtitle }) {
