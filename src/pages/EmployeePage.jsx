@@ -892,6 +892,7 @@ function getSubmissionStatusMeta(record) {
 // Returns the per-goal review status. Goals that have explicit reviewStatus use that. Legacy
 // submissions (no per-goal marks) fall back to the submission-level status applied to every goal.
 function getGoalReviewStatus(goal, submission) {
+  if (goal?.reviewStatus === 'pending') return 'pending';
   if (goal?.reviewStatus === 'approved' || goal?.reviewStatus === 'rejected') return goal.reviewStatus;
   if (submission?.status === 'approved') return 'approved';
   if (submission?.status === 'sent-back') return 'rejected';
@@ -2515,8 +2516,14 @@ export default function EmployeePage() {
         const goals = (current.goals || []).map((goal) => {
           if (goal.id !== goalId) return goal;
           changed = true;
-          const { deletedAt: _drop, deletedBy: _drop2, ...rest } = goal;
-          return rest;
+          const {
+            deletedAt: _drop,
+            deletedBy: _drop2,
+            reviewNote: _reviewNote,
+            reviewedAt: _reviewedAt,
+            ...rest
+          } = goal;
+          return { ...rest, reviewStatus: 'pending' };
         }).filter((goal) => !isDeletedGoalExpired(goal, now));
         if (!changed) return prev;
         workflowDirtyRef.current = true;
