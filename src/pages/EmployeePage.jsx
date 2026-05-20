@@ -167,24 +167,6 @@ const KRA_GOAL_COLORS = [
   '#3B82F6', // sky blue
   '#0EA5E9', // bright sky
 ];
-// Hue-family buckets used to keep adjacent goal cards visibly distinct.
-// Stored displayColor and library-index lookups don't know about the
-// on-screen order, so two cards from the same family (e.g. pink + fuchsia)
-// can end up side by side. The renderer uses this to walk visible goals in
-// order and skip any candidate sharing a family with the previous card.
-const GOAL_HUE_FAMILIES = {
-  '#2563EB': 'blue',  '#3B82F6': 'blue',  '#0EA5E9': 'blue',
-  '#1E40AF': 'blue',  '#4F46E5': 'blue',  '#6366F1': 'blue',
-  '#7C3AED': 'violet', '#8B5CF6': 'violet', '#A855F7': 'violet',
-  '#EC4899': 'pink',  '#C026D3': 'pink',  '#D946EF': 'pink',
-  '#EAB308': 'yellow', '#F59E0B': 'yellow', '#FCD34D': 'yellow',
-  '#F97316': 'orange', '#FB923C': 'orange',
-  '#06B6D4': 'cyan',  '#0891B2': 'cyan',
-  '#78350F': 'brown',
-};
-function goalHueFamily(hex) {
-  return GOAL_HUE_FAMILIES[String(hex || '').toUpperCase()] || 'other';
-}
 // Reserved hues that get swapped at read-time for a safe deterministic color
 // when an existing record stored one of them. Reds and greens ONLY — the
 // user has explicitly OK'd pinks / fuchsias / magentas as decorative.
@@ -3406,48 +3388,7 @@ export default function EmployeePage() {
       return getKraGoalColor(goal, fallbackIndex);
     }
 
-    // Pick a color for each visible goal by walking the on-screen order and
-    // stepping through the interleaved palette. This deliberately bypasses
-    // each goal's stored displayColor so the grid is shuffled by visible
-    // position, not by library order — that prevents two pinks landing side
-    // by side just because two pink-family library items happened to be
-    // added consecutively. Goals whose perspective color is meaningful
-    // (matched against active perspectives) keep their perspective hue.
-    const visibleGoalColorById = (() => {
-      const map = {};
-      const goalHasMatchedPerspective = (goal) => {
-        if (activePerspectives.length === 0) return false;
-        if (!goal?.perspName || goal.perspName === 'All KRAs') return false;
-        return activePerspectives.some((p) => p.name === goal.perspName);
-      };
-      const usedIndices = new Set();
-      let prevFamily = null;
-      (myGoals || []).forEach((goal, idx) => {
-        if (goalHasMatchedPerspective(goal)) {
-          const chosen = resolveBaseGoalColor(goal, idx);
-          map[goal.id] = chosen;
-          prevFamily = goalHueFamily(chosen);
-          return;
-        }
-        let chosen = null;
-        for (let step = 0; step < KRA_GOAL_COLORS.length; step += 1) {
-          const paletteIdx = (idx + step) % KRA_GOAL_COLORS.length;
-          if (usedIndices.has(paletteIdx) && step < KRA_GOAL_COLORS.length) continue;
-          const candidate = KRA_GOAL_COLORS[paletteIdx];
-          if (prevFamily && goalHueFamily(candidate) === prevFamily) continue;
-          chosen = candidate;
-          usedIndices.add(paletteIdx);
-          break;
-        }
-        if (!chosen) chosen = KRA_GOAL_COLORS[idx % KRA_GOAL_COLORS.length];
-        map[goal.id] = chosen;
-        prevFamily = goalHueFamily(chosen);
-      });
-      return map;
-    })();
-
     function getVisibleGoalColor(goal, fallbackIndex = 0) {
-      if (goal?.id && visibleGoalColorById[goal.id]) return visibleGoalColorById[goal.id];
       return resolveBaseGoalColor(goal, fallbackIndex);
     }
 
