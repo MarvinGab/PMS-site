@@ -3647,7 +3647,7 @@ export default function EmployeePage() {
                       {isRejected && goal.reviewNote && (
                         <div style={{ marginBottom: 10, padding: '10px 12px', background: '#FEF2F2', border: '1px solid #FECACA', borderRadius: 9, display: 'flex', gap: 8, alignItems: 'flex-start' }}>
                           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#DC2626" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0, marginTop: 1 }}><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
-                          <div style={{ fontSize: 12.5, color: '#991B1B', lineHeight: 1.45 }}>
+                          <div style={{ fontSize: 12.5, color: '#991B1B', lineHeight: 1.45, maxHeight: 54, overflowY: 'auto', paddingRight: 4 }}>
                             <span style={{ fontWeight: 700 }}>Manager:</span> {goal.reviewNote}
                           </div>
                         </div>
@@ -5185,6 +5185,16 @@ export default function EmployeePage() {
 
     const picks = goalReviewPicks[submission.employeeCode] || {};
     const reviewableGoals = getReviewableGoals(submission.goals || []);
+    const orderedReviewGoals = readOnly && submission.status === 'sent-back'
+      ? reviewableGoals
+          .map((goal, originalIndex) => ({ goal, originalIndex }))
+          .sort((a, b) => {
+            const aRejected = getGoalReviewStatus(a.goal, submission) === 'rejected';
+            const bRejected = getGoalReviewStatus(b.goal, submission) === 'rejected';
+            if (aRejected === bRejected) return a.originalIndex - b.originalIndex;
+            return aRejected ? -1 : 1;
+          })
+      : reviewableGoals.map((goal, originalIndex) => ({ goal, originalIndex }));
     const pendingGoals = reviewableGoals.filter((g) => g.reviewStatus !== 'approved');
     const lockedGoals = reviewableGoals.filter((g) => g.reviewStatus === 'approved');
     const rejectedPickCount = Object.values(picks).filter((p) => p.status === 'reject').length;
@@ -5210,8 +5220,8 @@ export default function EmployeePage() {
             Tip: you can approve or reject individual goals as well — pick per-goal, then hit Submit.
           </div>
         )}
-        {reviewableGoals.map((goal, goalIndex) => {
-          const color = getPerspectiveColor(goal, activePerspectives, goalIndex);
+        {orderedReviewGoals.map(({ goal, originalIndex }) => {
+          const color = getPerspectiveColor(goal, activePerspectives, originalIndex);
           const goalReviewStatus = getGoalReviewStatus(goal, submission);
           const locked = goalReviewStatus === 'approved';
           const sentBack = goalReviewStatus === 'rejected';
@@ -5331,7 +5341,7 @@ export default function EmployeePage() {
                 </div>
               )}
               {readOnly && sentBack && goal.reviewNote && (
-                <div style={{ marginTop: 8, padding: '8px 10px', background: '#fff', border: '1px solid #FECACA', borderRadius: 7, color: '#991B1B', fontSize: 12.5, lineHeight: 1.45 }}>
+                <div style={{ marginTop: 8, padding: '8px 10px', background: '#fff', border: '1px solid #FECACA', borderRadius: 7, color: '#991B1B', fontSize: 12.5, lineHeight: 1.45, maxHeight: 58, overflowY: 'auto' }}>
                   <span style={{ fontWeight: 700 }}>Manager:</span> {goal.reviewNote}
                 </div>
               )}
