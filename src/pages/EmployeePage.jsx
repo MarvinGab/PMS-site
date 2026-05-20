@@ -3579,10 +3579,6 @@ export default function EmployeePage() {
                 <div style={{ fontSize: 14.5, fontWeight: 700, color: '#475569', lineHeight: 1.55 }}>
                   Drag a card from the Goal Library into this area{empGroupLib !== null && libraryKras.length > 0 ? ', or click' : ' or click'} <span style={{ color: '#EA580C', fontWeight: 900 }}>+ Create Goal</span> to write your own KRA.
                 </div>
-                <div style={{ display: 'inline-flex', alignItems: 'center', gap: 8, marginTop: 14, padding: '7px 12px', borderRadius: 999, background: '#FFF7ED', border: '1px solid #FED7AA', color: '#C2410C', fontSize: 12.5, fontWeight: 800 }}>
-                  <span style={{ width: 7, height: 7, borderRadius: '50%', background: '#EA580C' }} />
-                  Your submitted plan needs at least one goal.
-                </div>
               </div>
             )}
 
