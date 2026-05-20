@@ -1462,7 +1462,7 @@ function GoalLibraryPanel({ kras, libraryType, libraryName, canAdd, onAdd, added
         style={{
           overflowX: 'hidden',
           overflowY: 'hidden',
-          paddingBottom: 0,
+          padding: '8px 2px 4px',
           WebkitMaskImage: carouselOverflow ? 'linear-gradient(90deg, transparent 0, #000 28px, #000 calc(100% - 28px), transparent 100%)' : 'none',
           maskImage: carouselOverflow ? 'linear-gradient(90deg, transparent 0, #000 28px, #000 calc(100% - 28px), transparent 100%)' : 'none',
           cursor: carouselOverflow ? (carouselPaused ? 'ew-resize' : 'default') : 'default',
@@ -1502,27 +1502,33 @@ function GoalLibraryPanel({ kras, libraryType, libraryName, canAdd, onAdd, added
               onMouseLeave={() => setHoveredId(null)}
               onClick={() => setSelectedId(isSelected ? null : cardId)}
               onDoubleClick={() => { if (canAdd) { onAdd(kra); setSelectedId(null); } }}
-              title={canAdd ? 'Drag or double-click to add to plan' : undefined}
+              aria-label={canAdd ? `${kra.name || 'KRA'}: drag or double-click to add to plan` : kra.name || 'KRA'}
               style={{
                 background: '#fff',
                 border: `1.5px solid ${isSelected ? `${color}66` : hoveredId === cardId ? '#D6E4FF' : '#DCE6F2'}`,
                 borderRadius: 10,
                 padding: '12px',
                 width: 244,
-                minHeight: isSelected ? 184 : 112,
+                height: 154,
                 flex: '0 0 244px',
                 cursor: canAdd ? 'grab' : 'default',
-                boxShadow: hoveredId === cardId ? '0 7px 16px rgba(15,23,42,.08)' : '0 2px 7px rgba(15,23,42,.04)',
-                transform: isSelected
-                  ? 'translateY(-3px) scale(1.012)'
+                boxShadow: isSelected
+                  ? '0 14px 30px rgba(15,23,42,.12)'
                   : hoveredId === cardId
-                    ? 'translateY(-4px) scale(1.018)'
+                    ? '0 16px 34px rgba(15,23,42,.14)'
+                    : '0 2px 7px rgba(15,23,42,.04)',
+                transform: isSelected
+                  ? 'translateY(-2px) scale(1.01)'
+                  : hoveredId === cardId
+                    ? 'translateY(-3px) scale(1.014)'
                     : 'none',
+                position: 'relative',
+                zIndex: hoveredId === cardId || isSelected ? 2 : 1,
                 userSelect: 'none',
                 display: 'flex',
                 flexDirection: 'column',
                 gap: 10,
-                transition: 'box-shadow .16s ease, border-color .16s ease, min-height .18s ease, transform .18s ease',
+                transition: 'box-shadow .16s ease, border-color .16s ease, transform .18s ease',
               }}
             >
               {/* Icon + Name */}
@@ -1542,7 +1548,7 @@ function GoalLibraryPanel({ kras, libraryType, libraryName, canAdd, onAdd, added
 
               {/* KPI list — shown on click */}
               {isSelected && kpiList.length > 0 && (
-                <div style={{ background: '#F8FAFC', borderRadius: 8, padding: '8px 10px' }}>
+                <div style={{ background: '#F8FAFC', borderRadius: 8, padding: '8px 10px', maxHeight: 58, overflowY: 'auto' }}>
                   <div style={{ fontSize: 10, fontWeight: 700, color: '#94A3B8', textTransform: 'uppercase', letterSpacing: '.07em', marginBottom: 6 }}>KPIs</div>
                   {kpiList.map((kpi, i) => (
                     <div key={kpi.id || i} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11.5, color: '#374151', marginBottom: 3 }}>
