@@ -1307,6 +1307,8 @@ function GoalLibraryPanel({ kras, libraryType, libraryName, canAdd, onAdd, added
 
   const hasAnyKpis = visibleKras.some((k) => (k.kpis || []).length > 0);
   const carouselItems = carouselOverflow ? [...visibleKras, ...visibleKras] : visibleKras;
+  const selectedKra = visibleKras.find((kra) => (kra.id || kra.name) === selectedId) || null;
+  const selectedKpis = selectedKra?.kpis || [];
 
   const applyCarouselOffset = (value) => {
     const track = carouselTrackRef.current;
@@ -1463,6 +1465,7 @@ function GoalLibraryPanel({ kras, libraryType, libraryName, canAdd, onAdd, added
           overflowX: 'hidden',
           overflowY: 'hidden',
           padding: '6px 2px 3px',
+          position: 'relative',
           WebkitMaskImage: carouselOverflow ? 'linear-gradient(90deg, transparent 0, #000 28px, #000 calc(100% - 28px), transparent 100%)' : 'none',
           maskImage: carouselOverflow ? 'linear-gradient(90deg, transparent 0, #000 28px, #000 calc(100% - 28px), transparent 100%)' : 'none',
           cursor: carouselOverflow ? (carouselPaused ? 'ew-resize' : 'default') : 'default',
@@ -1548,18 +1551,10 @@ function GoalLibraryPanel({ kras, libraryType, libraryName, canAdd, onAdd, added
 
               {/* KPI list — shown on click */}
               {isSelected && kpiList.length > 0 && (
-                <div style={{ position: 'absolute', left: 12, right: 12, top: 58, zIndex: 4, background: '#F8FAFC', border: '1px solid #E2E8F0', boxShadow: '0 12px 28px rgba(15,23,42,.12)', borderRadius: 8, padding: '8px 10px', maxHeight: 88, overflowY: 'auto' }}>
-                  <div style={{ fontSize: 10, fontWeight: 700, color: '#94A3B8', textTransform: 'uppercase', letterSpacing: '.07em', marginBottom: 6 }}>KPIs</div>
-                  {kpiList.map((kpi, i) => (
-                    <div key={kpi.id || i} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11.5, color: '#374151', marginBottom: 3 }}>
-                      <span>{kpi.name}</span>
-                      {kpi.weight && <span style={{ color, fontWeight: 600, flexShrink: 0, marginLeft: 8 }}>{kpi.weight}%</span>}
-                    </div>
-                  ))}
-                </div>
+                null
               )}
               {isSelected && kpiList.length === 0 && (
-                <div style={{ fontSize: 11, color: '#94A3B8', fontStyle: 'italic' }}>No KPIs configured for this KRA</div>
+                null
               )}
 
               {/* Footer: weight chip + perspective chip */}
@@ -1592,8 +1587,47 @@ function GoalLibraryPanel({ kras, libraryType, libraryName, canAdd, onAdd, added
             </div>
           );
         })}
-	          </div>
           </div>
+          </div>
+          {selectedKra && (
+            <div style={{
+              marginTop: 10,
+              background: '#FFFFFF',
+              border: '1px solid #D9E2EC',
+              borderRadius: 12,
+              boxShadow: '0 14px 32px rgba(15,23,42,.10)',
+              padding: '12px 14px',
+              display: 'grid',
+              gridTemplateColumns: 'minmax(180px, 260px) 1fr',
+              gap: 14,
+              alignItems: 'start',
+            }}>
+              <div style={{ minWidth: 0 }}>
+                <div style={{ fontSize: 11, fontWeight: 800, color: '#64748B', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 5 }}>Preview</div>
+                <div style={{ fontSize: 13.5, fontWeight: 900, color: '#0F172A', lineHeight: 1.25 }}>{selectedKra.name || 'Untitled KRA'}</div>
+                <div style={{ marginTop: 8, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                  {selectedKra.weight && <span style={{ fontSize: 11, fontWeight: 800, color: '#2563EB', background: '#EFF6FF', border: '1px solid #BFDBFE', padding: '3px 8px', borderRadius: 999 }}>{selectedKra.weight}%</span>}
+                  <span style={{ fontSize: 11, fontWeight: 700, color: '#64748B' }}>{selectedKpis.length} KPI{selectedKpis.length === 1 ? '' : 's'}</span>
+                </div>
+              </div>
+              <div style={{ minWidth: 0, maxHeight: 136, overflowY: 'auto', paddingRight: 4 }}>
+                {selectedKpis.length > 0 ? (
+                  <div style={{ display: 'grid', gap: 6 }}>
+                    {selectedKpis.map((kpi, i) => (
+                      <div key={kpi.id || i} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, padding: '7px 9px', borderRadius: 8, background: '#F8FAFC', border: '1px solid #E2E8F0' }}>
+                        <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 12.5, fontWeight: 700, color: '#334155' }}>{kpi.name || 'Unnamed KPI'}</span>
+                        {kpi.weight && <span style={{ flexShrink: 0, fontSize: 11, fontWeight: 800, color: '#475569' }}>{kpi.weight}%</span>}
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div style={{ padding: '12px', borderRadius: 9, background: '#F8FAFC', border: '1px dashed #CBD5E1', color: '#64748B', fontSize: 12.5, fontWeight: 700 }}>
+                    No KPIs configured for this KRA.
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
           </>
       )}
 	        </div>
