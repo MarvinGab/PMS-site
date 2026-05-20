@@ -6217,20 +6217,20 @@ export default function EmployeePage() {
       )}
 
       {/* ── Top bar ── */}
-      <div style={{ height: 64, background: '#fff', borderBottom: '1px solid #E2E8F0', display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0 28px', flexShrink: 0, zIndex: 100 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+      <div style={{ height: 52, background: '#fff', borderBottom: '1px solid #E2E8F0', display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0 22px', flexShrink: 0, zIndex: 100 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
           {orgBrand.brandLogo ? (
-            <img src={orgBrand.brandLogo} alt={orgBrand.brandName || 'Brand logo'} style={{ height: 40, maxWidth: 180, width: 'auto', borderRadius: 9, objectFit: 'contain', display: 'block' }} />
+            <img src={orgBrand.brandLogo} alt={orgBrand.brandName || 'Brand logo'} style={{ height: 30, maxWidth: 150, width: 'auto', borderRadius: 7, objectFit: 'contain', display: 'block' }} />
           ) : (
             <>
-              <img src={zaroLogo} alt="Zaro HR" style={{ width: 34, height: 34, borderRadius: 9, objectFit: 'cover' }} />
-              <span style={{ fontSize: 18, fontWeight: 800, color: '#0F172A' }}>
+              <img src={zaroLogo} alt="Zaro HR" style={{ width: 28, height: 28, borderRadius: 7, objectFit: 'cover' }} />
+              <span style={{ fontSize: 16, fontWeight: 800, color: '#0F172A' }}>
                 Performance <span style={{ color: '#2563EB' }}>Hub</span>
               </span>
             </>
           )}
         </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 9 }}>
           {/* Save-status indicator — gives the user a clear signal that
               their edits are being persisted (or warned if not). */}
           {(() => {
@@ -6254,9 +6254,9 @@ export default function EmployeePage() {
                 <style>{`@keyframes savePulse{0%{transform:rotate(0deg)}100%{transform:rotate(360deg)}}`}</style>
                 <div title={meta.label} style={{
                   display: 'inline-flex', alignItems: 'center', gap: 5,
-                  padding: '4px 10px', borderRadius: 999,
+                  padding: '3px 9px', borderRadius: 999,
                   background: meta.bg, border: `1px solid ${meta.border}`, color: meta.color,
-                  fontSize: 11.5, fontWeight: 700, whiteSpace: 'nowrap',
+                  fontSize: 11, fontWeight: 700, whiteSpace: 'nowrap',
                 }}>
                   {meta.icon}
                   {meta.label}
@@ -6271,24 +6271,24 @@ export default function EmployeePage() {
             aria-label="Open my profile"
             aria-current={activeSection === 'profile' ? 'page' : undefined}
             style={{
-              display: 'flex', alignItems: 'center', gap: 12,
+              display: 'flex', alignItems: 'center', gap: 8,
               background: activeSection === 'profile' ? '#EFF6FF' : 'transparent',
               border: activeSection === 'profile' ? '1.5px solid #BFDBFE' : '1.5px solid transparent',
-              borderRadius: 12, padding: '4px 8px 4px 12px', cursor: 'pointer', fontFamily: 'inherit',
+              borderRadius: 10, padding: '3px 6px 3px 9px', cursor: 'pointer', fontFamily: 'inherit',
               transition: 'background 160ms ease, border-color 160ms ease',
             }}
             onMouseEnter={(e) => { if (activeSection !== 'profile') e.currentTarget.style.background = '#F8FAFC'; }}
             onMouseLeave={(e) => { if (activeSection !== 'profile') e.currentTarget.style.background = 'transparent'; }}
           >
             <div style={{ textAlign: 'right' }}>
-              <div style={{ fontSize: 14, fontWeight: 700, color: '#0F172A' }}>{employeeName}</div>
-              <div style={{ fontSize: 12.5, color: '#64748B' }}>{employeeDesignation || session.empCode}</div>
+              <div style={{ fontSize: 13, fontWeight: 700, color: '#0F172A' }}>{employeeName}</div>
+              <div style={{ fontSize: 11.5, color: '#64748B' }}>{employeeDesignation || session.empCode}</div>
             </div>
             <div style={{
-              width: 40, height: 40, borderRadius: '50%',
+              width: 34, height: 34, borderRadius: '50%',
               background: 'linear-gradient(135deg,#2563EB,#7C3AED)',
               display: 'flex', alignItems: 'center', justifyContent: 'center',
-              color: '#fff', fontSize: 15, fontWeight: 800, flexShrink: 0,
+              color: '#fff', fontSize: 14, fontWeight: 800, flexShrink: 0,
               boxShadow: activeSection === 'profile' ? '0 0 0 3px #fff, 0 0 0 5px #2563EB' : 'none',
               transition: 'box-shadow 160ms ease',
             }}>
@@ -6303,22 +6303,22 @@ export default function EmployeePage() {
               onClick={() => setNotifDropdownOpen((v) => !v)}
               aria-label="Notifications"
               style={{
-                position: 'relative', width: 40, height: 40, borderRadius: 10,
+                position: 'relative', width: 34, height: 34, borderRadius: 9,
                 border: '1.5px solid #E2E8F0', background: notifDropdownOpen ? '#EFF6FF' : '#fff',
                 color: notifDropdownOpen ? '#2563EB' : '#475569', cursor: 'pointer',
                 display: 'flex', alignItems: 'center', justifyContent: 'center',
                 fontFamily: 'inherit', transition: 'all 160ms ease',
               }}
             >
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                 <path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/>
                 <path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/>
               </svg>
               {unreadNotificationCount > 0 && (
                 <span style={{
-                  position: 'absolute', top: -4, right: -4, minWidth: 18, height: 18,
+                  position: 'absolute', top: -5, right: -5, minWidth: 17, height: 17,
                   padding: '0 5px', borderRadius: 999, background: '#DC2626', color: '#fff',
-                  fontSize: 10.5, fontWeight: 800, display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  fontSize: 10, fontWeight: 800, display: 'flex', alignItems: 'center', justifyContent: 'center',
                   border: '2px solid #fff', lineHeight: 1,
                 }}>
                   {unreadNotificationCount > 99 ? '99+' : unreadNotificationCount}
@@ -6390,7 +6390,31 @@ export default function EmployeePage() {
             )}
           </div>
 
-          <button onClick={logout} style={{ padding: '7px 15px', border: '1.5px solid #E2E8F0', borderRadius: 8, fontSize: 13, cursor: 'pointer', background: '#fff', color: '#6B7280', fontFamily: 'inherit' }}>
+          <button
+            onClick={logout}
+            style={{
+              padding: '6px 13px',
+              border: '1.5px solid #FED7AA',
+              borderRadius: 9,
+              fontSize: 12.5,
+              fontWeight: 700,
+              cursor: 'pointer',
+              background: '#FFF7ED',
+              color: '#C2410C',
+              fontFamily: 'inherit',
+              transition: 'background 160ms ease, border-color 160ms ease, color 160ms ease',
+            }}
+            onMouseEnter={(e) => {
+              e.currentTarget.style.background = '#FFEDD5';
+              e.currentTarget.style.borderColor = '#FDBA74';
+              e.currentTarget.style.color = '#9A3412';
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.background = '#FFF7ED';
+              e.currentTarget.style.borderColor = '#FED7AA';
+              e.currentTarget.style.color = '#C2410C';
+            }}
+          >
             Sign out
           </button>
         </div>
