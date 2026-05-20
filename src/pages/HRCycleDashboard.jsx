@@ -35,7 +35,12 @@ import {
   verifyOrgSmtpConnection,
 } from '../backend/emailSmtpService';
 import PhaseSettingsEditor from '../components/PhaseSettingsEditor';
-import { validateCycleWindows, defaultWindowsForFiscalYear } from '../backend/cyclePhase';
+import {
+  validateCycleWindows,
+  defaultWindowsForFiscalYear,
+  getEmployeeComplianceStatus,
+  COMPLIANCE_LABELS,
+} from '../backend/cyclePhase';
 import { useCyclePhase } from '../hooks/useCyclePhase';
 
 const WIZARD_STATE_KEY = 'zarohr_pms_wizard_state_v1';
@@ -6101,10 +6106,17 @@ function cardAccentStylePreview(mode, tint) {
   };
 }
 
-function ModuleCycleCalendar({ org, onOrgChange }) {
+function ModuleCycleCalendar({ org, onOrgChange, employees = [], orgKey, onEmployeesUpdate }) {
   const [draft, setDraft] = useState(() => org?.cyclePhaseWindows || null);
   const [saveState, setSaveState] = useState({ status: 'idle', message: '' });
+  const [complianceFilter, setComplianceFilter] = useState('all');
+  const [extDialogFor, setExtDialogFor] = useState(null);
+  const [extDays, setExtDays] = useState(7);
+  const [actionFeedback, setActionFeedback] = useState('');
   const phase = useCyclePhase(org);
+  const workflow = orgKey ? loadWorkflowState(orgKey) : { submissions: {} };
+  const submissions = workflow?.submissions || {};
+  const now = phase.now;
 
   // Keep the editor's draft in sync if the parent org changes externally (e.g.
   // realtime push from another tab) — but don't clobber edits in progress.
@@ -6153,6 +6165,87 @@ function ModuleCycleCalendar({ org, onOrgChange }) {
 
   const dirty = JSON.stringify(draft || null) !== JSON.stringify(org?.cyclePhaseWindows || null);
   const validation = validateCycleWindows(draft);
+
+  // ── Compliance: bucket each employee against the live calendar ─────────────
+  const compliance = useMemo(() => {
+    const buckets = {
+      'approved': [],
+      'pending-manager': [],
+      'drafting': [],
+      'not-started': [],
+      'extended-drafting': [],
+      'extended-not-started': [],
+      'overdue': [],
+      'no-goal-cycle': [],
+    };
+    for (const emp of employees) {
+      const code = String(emp['Employee Code'] || emp.empCode || '').trim();
+      const sub = submissions[code] || submissions[code.toLowerCase()] || null;
+      const status = getEmployeeComplianceStatus({ org, employee: emp, submission: sub, now });
+      (buckets[status] || (buckets[status] = [])).push(emp);
+    }
+    return buckets;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [employees, submissions, org?.cyclePhaseWindows, now]);
+
+  const totalEmps = employees.length;
+  const filteredList = complianceFilter === 'all'
+    ? employees.map((emp) => {
+        const code = String(emp['Employee Code'] || emp.empCode || '').trim();
+        const sub = submissions[code] || submissions[code.toLowerCase()] || null;
+        return { emp, status: getEmployeeComplianceStatus({ org, employee: emp, submission: sub, now }) };
+      })
+    : (compliance[complianceFilter] || []).map((emp) => ({ emp, status: complianceFilter }));
+
+  function patchEmployee(empCode, overridePatch) {
+    const code = String(empCode || '').trim();
+    if (!code) return;
+    const next = employees.map((e) => {
+      const myCode = String(e['Employee Code'] || e.empCode || '').trim();
+      if (myCode !== code) return e;
+      const prevOverrides = e.cycleOverrides && typeof e.cycleOverrides === 'object' ? e.cycleOverrides : {};
+      const nextOverrides = { ...prevOverrides, ...overridePatch, updatedAt: new Date().toISOString() };
+      return { ...e, cycleOverrides: nextOverrides };
+    });
+    onEmployeesUpdate?.(next);
+  }
+
+  function handleExtend(empCode) {
+    const days = Math.max(1, Math.min(60, Number(extDays) || 7));
+    const target = new Date();
+    target.setUTCDate(target.getUTCDate() + days);
+    const iso = target.toISOString().slice(0, 10);
+    patchEmployee(empCode, { goalCreationEndsOn: iso, noGoalCycle: false });
+    setExtDialogFor(null);
+    setActionFeedback(`Goal creation extended to ${iso} for ${empCode}.`);
+  }
+
+  function handleMarkNoGoal(empCode) {
+    patchEmployee(empCode, { noGoalCycle: true });
+    setActionFeedback(`${empCode} marked as no-goal cycle. They will be skipped in evaluation.`);
+  }
+
+  function handleClearOverride(empCode) {
+    patchEmployee(empCode, { goalCreationEndsOn: '', noGoalCycle: false });
+    setActionFeedback(`Override cleared for ${empCode}.`);
+  }
+
+  function handleBulkMarkOverdueAsNoGoal() {
+    const overdueList = compliance['overdue'] || [];
+    if (overdueList.length === 0) return;
+    const codes = new Set(overdueList.map((e) => String(e['Employee Code'] || e.empCode || '').trim()));
+    const next = employees.map((e) => {
+      const myCode = String(e['Employee Code'] || e.empCode || '').trim();
+      if (!codes.has(myCode)) return e;
+      const prevOverrides = e.cycleOverrides && typeof e.cycleOverrides === 'object' ? e.cycleOverrides : {};
+      return {
+        ...e,
+        cycleOverrides: { ...prevOverrides, noGoalCycle: true, updatedAt: new Date().toISOString() },
+      };
+    });
+    onEmployeesUpdate?.(next);
+    setActionFeedback(`${overdueList.length} overdue employees marked as no-goal cycle.`);
+  }
 
   return (
     <div style={{ padding: '24px 28px 40px' }}>
@@ -6233,7 +6326,183 @@ function ModuleCycleCalendar({ org, onOrgChange }) {
           Save calendar
         </button>
       </div>
+
+      {totalEmps > 0 && (
+        <div style={{ marginTop: 32 }}>
+          <div style={{ display: 'flex', alignItems: 'flex-end', justifyContent: 'space-between', gap: 14, flexWrap: 'wrap', marginBottom: 14 }}>
+            <div>
+              <h3 style={{ margin: 0, fontSize: 16, fontWeight: 800, color: '#0F172A' }}>Goal-creation compliance</h3>
+              <p style={{ margin: '4px 0 0', fontSize: 12.5, color: '#64748B' }}>
+                {totalEmps} employees · live snapshot based on the cycle calendar
+              </p>
+            </div>
+            {(compliance['overdue'] || []).length > 0 && (
+              <button
+                type="button"
+                onClick={handleBulkMarkOverdueAsNoGoal}
+                style={{ padding: '8px 14px', borderRadius: 8, border: '1px solid #FCA5A5', background: '#FEF2F2', color: '#991B1B', fontSize: 12.5, fontWeight: 700, cursor: 'pointer', fontFamily: 'inherit' }}
+              >
+                Mark {(compliance['overdue'] || []).length} overdue as no-goal cycle
+              </button>
+            )}
+          </div>
+
+          <div style={{ display: 'grid', gap: 8, gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', marginBottom: 16 }}>
+            <ComplianceTile label="All" count={totalEmps} active={complianceFilter === 'all'} color="#0F172A" onClick={() => setComplianceFilter('all')} />
+            {Object.entries(COMPLIANCE_LABELS).map(([key, meta]) => {
+              const count = (compliance[key] || []).length;
+              if (count === 0 && complianceFilter !== key) return null;
+              return (
+                <ComplianceTile
+                  key={key}
+                  label={meta.label}
+                  count={count}
+                  active={complianceFilter === key}
+                  color={meta.color}
+                  onClick={() => setComplianceFilter(key)}
+                />
+              );
+            })}
+          </div>
+
+          {actionFeedback && (
+            <div style={{ padding: '9px 12px', borderRadius: 8, background: '#ECFDF5', border: '1px solid #A7F3D0', color: '#065F46', fontSize: 12.5, marginBottom: 12 }}>
+              {actionFeedback}
+            </div>
+          )}
+
+          {filteredList.length === 0 ? (
+            <div style={{ padding: 18, borderRadius: 10, border: '1px dashed #CBD5E1', background: '#F8FAFC', color: '#64748B', fontSize: 13, textAlign: 'center' }}>
+              No employees in this bucket.
+            </div>
+          ) : (
+            <div style={{ border: '1px solid #E2E8F0', borderRadius: 12, background: '#fff', overflow: 'hidden' }}>
+              <table style={{ width: '100%', fontSize: 12.5, borderCollapse: 'collapse' }}>
+                <thead>
+                  <tr style={{ background: '#F8FAFC', textAlign: 'left', color: '#475569', fontSize: 11.5, textTransform: 'uppercase', letterSpacing: '.05em' }}>
+                    <th style={{ padding: '10px 14px', fontWeight: 700 }}>Employee</th>
+                    <th style={{ padding: '10px 14px', fontWeight: 700 }}>Status</th>
+                    <th style={{ padding: '10px 14px', fontWeight: 700 }}>Override</th>
+                    <th style={{ padding: '10px 14px', fontWeight: 700, textAlign: 'right' }}>Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {filteredList.map(({ emp, status }) => {
+                    const code = String(emp['Employee Code'] || emp.empCode || '').trim();
+                    const name = emp['Employee Name'] || emp.name || code;
+                    const meta = COMPLIANCE_LABELS[status] || { label: status, color: '#475569' };
+                    const ov = emp.cycleOverrides || {};
+                    const overrideLabel = ov.noGoalCycle
+                      ? 'No-goal cycle'
+                      : ov.goalCreationEndsOn
+                        ? `Extended to ${ov.goalCreationEndsOn}`
+                        : '—';
+                    return (
+                      <tr key={code} style={{ borderTop: '1px solid #F1F5F9' }}>
+                        <td style={{ padding: '11px 14px' }}>
+                          <div style={{ fontWeight: 700, color: '#0F172A' }}>{name}</div>
+                          <div style={{ fontSize: 11, color: '#94A3B8' }}>{code}</div>
+                        </td>
+                        <td style={{ padding: '11px 14px' }}>
+                          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontWeight: 700, color: meta.color }}>
+                            <span style={{ width: 8, height: 8, borderRadius: '50%', background: meta.color }} />
+                            {meta.label}
+                          </span>
+                        </td>
+                        <td style={{ padding: '11px 14px', color: ov.noGoalCycle || ov.goalCreationEndsOn ? '#0F172A' : '#94A3B8' }}>
+                          {overrideLabel}
+                        </td>
+                        <td style={{ padding: '11px 14px', textAlign: 'right' }}>
+                          {status !== 'approved' && status !== 'no-goal-cycle' && (
+                            <button
+                              type="button"
+                              onClick={() => { setExtDialogFor(code); setExtDays(7); }}
+                              style={{ padding: '5px 11px', borderRadius: 6, border: '1px solid #CBD5E1', background: '#fff', color: '#1E40AF', fontSize: 11.5, fontWeight: 700, cursor: 'pointer', fontFamily: 'inherit', marginRight: 6 }}
+                            >
+                              Extend
+                            </button>
+                          )}
+                          {status !== 'approved' && status !== 'no-goal-cycle' && (
+                            <button
+                              type="button"
+                              onClick={() => handleMarkNoGoal(code)}
+                              style={{ padding: '5px 11px', borderRadius: 6, border: '1px solid #FCA5A5', background: '#FEF2F2', color: '#991B1B', fontSize: 11.5, fontWeight: 700, cursor: 'pointer', fontFamily: 'inherit', marginRight: 6 }}
+                            >
+                              No-goal
+                            </button>
+                          )}
+                          {(ov.noGoalCycle || ov.goalCreationEndsOn) && (
+                            <button
+                              type="button"
+                              onClick={() => handleClearOverride(code)}
+                              style={{ padding: '5px 11px', borderRadius: 6, border: '1px solid #E2E8F0', background: '#fff', color: '#475569', fontSize: 11.5, fontWeight: 700, cursor: 'pointer', fontFamily: 'inherit' }}
+                            >
+                              Clear
+                            </button>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+
+          {extDialogFor && (
+            <div onClick={() => setExtDialogFor(null)} style={{ position: 'fixed', inset: 0, background: 'rgba(15,23,42,.45)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 12000 }}>
+              <div onClick={(e) => e.stopPropagation()} style={{ background: '#fff', borderRadius: 12, padding: 22, width: 360, maxWidth: 'calc(100% - 32px)', boxShadow: '0 24px 60px rgba(15,23,42,.25)' }}>
+                <div style={{ fontSize: 15, fontWeight: 800, color: '#0F172A', marginBottom: 4 }}>Extend goal creation</div>
+                <div style={{ fontSize: 12.5, color: '#64748B', marginBottom: 16 }}>
+                  Give <strong>{extDialogFor}</strong> a grace period to finish setting goals. They will be treated as still in goal-creation regardless of the global window.
+                </div>
+                <label style={{ display: 'grid', gap: 6 }}>
+                  <span style={{ fontSize: 11.5, fontWeight: 700, color: '#475569', textTransform: 'uppercase', letterSpacing: '.05em' }}>Days from today</span>
+                  <input
+                    type="number"
+                    min={1}
+                    max={60}
+                    value={extDays}
+                    onChange={(e) => setExtDays(e.target.value)}
+                    style={{ padding: '9px 12px', borderRadius: 8, border: '1px solid #CBD5E1', fontSize: 13, fontFamily: 'inherit' }}
+                  />
+                </label>
+                <div style={{ marginTop: 18, display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+                  <button type="button" onClick={() => setExtDialogFor(null)} style={{ padding: '8px 14px', borderRadius: 8, border: '1px solid #CBD5E1', background: '#fff', color: '#0F172A', fontSize: 12.5, fontWeight: 700, cursor: 'pointer', fontFamily: 'inherit' }}>
+                    Cancel
+                  </button>
+                  <button type="button" onClick={() => handleExtend(extDialogFor)} style={{ padding: '8px 14px', borderRadius: 8, border: 'none', background: '#2563EB', color: '#fff', fontSize: 12.5, fontWeight: 800, cursor: 'pointer', fontFamily: 'inherit' }}>
+                    Grant extension
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
     </div>
+  );
+}
+
+function ComplianceTile({ label, count, active, color, onClick }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      style={{
+        textAlign: 'left',
+        padding: '11px 13px',
+        borderRadius: 10,
+        border: `1.5px solid ${active ? color : '#E2E8F0'}`,
+        background: active ? `${color}10` : '#fff',
+        cursor: 'pointer',
+        fontFamily: 'inherit',
+        transition: 'border-color .15s, background .15s',
+      }}
+    >
+      <div style={{ fontSize: 22, fontWeight: 800, color, lineHeight: 1.1 }}>{count}</div>
+      <div style={{ fontSize: 11.5, color: '#475569', fontWeight: 700, marginTop: 4 }}>{label}</div>
+    </button>
   );
 }
 
@@ -7527,7 +7796,7 @@ export default function HRCycleDashboard() {
             <ModuleOverview employees={empsForModules} groups={groups} orgName={org.name} congratsDismissed={congratsDismissed} onDismiss={() => setCongratsDismissed(true)} showConfetti={showConfetti} />
           )}
           {activeModule === 'emp-status' && <ModuleEmpStatus employees={empsForModules} groups={groups} orgKey={orgKey} org={org} />}
-          {activeModule === 'cycle-calendar' && <ModuleCycleCalendar org={org} onOrgChange={updateOrgBrand} />}
+          {activeModule === 'cycle-calendar' && <ModuleCycleCalendar org={org} onOrgChange={updateOrgBrand} employees={empsForModules} orgKey={orgKey} onEmployeesUpdate={handleEmpUpdate} />}
           {activeModule === 'comms'      && <ModuleComms     employees={empsForModules} groups={groups} org={org} config={config} onUpdate={handleEmpUpdate} onConfigPatch={handleConfigPatch} orgKey={orgKey} onNavigate={setActiveModule} />}
           {activeModule === 'stage'      && <ModuleStageControl  employees={empsForModules} onUpdate={handleEmpUpdate} orgKey={orgKey} />}
           {activeModule === 'mgr-change' && <ModuleMgrChange     employees={empsForModules} config={config} onUpdate={handleEmpUpdate} orgKey={orgKey} />}

@@ -314,6 +314,92 @@ export function daysRemaining(win, now) {
   return Math.ceil(ms / (24 * 60 * 60 * 1000));
 }
 
+// ── Per-employee overrides (Darwinbox-style) ────────────────────────────────
+//
+// HR can extend goal-creation for a specific employee past the global window.
+// We store the override as a date string on `employee.cycleOverrides`:
+//
+//   employee.cycleOverrides = {
+//     goalCreationEndsOn: 'YYYY-MM-DD',   // grace tail for this employee
+//     noGoalCycle: true,                  // HR explicitly closed them out
+//     extendedAt: '<ISO timestamp>',      // audit
+//     extendedBy: '<userName>',
+//   }
+
+function readEmployeeOverride(employee) {
+  if (!employee || typeof employee !== 'object') return null;
+  const o = employee.cycleOverrides || employee.cycle_overrides;
+  return o && typeof o === 'object' ? o : null;
+}
+
+// Returns the effective sub-phase for THIS employee — layers any HR-granted
+// extension on top of the global org calendar.
+export function getEffectivePhaseForEmployee(org, employee, now) {
+  const t = asNow(now);
+  const globalPhase = getCurrentSubPhase(org, t);
+  const override = readEmployeeOverride(employee);
+  if (!override) return globalPhase;
+
+  // Once they've been marked no-goal for the cycle, no override re-opens them.
+  if (override.noGoalCycle) return globalPhase;
+
+  const extEnd = endOfDay(override.goalCreationEndsOn);
+  if (!extEnd) return globalPhase;
+
+  // Only meaningful if global phase has moved past goal-creation. If we're
+  // still globally in goal-creation, the override is redundant.
+  if (globalPhase === SUB_PHASE.GOAL_CREATION) return globalPhase;
+  if (t <= extEnd) return SUB_PHASE.GOAL_CREATION;
+  return globalPhase;
+}
+
+// Bucket an employee into a compliance status for the goal-creation phase.
+// `submission` is the goal_workflows submission row for this employee (from
+// `readWorkflowSync(orgKey).submissions[empCode]`), or null.
+export function getEmployeeComplianceStatus({ org, employee, submission, now }) {
+  const t = asNow(now);
+  const override = readEmployeeOverride(employee);
+  const status = String(submission?.status || '').trim().toLowerCase();
+
+  if (status === 'approved' || status === 'manager_approved' || status === 'completed') {
+    return 'approved';
+  }
+  if (status === 'pending-manager' || status === 'pending') {
+    return 'pending-manager';
+  }
+  if (override?.noGoalCycle) {
+    return 'no-goal-cycle';
+  }
+
+  const effective = getEffectivePhaseForEmployee(org, employee, t);
+  const inGoalCreation = effective === SUB_PHASE.GOAL_CREATION;
+
+  // Still in goal-creation (globally or via per-employee extension)?
+  if (inGoalCreation) {
+    if (override?.goalCreationEndsOn) {
+      // They have an extension granted. Are they actively drafting?
+      if (status === 'draft') return 'extended-drafting';
+      return 'extended-not-started';
+    }
+    if (status === 'draft') return 'drafting';
+    return 'not-started';
+  }
+
+  // Goal-creation window has closed for them, and nothing's submitted.
+  return 'overdue';
+}
+
+export const COMPLIANCE_LABELS = Object.freeze({
+  'approved':              { label: 'Goals approved',           color: '#16A34A' },
+  'pending-manager':       { label: 'Pending manager review',   color: '#F59E0B' },
+  'drafting':              { label: 'In draft',                 color: '#2563EB' },
+  'not-started':           { label: 'Not started',              color: '#64748B' },
+  'extended-drafting':     { label: 'Drafting (extended)',      color: '#0891B2' },
+  'extended-not-started':  { label: 'Extended (not started)',   color: '#94A3B8' },
+  'overdue':               { label: 'Overdue — window closed',  color: '#DC2626' },
+  'no-goal-cycle':         { label: 'No goals this cycle',      color: '#475569' },
+});
+
 export const PHASE_LABELS = Object.freeze({
   [SUB_PHASE.PRE_CYCLE]:          'Cycle has not started',
   [SUB_PHASE.GOAL_CREATION]:      'Goal creation',

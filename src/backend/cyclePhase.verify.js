@@ -11,6 +11,8 @@ import {
   getCurrentSubPhase,
   getActiveWindow,
   getNextWindow,
+  getEffectivePhaseForEmployee,
+  getEmployeeComplianceStatus,
   daysUntil,
   daysRemaining,
   validateCycleWindows,
@@ -193,6 +195,66 @@ check('Jan–Dec fiscal year produces valid defaults', () => {
 check('invalid fiscal year returns null', () => {
   assert.equal(defaultWindowsForFiscalYear({}), null);
   assert.equal(defaultWindowsForFiscalYear({ startsOn: '2027-01-01', endsOn: '2026-12-31' }), null);
+});
+
+console.log('cyclePhase.getEffectivePhaseForEmployee');
+check('no override → global phase', () => {
+  const emp = {};
+  assert.equal(getEffectivePhaseForEmployee({ cyclePhaseWindows: windows }, emp, at('2026-05-15T12:00:00')), SUB_PHASE.BETWEEN);
+});
+check('override extends goal-creation past global window', () => {
+  const emp = { cycleOverrides: { goalCreationEndsOn: '2026-05-15' } };
+  assert.equal(getEffectivePhaseForEmployee({ cyclePhaseWindows: windows }, emp, at('2026-05-10T12:00:00')), SUB_PHASE.GOAL_CREATION);
+});
+check('override past its end date → falls back to global', () => {
+  const emp = { cycleOverrides: { goalCreationEndsOn: '2026-05-15' } };
+  assert.equal(getEffectivePhaseForEmployee({ cyclePhaseWindows: windows }, emp, at('2026-05-16T12:00:00')), SUB_PHASE.BETWEEN);
+});
+check('noGoalCycle flag suppresses override', () => {
+  const emp = { cycleOverrides: { goalCreationEndsOn: '2026-05-15', noGoalCycle: true } };
+  assert.equal(getEffectivePhaseForEmployee({ cyclePhaseWindows: windows }, emp, at('2026-05-10T12:00:00')), SUB_PHASE.BETWEEN);
+});
+check('global still in goal-creation → override is no-op', () => {
+  const emp = { cycleOverrides: { goalCreationEndsOn: '2026-05-15' } };
+  assert.equal(getEffectivePhaseForEmployee({ cyclePhaseWindows: windows }, emp, at('2026-04-10T12:00:00')), SUB_PHASE.GOAL_CREATION);
+});
+
+console.log('cyclePhase.getEmployeeComplianceStatus');
+const org = { cyclePhaseWindows: windows };
+check('approved submission → approved', () => {
+  const s = getEmployeeComplianceStatus({ org, employee: {}, submission: { status: 'approved' }, now: at('2026-04-10T12:00:00') });
+  assert.equal(s, 'approved');
+});
+check('pending-manager submission → pending-manager', () => {
+  const s = getEmployeeComplianceStatus({ org, employee: {}, submission: { status: 'pending-manager' }, now: at('2026-04-10T12:00:00') });
+  assert.equal(s, 'pending-manager');
+});
+check('no submission during goal-creation → not-started', () => {
+  const s = getEmployeeComplianceStatus({ org, employee: {}, submission: null, now: at('2026-04-10T12:00:00') });
+  assert.equal(s, 'not-started');
+});
+check('draft during goal-creation → drafting', () => {
+  const s = getEmployeeComplianceStatus({ org, employee: {}, submission: { status: 'draft' }, now: at('2026-04-10T12:00:00') });
+  assert.equal(s, 'drafting');
+});
+check('no submission after window with no override → overdue', () => {
+  const s = getEmployeeComplianceStatus({ org, employee: {}, submission: null, now: at('2026-05-15T12:00:00') });
+  assert.equal(s, 'overdue');
+});
+check('extension granted but not started → extended-not-started', () => {
+  const emp = { cycleOverrides: { goalCreationEndsOn: '2026-05-20' } };
+  const s = getEmployeeComplianceStatus({ org, employee: emp, submission: null, now: at('2026-05-15T12:00:00') });
+  assert.equal(s, 'extended-not-started');
+});
+check('extension granted + drafting → extended-drafting', () => {
+  const emp = { cycleOverrides: { goalCreationEndsOn: '2026-05-20' } };
+  const s = getEmployeeComplianceStatus({ org, employee: emp, submission: { status: 'draft' }, now: at('2026-05-15T12:00:00') });
+  assert.equal(s, 'extended-drafting');
+});
+check('noGoalCycle flag → no-goal-cycle bucket', () => {
+  const emp = { cycleOverrides: { noGoalCycle: true } };
+  const s = getEmployeeComplianceStatus({ org, employee: emp, submission: null, now: at('2026-05-15T12:00:00') });
+  assert.equal(s, 'no-goal-cycle');
 });
 
 if (process.exitCode) {
