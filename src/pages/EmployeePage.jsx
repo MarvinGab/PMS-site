@@ -1513,12 +1513,16 @@ function GoalLibraryPanel({ kras, libraryType, libraryName, canAdd, onAdd, added
                 flex: '0 0 244px',
                 cursor: canAdd ? 'grab' : 'default',
                 boxShadow: hoveredId === cardId ? '0 7px 16px rgba(15,23,42,.08)' : '0 2px 7px rgba(15,23,42,.04)',
-                transform: isSelected ? 'translateY(-1px)' : 'none',
+                transform: isSelected
+                  ? 'translateY(-3px) scale(1.012)'
+                  : hoveredId === cardId
+                    ? 'translateY(-4px) scale(1.018)'
+                    : 'none',
                 userSelect: 'none',
                 display: 'flex',
                 flexDirection: 'column',
                 gap: 10,
-                transition: 'box-shadow .15s, border-color .15s, min-height .18s ease, transform .18s ease',
+                transition: 'box-shadow .16s ease, border-color .16s ease, min-height .18s ease, transform .18s ease',
               }}
             >
               {/* Icon + Name */}
