@@ -1,0 +1,325 @@
+// Cycle phase resolver — single source of truth for "what phase is the org in
+// right now?". The calendar IS the truth: we compute the current sub-phase
+// from the stored windows + the current time, instead of persisting a
+// `current_phase` flag that can drift.
+//
+// Windows are stored on `pms_configs.payload.cyclePhaseWindows`:
+//
+//   {
+//     goalSetting: {
+//       startsOn: 'YYYY-MM-DD', endsOn: 'YYYY-MM-DD',
+//       subPhases: {
+//         goalCreation:    { startsOn, endsOn },
+//         managerApproval: { startsOn, endsOn },
+//       }
+//     },
+//     evaluation: {
+//       startsOn, endsOn,
+//       subPhases: {
+//         selfEvaluation:    { startsOn, endsOn },
+//         managerEvaluation: { startsOn, endsOn },
+//       }
+//     }
+//   }
+//
+// All boundaries are inclusive on the start date and exclusive on the day
+// AFTER `endsOn` — i.e. a window `2026-04-01 .. 2026-04-30` covers any
+// instant from 00:00:00 on April 1 to 23:59:59.999 on April 30 (org-local
+// noon UTC anchor; see `parseDate`).
+
+export const SUB_PHASE = Object.freeze({
+  PRE_CYCLE: 'pre-cycle',
+  GOAL_CREATION: 'goal-creation',
+  MANAGER_APPROVAL: 'manager-approval',
+  BETWEEN: 'between',
+  SELF_EVALUATION: 'self-evaluation',
+  MANAGER_EVALUATION: 'manager-evaluation',
+  POST_CYCLE: 'post-cycle',
+});
+
+export const PHASE_KIND = Object.freeze({
+  GOAL_SETTING: 'goalSetting',
+  EVALUATION: 'evaluation',
+});
+
+const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+// Anchor every date at 12:00 UTC so a date like '2026-04-01' represents the
+// whole calendar day regardless of the user's timezone — avoids the classic
+// "phase flipped a day early in IST" off-by-one.
+function parseDate(value) {
+  if (!value) return null;
+  if (value instanceof Date) {
+    return Number.isFinite(value.getTime()) ? value : null;
+  }
+  const str = String(value);
+  if (!ISO_DATE_RE.test(str)) {
+    const parsed = new Date(str);
+    return Number.isFinite(parsed.getTime()) ? parsed : null;
+  }
+  const [y, m, d] = str.split('-').map(Number);
+  const date = new Date(Date.UTC(y, m - 1, d, 12, 0, 0, 0));
+  return Number.isFinite(date.getTime()) ? date : null;
+}
+
+function endOfDay(value) {
+  const d = parseDate(value);
+  if (!d) return null;
+  return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(), 23, 59, 59, 999));
+}
+
+function startOfDay(value) {
+  const d = parseDate(value);
+  if (!d) return null;
+  return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(), 0, 0, 0, 0));
+}
+
+export function readCycleWindows(org) {
+  if (!org || typeof org !== 'object') return null;
+  const direct = org.cyclePhaseWindows;
+  if (direct && typeof direct === 'object') return direct;
+  const setup = org.setup_payload || org.setupPayload || null;
+  const fromSetup = setup && typeof setup === 'object' ? setup.cyclePhaseWindows : null;
+  if (fromSetup && typeof fromSetup === 'object') return fromSetup;
+  const pmsCfg = org.pms_config || org.pmsConfig || null;
+  const payload = pmsCfg && typeof pmsCfg === 'object' ? (pmsCfg.payload || pmsCfg) : null;
+  if (payload && typeof payload === 'object' && payload.cyclePhaseWindows) return payload.cyclePhaseWindows;
+  return null;
+}
+
+function isInWindow(window, now) {
+  if (!window) return false;
+  const start = startOfDay(window.startsOn);
+  const end = endOfDay(window.endsOn);
+  if (!start || !end) return false;
+  if (end < start) return false;
+  return now >= start && now <= end;
+}
+
+function safeWindow(value) {
+  if (!value || typeof value !== 'object') return null;
+  const start = parseDate(value.startsOn);
+  const end = parseDate(value.endsOn);
+  if (!start || !end) return null;
+  return value;
+}
+
+// Validate a windows blob. Returns { ok: boolean, errors: string[] }.
+// Used by the PhaseSettingsEditor to block save when ranges are illegal.
+export function validateCycleWindows(windows) {
+  const errors = [];
+  if (!windows || typeof windows !== 'object') {
+    errors.push('Cycle windows are missing.');
+    return { ok: false, errors };
+  }
+  const phases = [
+    { key: PHASE_KIND.GOAL_SETTING, label: 'Goal-setting phase', subKeys: ['goalCreation', 'managerApproval'], subLabels: { goalCreation: 'Goal creation', managerApproval: 'Manager approval' } },
+    { key: PHASE_KIND.EVALUATION, label: 'Evaluation phase', subKeys: ['selfEvaluation', 'managerEvaluation'], subLabels: { selfEvaluation: 'Self evaluation', managerEvaluation: 'Manager evaluation' } },
+  ];
+
+  for (const phase of phases) {
+    const win = windows[phase.key];
+    if (!win) { errors.push(`${phase.label}: dates are required.`); continue; }
+    const start = parseDate(win.startsOn);
+    const end = parseDate(win.endsOn);
+    if (!start || !end) {
+      errors.push(`${phase.label}: both start and end dates are required.`);
+      continue;
+    }
+    if (end < start) {
+      errors.push(`${phase.label}: end date must be on or after start date.`);
+      continue;
+    }
+    const subs = win.subPhases || {};
+    for (const subKey of phase.subKeys) {
+      const sub = subs[subKey];
+      const subLabel = phase.subLabels[subKey];
+      if (!sub) { errors.push(`${phase.label} > ${subLabel}: dates are required.`); continue; }
+      const subStart = parseDate(sub.startsOn);
+      const subEnd = parseDate(sub.endsOn);
+      if (!subStart || !subEnd) { errors.push(`${phase.label} > ${subLabel}: both start and end dates are required.`); continue; }
+      if (subEnd < subStart) { errors.push(`${phase.label} > ${subLabel}: end must be on or after start.`); continue; }
+      if (subStart < start || subEnd > end) {
+        errors.push(`${phase.label} > ${subLabel}: must lie within the parent phase window.`);
+      }
+    }
+    const goalCreation = safeWindow(subs.goalCreation || subs.selfEvaluation);
+    const followUp = safeWindow(subs.managerApproval || subs.managerEvaluation);
+    if (goalCreation && followUp) {
+      const aEnd = parseDate(goalCreation.endsOn);
+      const bStart = parseDate(followUp.startsOn);
+      if (aEnd && bStart && bStart < aEnd) {
+        errors.push(`${phase.label}: sub-phases cannot overlap.`);
+      }
+    }
+  }
+
+  const goal = windows[PHASE_KIND.GOAL_SETTING];
+  const evalPhase = windows[PHASE_KIND.EVALUATION];
+  if (goal && evalPhase) {
+    const goalEnd = parseDate(goal.endsOn);
+    const evalStart = parseDate(evalPhase.startsOn);
+    if (goalEnd && evalStart && evalStart < goalEnd) {
+      errors.push('Evaluation phase cannot start before the goal-setting phase ends.');
+    }
+  }
+
+  return { ok: errors.length === 0, errors };
+}
+
+// Build sensible defaults from a fiscal-year date range. Goal-setting takes
+// the first 30 days (20-day creation + 10-day approval); evaluation takes the
+// last 60 days (30 self + 30 manager). Editable in the UI.
+export function defaultWindowsForFiscalYear({ startsOn, endsOn } = {}) {
+  const start = parseDate(startsOn);
+  const end = parseDate(endsOn);
+  if (!start || !end || end <= start) return null;
+  const totalMs = end.getTime() - start.getTime();
+  const day = 24 * 60 * 60 * 1000;
+  const totalDays = Math.max(1, Math.round(totalMs / day));
+  const cap = (n, max) => Math.max(1, Math.min(n, max));
+  const goalSpan = cap(30, Math.floor(totalDays / 2));
+  const evalSpan = cap(60, Math.floor(totalDays / 2));
+  const creationSpan = Math.max(1, Math.floor(goalSpan * (2 / 3)));
+  const approvalSpan = Math.max(1, goalSpan - creationSpan);
+  const selfSpan = Math.max(1, Math.floor(evalSpan / 2));
+  const managerSpan = Math.max(1, evalSpan - selfSpan);
+
+  const addDays = (date, days) => new Date(date.getTime() + days * day);
+  const iso = (date) => date.toISOString().slice(0, 10);
+
+  const gsStart = start;
+  const gsEnd = addDays(start, goalSpan - 1);
+  const gcEnd = addDays(start, creationSpan - 1);
+  const maStart = addDays(start, creationSpan);
+  const maEnd = addDays(start, creationSpan + approvalSpan - 1);
+
+  const evStart = addDays(end, -(evalSpan - 1));
+  const evEnd = end;
+  const seStart = evStart;
+  const seEnd = addDays(evStart, selfSpan - 1);
+  const meStart = addDays(evStart, selfSpan);
+  const meEnd = addDays(evStart, selfSpan + managerSpan - 1);
+
+  return {
+    goalSetting: {
+      startsOn: iso(gsStart),
+      endsOn: iso(gsEnd),
+      subPhases: {
+        goalCreation:    { startsOn: iso(gsStart), endsOn: iso(gcEnd) },
+        managerApproval: { startsOn: iso(maStart), endsOn: iso(maEnd) },
+      },
+    },
+    evaluation: {
+      startsOn: iso(evStart),
+      endsOn: iso(evEnd),
+      subPhases: {
+        selfEvaluation:    { startsOn: iso(seStart), endsOn: iso(seEnd) },
+        managerEvaluation: { startsOn: iso(meStart), endsOn: iso(meEnd) },
+      },
+    },
+  };
+}
+
+function asNow(now) {
+  if (!now) return new Date();
+  if (now instanceof Date) return now;
+  return parseDate(now) || new Date(now);
+}
+
+// Resolve the current sub-phase from the stored windows + current time.
+export function getCurrentSubPhase(orgOrWindows, now) {
+  const windows = orgOrWindows && (orgOrWindows.goalSetting || orgOrWindows.evaluation)
+    ? orgOrWindows
+    : readCycleWindows(orgOrWindows);
+  if (!windows) return SUB_PHASE.PRE_CYCLE;
+
+  const t = asNow(now);
+  const goal = windows[PHASE_KIND.GOAL_SETTING] || {};
+  const evalPhase = windows[PHASE_KIND.EVALUATION] || {};
+  const goalSubs = goal.subPhases || {};
+  const evalSubs = evalPhase.subPhases || {};
+
+  if (isInWindow(goalSubs.goalCreation, t)) return SUB_PHASE.GOAL_CREATION;
+  if (isInWindow(goalSubs.managerApproval, t)) return SUB_PHASE.MANAGER_APPROVAL;
+  if (isInWindow(evalSubs.selfEvaluation, t)) return SUB_PHASE.SELF_EVALUATION;
+  if (isInWindow(evalSubs.managerEvaluation, t)) return SUB_PHASE.MANAGER_EVALUATION;
+
+  // Not inside any sub-phase. Figure out where we are relative to the cycle.
+  const goalStart = startOfDay(goal.startsOn);
+  const evalEnd = endOfDay(evalPhase.endsOn);
+  if (goalStart && t < goalStart) return SUB_PHASE.PRE_CYCLE;
+  if (evalEnd && t > evalEnd) return SUB_PHASE.POST_CYCLE;
+  return SUB_PHASE.BETWEEN;
+}
+
+// Return the window the org is currently inside (or null).
+export function getActiveWindow(orgOrWindows, now) {
+  const windows = orgOrWindows && (orgOrWindows.goalSetting || orgOrWindows.evaluation)
+    ? orgOrWindows
+    : readCycleWindows(orgOrWindows);
+  if (!windows) return null;
+  const subPhase = getCurrentSubPhase(windows, now);
+  const map = {
+    [SUB_PHASE.GOAL_CREATION]:       { phaseKind: PHASE_KIND.GOAL_SETTING, win: windows.goalSetting?.subPhases?.goalCreation },
+    [SUB_PHASE.MANAGER_APPROVAL]:    { phaseKind: PHASE_KIND.GOAL_SETTING, win: windows.goalSetting?.subPhases?.managerApproval },
+    [SUB_PHASE.SELF_EVALUATION]:     { phaseKind: PHASE_KIND.EVALUATION,   win: windows.evaluation?.subPhases?.selfEvaluation },
+    [SUB_PHASE.MANAGER_EVALUATION]:  { phaseKind: PHASE_KIND.EVALUATION,   win: windows.evaluation?.subPhases?.managerEvaluation },
+  };
+  const hit = map[subPhase];
+  if (!hit?.win) return null;
+  return { ...hit.win, subPhase, phaseKind: hit.phaseKind };
+}
+
+// Return the next upcoming sub-phase window from `now` (or null if cycle is over).
+export function getNextWindow(orgOrWindows, now) {
+  const windows = orgOrWindows && (orgOrWindows.goalSetting || orgOrWindows.evaluation)
+    ? orgOrWindows
+    : readCycleWindows(orgOrWindows);
+  if (!windows) return null;
+  const t = asNow(now);
+  const candidates = [
+    { subPhase: SUB_PHASE.GOAL_CREATION,       phaseKind: PHASE_KIND.GOAL_SETTING, win: windows.goalSetting?.subPhases?.goalCreation },
+    { subPhase: SUB_PHASE.MANAGER_APPROVAL,    phaseKind: PHASE_KIND.GOAL_SETTING, win: windows.goalSetting?.subPhases?.managerApproval },
+    { subPhase: SUB_PHASE.SELF_EVALUATION,     phaseKind: PHASE_KIND.EVALUATION,   win: windows.evaluation?.subPhases?.selfEvaluation },
+    { subPhase: SUB_PHASE.MANAGER_EVALUATION,  phaseKind: PHASE_KIND.EVALUATION,   win: windows.evaluation?.subPhases?.managerEvaluation },
+  ];
+  for (const c of candidates) {
+    if (!c.win) continue;
+    const start = startOfDay(c.win.startsOn);
+    if (start && start > t) {
+      return { ...c.win, subPhase: c.subPhase, phaseKind: c.phaseKind };
+    }
+  }
+  return null;
+}
+
+export function daysUntil(win, now) {
+  if (!win) return null;
+  const start = startOfDay(win.startsOn);
+  if (!start) return null;
+  const t = asNow(now);
+  const ms = start.getTime() - t.getTime();
+  if (ms <= 0) return 0;
+  return Math.ceil(ms / (24 * 60 * 60 * 1000));
+}
+
+export function daysRemaining(win, now) {
+  if (!win) return null;
+  const end = endOfDay(win.endsOn);
+  if (!end) return null;
+  const t = asNow(now);
+  const ms = end.getTime() - t.getTime();
+  if (ms <= 0) return 0;
+  return Math.ceil(ms / (24 * 60 * 60 * 1000));
+}
+
+export const PHASE_LABELS = Object.freeze({
+  [SUB_PHASE.PRE_CYCLE]:          'Cycle has not started',
+  [SUB_PHASE.GOAL_CREATION]:      'Goal creation',
+  [SUB_PHASE.MANAGER_APPROVAL]:   'Manager approval',
+  [SUB_PHASE.BETWEEN]:            'Between phases',
+  [SUB_PHASE.SELF_EVALUATION]:    'Self evaluation',
+  [SUB_PHASE.MANAGER_EVALUATION]: 'Manager evaluation',
+  [SUB_PHASE.POST_CYCLE]:         'Cycle closed',
+});

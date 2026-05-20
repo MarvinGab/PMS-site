@@ -1,0 +1,202 @@
+// Run: node src/backend/cyclePhase.verify.js
+//
+// Asserts the cycle-phase resolver across boundary cases. Exits non-zero on
+// any failure so a `npm run build` / CI pipeline can chain it later. No test
+// framework required — uses node:assert.
+
+import assert from 'node:assert/strict';
+import {
+  SUB_PHASE,
+  PHASE_KIND,
+  getCurrentSubPhase,
+  getActiveWindow,
+  getNextWindow,
+  daysUntil,
+  daysRemaining,
+  validateCycleWindows,
+  defaultWindowsForFiscalYear,
+} from './cyclePhase.js';
+
+const windows = {
+  goalSetting: {
+    startsOn: '2026-04-01',
+    endsOn:   '2026-04-30',
+    subPhases: {
+      goalCreation:    { startsOn: '2026-04-01', endsOn: '2026-04-20' },
+      managerApproval: { startsOn: '2026-04-21', endsOn: '2026-04-30' },
+    },
+  },
+  evaluation: {
+    startsOn: '2027-02-01',
+    endsOn:   '2027-03-31',
+    subPhases: {
+      selfEvaluation:    { startsOn: '2027-02-01', endsOn: '2027-02-28' },
+      managerEvaluation: { startsOn: '2027-03-01', endsOn: '2027-03-31' }, // 2027 not a leap year
+    },
+  },
+};
+
+const at = (iso) => new Date(`${iso}Z`);
+
+function check(label, fn) {
+  try { fn(); console.log('  ok   ' + label); }
+  catch (err) { console.error('  FAIL ' + label + '\n       ' + (err?.message || err)); process.exitCode = 1; }
+}
+
+console.log('cyclePhase.getCurrentSubPhase');
+
+check('before cycle → pre-cycle', () => {
+  assert.equal(getCurrentSubPhase(windows, at('2026-03-31T23:59:59')), SUB_PHASE.PRE_CYCLE);
+});
+check('exactly at goal-creation start → goal-creation', () => {
+  assert.equal(getCurrentSubPhase(windows, at('2026-04-01T00:00:00')), SUB_PHASE.GOAL_CREATION);
+});
+check('mid goal-creation → goal-creation', () => {
+  assert.equal(getCurrentSubPhase(windows, at('2026-04-10T12:00:00')), SUB_PHASE.GOAL_CREATION);
+});
+check('last second of goal-creation → goal-creation', () => {
+  assert.equal(getCurrentSubPhase(windows, at('2026-04-20T23:59:59')), SUB_PHASE.GOAL_CREATION);
+});
+check('first second of manager-approval → manager-approval', () => {
+  assert.equal(getCurrentSubPhase(windows, at('2026-04-21T00:00:00')), SUB_PHASE.MANAGER_APPROVAL);
+});
+check('last day of manager-approval → manager-approval', () => {
+  assert.equal(getCurrentSubPhase(windows, at('2026-04-30T18:00:00')), SUB_PHASE.MANAGER_APPROVAL);
+});
+check('day after goal-setting ends → between', () => {
+  assert.equal(getCurrentSubPhase(windows, at('2026-05-01T12:00:00')), SUB_PHASE.BETWEEN);
+});
+check('mid-cycle gap → between', () => {
+  assert.equal(getCurrentSubPhase(windows, at('2026-10-15T12:00:00')), SUB_PHASE.BETWEEN);
+});
+check('exactly at self-evaluation start → self-evaluation', () => {
+  assert.equal(getCurrentSubPhase(windows, at('2027-02-01T00:00:00')), SUB_PHASE.SELF_EVALUATION);
+});
+check('last day of self-eval (non-leap Feb 28) → self-evaluation', () => {
+  assert.equal(getCurrentSubPhase(windows, at('2027-02-28T23:59:59')), SUB_PHASE.SELF_EVALUATION);
+});
+check('manager-evaluation start → manager-evaluation', () => {
+  assert.equal(getCurrentSubPhase(windows, at('2027-03-01T00:00:00')), SUB_PHASE.MANAGER_EVALUATION);
+});
+check('after cycle → post-cycle', () => {
+  assert.equal(getCurrentSubPhase(windows, at('2027-04-01T00:00:00')), SUB_PHASE.POST_CYCLE);
+});
+check('empty org → pre-cycle', () => {
+  assert.equal(getCurrentSubPhase(null), SUB_PHASE.PRE_CYCLE);
+  assert.equal(getCurrentSubPhase({}), SUB_PHASE.PRE_CYCLE);
+});
+check('org-shape (setup_payload) is read', () => {
+  const org = { setup_payload: { cyclePhaseWindows: windows } };
+  assert.equal(getCurrentSubPhase(org, at('2026-04-10T00:00:00')), SUB_PHASE.GOAL_CREATION);
+});
+check('org-shape (pms_config.payload) is read', () => {
+  const org = { pms_config: { payload: { cyclePhaseWindows: windows } } };
+  assert.equal(getCurrentSubPhase(org, at('2026-04-10T00:00:00')), SUB_PHASE.GOAL_CREATION);
+});
+
+console.log('cyclePhase.getActiveWindow');
+check('returns goal-creation window when in goal-creation', () => {
+  const w = getActiveWindow(windows, at('2026-04-10T12:00:00'));
+  assert.equal(w?.subPhase, SUB_PHASE.GOAL_CREATION);
+  assert.equal(w?.phaseKind, PHASE_KIND.GOAL_SETTING);
+  assert.equal(w?.endsOn, '2026-04-20');
+});
+check('returns null when between phases', () => {
+  assert.equal(getActiveWindow(windows, at('2026-10-15T12:00:00')), null);
+});
+
+console.log('cyclePhase.getNextWindow');
+check('before cycle → next is goal-creation', () => {
+  const n = getNextWindow(windows, at('2026-03-15T12:00:00'));
+  assert.equal(n?.subPhase, SUB_PHASE.GOAL_CREATION);
+  assert.equal(n?.startsOn, '2026-04-01');
+});
+check('during goal-creation → next is manager-approval', () => {
+  const n = getNextWindow(windows, at('2026-04-10T12:00:00'));
+  assert.equal(n?.subPhase, SUB_PHASE.MANAGER_APPROVAL);
+});
+check('between phases → next is self-evaluation', () => {
+  const n = getNextWindow(windows, at('2026-12-01T12:00:00'));
+  assert.equal(n?.subPhase, SUB_PHASE.SELF_EVALUATION);
+});
+check('post-cycle → next is null', () => {
+  assert.equal(getNextWindow(windows, at('2027-05-01T12:00:00')), null);
+});
+
+console.log('cyclePhase.daysUntil / daysRemaining');
+check('daysUntil counts forward', () => {
+  assert.equal(daysUntil(windows.goalSetting.subPhases.goalCreation, at('2026-03-20T12:00:00')), 12);
+});
+check('daysUntil returns 0 once active', () => {
+  assert.equal(daysUntil(windows.goalSetting.subPhases.goalCreation, at('2026-04-10T12:00:00')), 0);
+});
+check('daysRemaining counts to end-of-day', () => {
+  assert.equal(daysRemaining(windows.goalSetting.subPhases.goalCreation, at('2026-04-19T12:00:00')), 2);
+});
+check('daysRemaining returns 0 when window ended', () => {
+  assert.equal(daysRemaining(windows.goalSetting.subPhases.goalCreation, at('2026-05-01T12:00:00')), 0);
+});
+
+console.log('cyclePhase.validateCycleWindows');
+check('valid windows pass', () => {
+  const r = validateCycleWindows(windows);
+  assert.equal(r.ok, true, r.errors.join('; '));
+});
+check('end-before-start fails', () => {
+  const broken = JSON.parse(JSON.stringify(windows));
+  broken.goalSetting.subPhases.goalCreation.endsOn = '2026-03-25';
+  const r = validateCycleWindows(broken);
+  assert.equal(r.ok, false);
+});
+check('sub-phase outside parent fails', () => {
+  const broken = JSON.parse(JSON.stringify(windows));
+  broken.goalSetting.subPhases.managerApproval.endsOn = '2026-06-01';
+  const r = validateCycleWindows(broken);
+  assert.equal(r.ok, false);
+});
+check('evaluation before goal-setting end fails', () => {
+  const broken = JSON.parse(JSON.stringify(windows));
+  broken.evaluation.startsOn = '2026-04-15';
+  broken.evaluation.subPhases.selfEvaluation.startsOn = '2026-04-15';
+  broken.evaluation.subPhases.selfEvaluation.endsOn   = '2026-04-30';
+  broken.evaluation.subPhases.managerEvaluation.startsOn = '2026-05-01';
+  broken.evaluation.subPhases.managerEvaluation.endsOn   = '2026-05-15';
+  broken.evaluation.endsOn = '2026-05-15';
+  const r = validateCycleWindows(broken);
+  assert.equal(r.ok, false);
+});
+check('missing phase fails cleanly', () => {
+  const r = validateCycleWindows({ goalSetting: windows.goalSetting });
+  assert.equal(r.ok, false);
+});
+check('overlapping sub-phases fails', () => {
+  const broken = JSON.parse(JSON.stringify(windows));
+  broken.goalSetting.subPhases.managerApproval.startsOn = '2026-04-15';
+  const r = validateCycleWindows(broken);
+  assert.equal(r.ok, false);
+});
+
+console.log('cyclePhase.defaultWindowsForFiscalYear');
+check('April–March fiscal year produces valid defaults', () => {
+  const d = defaultWindowsForFiscalYear({ startsOn: '2026-04-01', endsOn: '2027-03-31' });
+  assert.ok(d);
+  const r = validateCycleWindows(d);
+  assert.equal(r.ok, true, r.errors.join('; '));
+  assert.equal(d.goalSetting.startsOn, '2026-04-01');
+  assert.equal(d.evaluation.endsOn, '2027-03-31');
+});
+check('Jan–Dec fiscal year produces valid defaults', () => {
+  const d = defaultWindowsForFiscalYear({ startsOn: '2026-01-01', endsOn: '2026-12-31' });
+  assert.ok(d);
+  assert.equal(validateCycleWindows(d).ok, true);
+});
+check('invalid fiscal year returns null', () => {
+  assert.equal(defaultWindowsForFiscalYear({}), null);
+  assert.equal(defaultWindowsForFiscalYear({ startsOn: '2027-01-01', endsOn: '2026-12-31' }), null);
+});
+
+if (process.exitCode) {
+  console.error('\nFAILED');
+} else {
+  console.log('\nAll cyclePhase checks passed.');
+}
