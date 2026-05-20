@@ -239,16 +239,17 @@ function getGoalIdentity(goal) {
 }
 
 function getGoalLibraryClaimKeys(goal = {}) {
+  const hasLibraryOrigin = !!(goal.libraryKraId || goal.sourceKraId || goal.originalKraId);
   return [
     goal.libraryKraId,
     goal.sourceKraId,
     goal.originalKraId,
-    goal.id,
+    hasLibraryOrigin ? goal.id : '',
     goal.name,
     sanitizeText(goal.libraryKraId),
     sanitizeText(goal.sourceKraId),
     sanitizeText(goal.originalKraId),
-    sanitizeText(goal.id),
+    hasLibraryOrigin ? sanitizeText(goal.id) : '',
     sanitizeText(goal.name),
   ].map((value) => String(value || '').trim()).filter(Boolean);
 }
@@ -1311,8 +1312,9 @@ function GoalLibraryPanel({ kras, libraryType, libraryName, canAdd, onAdd, added
       const track = carouselTrackRef.current;
       if (!viewport || !track) return;
       const renderedWidth = track.scrollWidth || 0;
-      const firstSetWidth = carouselOverflow ? renderedWidth / 2 : renderedWidth;
-      setCarouselOverflow(firstSetWidth > viewport.clientWidth + 8);
+      const firstSetWidth = track.dataset.looping === 'true' ? renderedWidth / 2 : renderedWidth;
+      const nextOverflow = firstSetWidth > viewport.clientWidth + 8;
+      setCarouselOverflow((current) => (current === nextOverflow ? current : nextOverflow));
     };
     measure();
     const observer = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(measure) : null;
@@ -1325,7 +1327,7 @@ function GoalLibraryPanel({ kras, libraryType, libraryName, canAdd, onAdd, added
       observer?.disconnect();
       window.removeEventListener('resize', measure);
     };
-  }, [carouselOverflow, collapsed, visibleKras.length]);
+  }, [collapsed, visibleKras.length]);
 
   const handleReturnDragOver = (e) => {
     if (!canAdd || !hasDragType(e.dataTransfer, 'application/goal-id')) return;
@@ -1436,6 +1438,7 @@ function GoalLibraryPanel({ kras, libraryType, libraryName, canAdd, onAdd, added
       >
       <div
         ref={carouselTrackRef}
+        data-looping={carouselOverflow ? 'true' : 'false'}
         style={{
           display: 'flex',
           flexWrap: 'nowrap',
@@ -3309,12 +3312,10 @@ export default function EmployeePage() {
       );
       const displayColor = KRA_GOAL_COLORS[(libraryIndex >= 0 ? libraryIndex : stableColorIndex(kra.name || kra.id)) % KRA_GOAL_COLORS.length];
       updateMySubmission((record) => {
-        const nextKey = sanitizeText(kra.id || kra.name);
-        const nextName = sanitizeText(kra.name);
+        const nextKeys = new Set(getGoalLibraryClaimKeys(kra));
         const alreadyAdded = (record.goals || []).some((goal) => {
-          const goalKey = sanitizeText(goal.libraryKraId || goal.sourceKraId || goal.originalKraId || '');
-          const goalName = sanitizeText(goal.name);
-          return (nextKey && goalKey === nextKey) || (nextName && goalName === nextName);
+          const goalKeys = getGoalLibraryClaimKeys(goal);
+          return goalKeys.some((key) => nextKeys.has(key));
         });
         if (alreadyAdded) return record;
         const newKra = createKra({ ...kra, id: uid('kra'), kpis: libKpis.map((kpi) => createKpi(kpi, 'library')) });
