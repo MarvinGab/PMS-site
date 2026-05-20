@@ -2141,12 +2141,23 @@ export default function EmployeePage() {
   const [notifDropdownOpen, setNotifDropdownOpen] = useState(false);
   const [profileDropdownOpen, setProfileDropdownOpen] = useState(false);
   const notifDropdownRef = useRef(null);
+  const notifDropdownWasOpenRef = useRef(false);
   const profileDropdownRef = useRef(null);
   useEffect(() => {
     if (!notifDropdownOpen) return undefined;
     function onDoc(e) { if (notifDropdownRef.current && !notifDropdownRef.current.contains(e.target)) setNotifDropdownOpen(false); }
     document.addEventListener('mousedown', onDoc);
     return () => document.removeEventListener('mousedown', onDoc);
+  }, [notifDropdownOpen]);
+  useEffect(() => {
+    if (notifDropdownOpen) {
+      notifDropdownWasOpenRef.current = true;
+      return;
+    }
+    if (!notifDropdownWasOpenRef.current) return;
+    notifDropdownWasOpenRef.current = false;
+    const unreadIds = notifications.filter((n) => !n.read).map((n) => n.id);
+    if (unreadIds.length) markNotificationsRead(unreadIds);
   }, [notifDropdownOpen]);
   useEffect(() => {
     if (!profileDropdownOpen) return undefined;
