@@ -1404,10 +1404,10 @@ function GoalLibraryPanel({ kras, libraryType, libraryName, canAdd, onAdd, added
   return (
     <div
       {...libraryDropProps}
-      style={{ marginBottom: 22, background: returnDropActive ? '#EEF2FF' : '#F6F8FF', border: `1.5px ${returnDropActive ? 'dashed' : 'solid'} ${returnDropActive ? '#6366F1' : '#C7D2FE'}`, borderRadius: 14, padding: '14px 18px 18px', transition: 'border-color .15s, background .15s', boxShadow: '0 6px 18px rgba(59,130,246,.06)' }}
+      style={{ marginBottom: 18, background: returnDropActive ? '#EEF2FF' : '#F6F8FF', border: `1.5px ${returnDropActive ? 'dashed' : 'solid'} ${returnDropActive ? '#6366F1' : '#C7D2FE'}`, borderRadius: 14, padding: '12px 18px 14px', transition: 'border-color .15s, background .15s', boxShadow: '0 6px 18px rgba(59,130,246,.06)' }}
     >
       {/* Header */}
-	      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginBottom: 13, flexWrap: 'wrap' }}>
+	      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginBottom: 8, flexWrap: 'wrap' }}>
 	        <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0, flexWrap: 'wrap' }}>
 	          <div style={{ fontSize: 13, fontWeight: 800, color: '#0F172A', whiteSpace: 'nowrap' }}>Goal Library</div>
 	          {returnDropActive ? (
@@ -1462,7 +1462,7 @@ function GoalLibraryPanel({ kras, libraryType, libraryName, canAdd, onAdd, added
         style={{
           overflowX: 'hidden',
           overflowY: 'hidden',
-          padding: '8px 2px 4px',
+          padding: '6px 2px 3px',
           WebkitMaskImage: carouselOverflow ? 'linear-gradient(90deg, transparent 0, #000 28px, #000 calc(100% - 28px), transparent 100%)' : 'none',
           maskImage: carouselOverflow ? 'linear-gradient(90deg, transparent 0, #000 28px, #000 calc(100% - 28px), transparent 100%)' : 'none',
           cursor: carouselOverflow ? (carouselPaused ? 'ew-resize' : 'default') : 'default',
@@ -1507,10 +1507,10 @@ function GoalLibraryPanel({ kras, libraryType, libraryName, canAdd, onAdd, added
                 background: '#fff',
                 border: `1.5px solid ${isSelected ? `${color}66` : hoveredId === cardId ? '#D6E4FF' : '#DCE6F2'}`,
                 borderRadius: 10,
-                padding: '12px',
-                width: 244,
-                height: 154,
-                flex: '0 0 244px',
+                padding: '10px 12px',
+                width: 226,
+                height: 92,
+                flex: '0 0 226px',
                 cursor: canAdd ? 'grab' : 'default',
                 boxShadow: isSelected
                   ? '0 14px 30px rgba(15,23,42,.12)'
@@ -1527,19 +1527,19 @@ function GoalLibraryPanel({ kras, libraryType, libraryName, canAdd, onAdd, added
                 userSelect: 'none',
                 display: 'flex',
                 flexDirection: 'column',
-                gap: 10,
+                gap: 8,
                 transition: 'box-shadow .16s ease, border-color .16s ease, transform .18s ease',
               }}
             >
               {/* Icon + Name */}
-              <div style={{ display: 'flex', gap: 10, alignItems: 'flex-start' }}>
-                <div style={{ width: 35, height: 35, borderRadius: 9, background: `${color}18`, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
-                  <span style={{ fontSize: 13.5, fontWeight: 900, color }}>{initial}</span>
+              <div style={{ display: 'flex', gap: 10, alignItems: 'flex-start', minHeight: 40 }}>
+                <div style={{ width: 32, height: 32, borderRadius: 9, background: `${color}18`, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+                  <span style={{ fontSize: 13, fontWeight: 900, color }}>{initial}</span>
                 </div>
                 <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontSize: 11.5, fontWeight: 800, color: '#0F172A', lineHeight: 1.25 }}>{kra.name}</div>
+                  <div style={{ fontSize: 11.5, fontWeight: 800, color: '#0F172A', lineHeight: 1.25, display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>{kra.name}</div>
                   {kra.desc && (
-                    <div style={{ fontSize: 10.5, color: '#64748B', lineHeight: 1.35, marginTop: 2 }}>
+                    <div style={{ fontSize: 10.5, color: '#64748B', lineHeight: 1.35, marginTop: 2, display: '-webkit-box', WebkitLineClamp: 1, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>
                       {kra.desc.length > 54 ? `${kra.desc.slice(0, 54)}…` : kra.desc}
                     </div>
                   )}
@@ -1548,7 +1548,7 @@ function GoalLibraryPanel({ kras, libraryType, libraryName, canAdd, onAdd, added
 
               {/* KPI list — shown on click */}
               {isSelected && kpiList.length > 0 && (
-                <div style={{ background: '#F8FAFC', borderRadius: 8, padding: '8px 10px', maxHeight: 58, overflowY: 'auto' }}>
+                <div style={{ position: 'absolute', left: 12, right: 12, top: 58, zIndex: 4, background: '#F8FAFC', border: '1px solid #E2E8F0', boxShadow: '0 12px 28px rgba(15,23,42,.12)', borderRadius: 8, padding: '8px 10px', maxHeight: 88, overflowY: 'auto' }}>
                   <div style={{ fontSize: 10, fontWeight: 700, color: '#94A3B8', textTransform: 'uppercase', letterSpacing: '.07em', marginBottom: 6 }}>KPIs</div>
                   {kpiList.map((kpi, i) => (
                     <div key={kpi.id || i} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11.5, color: '#374151', marginBottom: 3 }}>
