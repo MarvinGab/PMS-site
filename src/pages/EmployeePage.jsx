@@ -2139,13 +2139,21 @@ export default function EmployeePage() {
     };
   }, [session?.orgKey]);
   const [notifDropdownOpen, setNotifDropdownOpen] = useState(false);
+  const [profileDropdownOpen, setProfileDropdownOpen] = useState(false);
   const notifDropdownRef = useRef(null);
+  const profileDropdownRef = useRef(null);
   useEffect(() => {
     if (!notifDropdownOpen) return undefined;
     function onDoc(e) { if (notifDropdownRef.current && !notifDropdownRef.current.contains(e.target)) setNotifDropdownOpen(false); }
     document.addEventListener('mousedown', onDoc);
     return () => document.removeEventListener('mousedown', onDoc);
   }, [notifDropdownOpen]);
+  useEffect(() => {
+    if (!profileDropdownOpen) return undefined;
+    function onDoc(e) { if (profileDropdownRef.current && !profileDropdownRef.current.contains(e.target)) setProfileDropdownOpen(false); }
+    document.addEventListener('mousedown', onDoc);
+    return () => document.removeEventListener('mousedown', onDoc);
+  }, [profileDropdownOpen]);
 
   const employee = useMemo(() => session && config ? getEmployeeRecord(config, session.empCode) : null, [session, config]);
   const managerCode = String(employee?.['Reporting Manager Code'] || session?.managerCode || '').trim();
@@ -5886,10 +5894,7 @@ export default function EmployeePage() {
             {initials}
           </div>
           <div style={{ fontSize: 22, fontWeight: 800, marginBottom: 5 }}>{employeeName}</div>
-          <div style={{ fontSize: 15, opacity: 0.88, marginBottom: 18 }}>{employeeDesignation || 'Employee'}</div>
-          <button style={{ padding: '9px 22px', borderRadius: 20, border: '1.5px solid rgba(255,255,255,0.6)', background: 'transparent', color: '#fff', cursor: 'pointer', fontFamily: 'inherit', fontSize: 13.5, fontWeight: 600 }}>
-            Edit Profile
-          </button>
+          <div style={{ fontSize: 15, opacity: 0.88 }}>{employeeDesignation || 'Employee'}</div>
         </div>
 
         {/* Contact Information */}
@@ -6305,48 +6310,21 @@ export default function EmployeePage() {
               </>
             );
           })()}
-          <button
-            type="button"
-            onClick={() => setActiveSection('profile')}
-            title="My profile"
-            aria-label="Open my profile"
-            aria-current={activeSection === 'profile' ? 'page' : undefined}
-            style={{
-              display: 'flex', alignItems: 'center', gap: 8,
-              background: activeSection === 'profile' ? '#EFF6FF' : 'transparent',
-              border: activeSection === 'profile' ? '1.5px solid #BFDBFE' : '1.5px solid transparent',
-              borderRadius: 10, padding: '3px 6px 3px 9px', cursor: 'pointer', fontFamily: 'inherit',
-              transition: 'background 160ms ease, border-color 160ms ease',
-            }}
-            onMouseEnter={(e) => { if (activeSection !== 'profile') e.currentTarget.style.background = '#F8FAFC'; }}
-            onMouseLeave={(e) => { if (activeSection !== 'profile') e.currentTarget.style.background = 'transparent'; }}
-          >
-            <div style={{ textAlign: 'right' }}>
-              <div style={{ fontSize: 13, fontWeight: 700, color: '#0F172A' }}>{employeeName}</div>
-              <div style={{ fontSize: 11.5, color: '#64748B' }}>{employeeDesignation || session.empCode}</div>
-            </div>
-            <div style={{
-              width: 34, height: 34, borderRadius: '50%',
-              background: 'linear-gradient(135deg,#2563EB,#7C3AED)',
-              display: 'flex', alignItems: 'center', justifyContent: 'center',
-              color: '#fff', fontSize: 14, fontWeight: 800, flexShrink: 0,
-              boxShadow: activeSection === 'profile' ? '0 0 0 3px #fff, 0 0 0 5px #2563EB' : 'none',
-              transition: 'box-shadow 160ms ease',
-            }}>
-              {employeeName.charAt(0).toUpperCase()}
-            </div>
-          </button>
-
           {/* Notifications bell + dropdown */}
           <div ref={notifDropdownRef} style={{ position: 'relative' }}>
             <button
               type="button"
-              onClick={() => setNotifDropdownOpen((v) => !v)}
+              onClick={() => {
+                setNotifDropdownOpen((v) => !v);
+                setProfileDropdownOpen(false);
+              }}
               aria-label="Notifications"
               style={{
                 position: 'relative', width: 34, height: 34, borderRadius: 9,
-                border: '1.5px solid #E2E8F0', background: notifDropdownOpen ? '#EFF6FF' : '#fff',
-                color: notifDropdownOpen ? '#2563EB' : '#475569', cursor: 'pointer',
+                border: `1.5px solid ${unreadNotificationCount > 0 ? '#FDE68A' : '#E2E8F0'}`,
+                background: notifDropdownOpen || unreadNotificationCount > 0 ? '#FFFBEB' : '#fff',
+                color: unreadNotificationCount > 0 ? '#D97706' : notifDropdownOpen ? '#2563EB' : '#475569',
+                cursor: 'pointer',
                 display: 'flex', alignItems: 'center', justifyContent: 'center',
                 fontFamily: 'inherit', transition: 'all 160ms ease',
               }}
@@ -6431,33 +6409,96 @@ export default function EmployeePage() {
             )}
           </div>
 
-          <button
-            onClick={logout}
-            style={{
-              padding: '6px 13px',
-              border: '1.5px solid #FED7AA',
-              borderRadius: 9,
-              fontSize: 12.5,
-              fontWeight: 700,
-              cursor: 'pointer',
-              background: '#FFF7ED',
-              color: '#C2410C',
-              fontFamily: 'inherit',
-              transition: 'background 160ms ease, border-color 160ms ease, color 160ms ease',
-            }}
-            onMouseEnter={(e) => {
-              e.currentTarget.style.background = '#FFEDD5';
-              e.currentTarget.style.borderColor = '#FDBA74';
-              e.currentTarget.style.color = '#9A3412';
-            }}
-            onMouseLeave={(e) => {
-              e.currentTarget.style.background = '#FFF7ED';
-              e.currentTarget.style.borderColor = '#FED7AA';
-              e.currentTarget.style.color = '#C2410C';
-            }}
-          >
-            Sign out
-          </button>
+          <div ref={profileDropdownRef} style={{ position: 'relative' }}>
+            <button
+              type="button"
+              onClick={() => {
+                setProfileDropdownOpen((v) => !v);
+                setNotifDropdownOpen(false);
+              }}
+              title="Account"
+              aria-label="Open account menu"
+              aria-expanded={profileDropdownOpen}
+              style={{
+                display: 'flex', alignItems: 'center', gap: 8,
+                background: profileDropdownOpen ? '#EFF6FF' : '#fff',
+                border: `1.5px solid ${profileDropdownOpen ? '#BFDBFE' : '#E2E8F0'}`,
+                borderRadius: 12, padding: '3px 5px 3px 10px', cursor: 'pointer', fontFamily: 'inherit',
+                boxShadow: profileDropdownOpen ? '0 8px 22px rgba(37,99,235,.12)' : 'none',
+                transition: 'background 160ms ease, border-color 160ms ease, box-shadow 160ms ease',
+              }}
+              onMouseEnter={(e) => { if (!profileDropdownOpen) e.currentTarget.style.background = '#F8FAFC'; }}
+              onMouseLeave={(e) => { if (!profileDropdownOpen) e.currentTarget.style.background = '#fff'; }}
+            >
+              <div style={{ textAlign: 'right' }}>
+                <div style={{ fontSize: 13, fontWeight: 700, color: '#0F172A', lineHeight: 1.2 }}>{employeeName}</div>
+                <div style={{ fontSize: 11.5, color: '#64748B', lineHeight: 1.2, marginTop: 2 }}>{session.empCode}</div>
+              </div>
+              <div style={{
+                width: 34, height: 34, borderRadius: '50%',
+                background: 'linear-gradient(135deg,#2563EB,#7C3AED)',
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                color: '#fff', fontSize: 14, fontWeight: 800, flexShrink: 0,
+                boxShadow: profileDropdownOpen ? '0 0 0 3px #DBEAFE' : 'none',
+                transition: 'box-shadow 160ms ease',
+              }}>
+                {employeeName.charAt(0).toUpperCase()}
+              </div>
+            </button>
+
+            {profileDropdownOpen && (
+              <div style={{
+                position: 'absolute', top: 'calc(100% + 10px)', right: 0,
+                width: 286,
+                background: '#fff', border: '1px solid #E2E8F0', borderRadius: 14,
+                boxShadow: '0 18px 50px rgba(15,23,42,.16)', zIndex: 210,
+                overflow: 'hidden',
+              }}>
+                <div style={{ padding: '14px 15px', borderBottom: '1px solid #F1F5F9', background: 'linear-gradient(135deg,#F8FAFF,#fff)' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                    <div style={{ width: 38, height: 38, borderRadius: '50%', background: 'linear-gradient(135deg,#2563EB,#7C3AED)', color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 800 }}>
+                      {employeeName.charAt(0).toUpperCase()}
+                    </div>
+                    <div style={{ minWidth: 0 }}>
+                      <div style={{ fontSize: 14, fontWeight: 800, color: '#0F172A', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{employeeName}</div>
+                      <div style={{ fontSize: 12, color: '#64748B', marginTop: 2 }}>{session.empCode}</div>
+                    </div>
+                  </div>
+                </div>
+                <div style={{ padding: '10px 14px 8px', display: 'grid', gap: 7 }}>
+                  {[
+                    ['Role', employeeDesignation || 'Employee'],
+                    ['Reporting Manager', managerName || '—'],
+                    ['Email', employee?.['Email ID'] || employee?.email || '—'],
+                  ].map(([label, value]) => (
+                    <div key={label} style={{ display: 'flex', justifyContent: 'space-between', gap: 12, fontSize: 12.5 }}>
+                      <span style={{ color: '#94A3B8', fontWeight: 700 }}>{label}</span>
+                      <span style={{ color: '#334155', fontWeight: 600, textAlign: 'right', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{value}</span>
+                    </div>
+                  ))}
+                </div>
+                <div style={{ padding: 8, borderTop: '1px solid #F1F5F9', display: 'grid', gap: 6 }}>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setActiveSection('profile');
+                      setProfileDropdownOpen(false);
+                    }}
+                    style={{ width: '100%', padding: '9px 10px', border: '1px solid #E2E8F0', borderRadius: 10, background: '#fff', color: '#334155', cursor: 'pointer', fontFamily: 'inherit', fontSize: 13, fontWeight: 700, textAlign: 'left' }}
+                  >
+                    View PMS details
+                  </button>
+                  <button
+                    type="button"
+                    onClick={logout}
+                    style={{ width: '100%', padding: '9px 10px', border: '1px solid #FED7AA', borderRadius: 10, background: '#FFF7ED', color: '#C2410C', cursor: 'pointer', fontFamily: 'inherit', fontSize: 13, fontWeight: 800, textAlign: 'left' }}
+                  >
+                    Sign out
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
         </div>
       </div>
 
