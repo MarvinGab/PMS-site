@@ -130,7 +130,7 @@ function PhaseCard({ title, accent, phase, subKeys, onPatch, disabled, minDate, 
 
   return (
     <div style={{ border: '1px solid #D8E1EE', borderRadius: 12, background: '#fff', overflow: 'hidden', boxShadow: '0 1px 2px rgba(15,23,42,.04)' }}>
-      <div style={{ display: 'grid', gridTemplateColumns: '176px minmax(280px, 1fr) auto', alignItems: 'center', gap: 16, padding: '13px 16px', borderLeft: `4px solid ${accent}`, borderBottom: '1px solid #E8EEF6', background: 'linear-gradient(180deg,#FFFFFF 0%,#F8FAFC 100%)' }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'minmax(150px, 190px) minmax(260px, 1fr) auto', alignItems: 'center', gap: 14, padding: '13px 16px', borderLeft: `4px solid ${accent}`, borderBottom: '1px solid #E8EEF6', background: 'linear-gradient(180deg,#FFFFFF 0%,#F8FAFC 100%)' }}>
         <div>
           <div style={{ fontSize: 12.5, fontWeight: 850, color: '#0F172A', textTransform: 'uppercase', letterSpacing: '.04em' }}>{title}</div>
           <div style={{ marginTop: 3, fontSize: 11.5, fontWeight: 700, color: '#94A3B8' }}>Phase window</div>
@@ -185,7 +185,7 @@ function PhaseCard({ title, accent, phase, subKeys, onPatch, disabled, minDate, 
         </button>
       </div>
       {customSubWindows ? (
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(340px, 1fr))', background: '#FBFCFE' }}>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))', background: '#FBFCFE' }}>
           {subKeys.map(({ key, label }, idx) => {
             const sub = phase.subPhases?.[key] || {};
             return (
@@ -195,12 +195,11 @@ function PhaseCard({ title, accent, phase, subKeys, onPatch, disabled, minDate, 
                   padding: '14px 16px',
                   borderLeft: idx === 0 ? 'none' : '1px solid #E8EEF6',
                   display: 'grid',
-                  gridTemplateColumns: '150px minmax(220px, 1fr)',
-                  alignItems: 'center',
-                  gap: 14,
+                  gap: 9,
+                  minWidth: 0,
                 }}
               >
-                <span style={{ fontSize: 12.5, fontWeight: 800, color: '#475569' }}>{label}</span>
+                <span style={{ fontSize: 12.5, fontWeight: 800, color: '#475569', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{label}</span>
                 <DateRange
                   startValue={sub.startsOn || ''}
                   endValue={sub.endsOn || ''}
@@ -229,7 +228,7 @@ function PhaseCard({ title, accent, phase, subKeys, onPatch, disabled, minDate, 
 
 function DateRange({ startValue, endValue, onChange, disabled, compact = false, minDate = '', maxDate = '' }) {
   return (
-    <div style={{ display: 'grid', gridTemplateColumns: 'minmax(130px, 1fr) 18px minmax(130px, 1fr)', alignItems: 'center', gap: compact ? 8 : 10, minWidth: 0 }}>
+    <div style={{ display: 'grid', gridTemplateColumns: compact ? 'minmax(112px, 1fr) 16px minmax(112px, 1fr)' : 'minmax(130px, 1fr) 18px minmax(130px, 1fr)', alignItems: 'center', gap: compact ? 7 : 10, minWidth: 0 }}>
       <DateField value={startValue} minDate={minDate} maxDate={endValue || maxDate} disabled={disabled} onChange={(v) => onChange(v, endValue)} compact={compact} />
       <span style={{ fontSize: 13, color: '#94A3B8', fontWeight: 800, textAlign: 'center' }}>→</span>
       <DateField value={endValue} minDate={startValue || minDate} maxDate={maxDate} disabled={disabled} onChange={(v) => onChange(startValue, v)} compact={compact} />
@@ -259,11 +258,11 @@ function DateField({ value, onChange, disabled, compact = false, minDate = '', m
       disabled={disabled}
       style={{
         width: '100%',
-        padding: compact ? '8px 10px' : '10px 12px',
+        padding: compact ? '8px 9px' : '10px 12px',
         borderRadius: 9,
         border: '1px solid #CBD5E1',
         boxShadow: 'inset 0 1px 0 rgba(15,23,42,.03)',
-        fontSize: compact ? 13 : 14,
+        fontSize: compact ? 12.5 : 14,
         fontWeight: 650,
         fontFamily: 'inherit',
         color: '#0F172A',
