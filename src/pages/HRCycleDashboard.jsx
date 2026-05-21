@@ -5586,6 +5586,52 @@ function ConfigRow({ label, value, mono }) {
   );
 }
 
+function GoalLibraryDisplayToggle({ value, onChange, disabled }) {
+  const current = value === 'static' ? 'static' : 'rotating';
+  const options = [
+    { id: 'rotating', label: 'Rotating', sub: 'Auto-scrolls horizontally when KRAs overflow.' },
+    { id: 'static', label: 'Static', sub: 'Shows the library as a fixed wrapping grid.' },
+  ];
+  return (
+    <div>
+      <div style={{ fontSize: 13, color: '#475569', marginBottom: 12, lineHeight: 1.55 }}>
+        Choose how the Goal Library appears to employees on the goal-setting page.
+      </div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: 10, maxWidth: 640 }}>
+        {options.map((opt) => {
+          const active = opt.id === current;
+          return (
+            <button
+              key={opt.id}
+              type="button"
+              disabled={disabled}
+              onClick={() => !disabled && onChange?.(opt.id)}
+              style={{
+                textAlign: 'left',
+                cursor: disabled ? 'not-allowed' : 'pointer',
+                fontFamily: 'inherit',
+                padding: '12px 14px',
+                background: active ? '#EEF2FF' : '#fff',
+                border: `1.5px solid ${active ? '#6366F1' : '#E9EDF2'}`,
+                borderRadius: 10,
+                boxShadow: active ? '0 6px 18px rgba(99,102,241,.10)' : '0 1px 2px rgba(15,23,42,.03)',
+                transition: 'all 160ms ease',
+                opacity: disabled ? 0.6 : 1,
+              }}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <span style={{ width: 14, height: 14, borderRadius: '50%', border: `2px solid ${active ? '#6366F1' : '#CBD5E1'}`, background: active ? '#6366F1' : '#fff', display: 'inline-block', flexShrink: 0 }} />
+                <span style={{ fontSize: 13.5, fontWeight: 700, color: '#0F172A' }}>{opt.label}</span>
+              </div>
+              <div style={{ fontSize: 12, color: '#64748B', marginTop: 6, lineHeight: 1.5 }}>{opt.sub}</div>
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 // Reusable palette swatch grid — 6 preset cards + a Custom card with a <input type="color">.
 // Purely presentational; parent owns storage shape via onPickPreset/onPickCustom callbacks.
 function PaletteGrid({ selectedId, customHex, onPickPreset, onPickCustom }) {
@@ -6094,7 +6140,7 @@ function cardAccentStylePreview(mode, tint) {
   };
 }
 
-function ModuleConfig({ config, org, onEditSetup, onBrandChange }) {
+function ModuleConfig({ config, org, onEditSetup, onBrandChange, onConfigPatch }) {
   const [logoError, setLogoError] = useState('');
   // Local mirror of brandName so typing doesn't thrash parent state / localStorage on every keystroke.
   const [brandNameDraft, setBrandNameDraft] = useState(org.brandName || '');
@@ -6223,6 +6269,14 @@ function ModuleConfig({ config, org, onEditSetup, onBrandChange }) {
 
       <ConfigSection title="Theme" style={{ gridColumn: '1 / -1', marginBottom: 0 }}>
         <BrandThemeEditor org={org} onChange={onBrandChange} />
+      </ConfigSection>
+
+      <ConfigSection title="Goal Library" style={{ gridColumn: '1 / -1', marginBottom: 0 }}>
+        <GoalLibraryDisplayToggle
+          value={config.goalLibraryDisplay || 'rotating'}
+          onChange={(next) => onConfigPatch?.({ goalLibraryDisplay: next })}
+          disabled={!onConfigPatch}
+        />
       </ConfigSection>
 
       {/* Performance Framework / Employee Groups / Goal Limits sections used to live here as
@@ -7368,6 +7422,7 @@ export default function HRCycleDashboard() {
               org={org}
               onEditSetup={goBackToSetup}
               onBrandChange={updateOrgBrand}
+              onConfigPatch={handleConfigPatch}
             />
           )}
 
