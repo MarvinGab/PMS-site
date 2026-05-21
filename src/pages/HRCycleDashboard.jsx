@@ -6170,8 +6170,7 @@ function ModuleCycleCalendar({ org, onOrgChange, employees = [], orgKey, onEmplo
   const [saveState, setSaveState] = useState({ status: 'idle', message: '' });
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [complianceFilter, setComplianceFilter] = useState('all');
-  const [extDialogFor, setExtDialogFor] = useState(null);
-  const [extDays, setExtDays] = useState(7);
+  const [extendModalFor, setExtendModalFor] = useState(null);
   const [actionFeedback, setActionFeedback] = useState('');
   const [wfTick, setWfTick] = useState(0); // bump after auto-applying default goals
   const phase = useCyclePhase(org);
@@ -6324,14 +6323,86 @@ function ModuleCycleCalendar({ org, onOrgChange, employees = [], orgKey, onEmplo
     onEmployeesUpdate?.(next);
   }
 
-  function handleExtend(empCode) {
-    const days = Math.max(1, Math.min(60, Number(extDays) || 7));
+  // One-click default: extend by 7 days from today. No dialog. Used by the
+  // body of the split-button. For custom date / email / credentials flow, the
+  // chevron opens `extendModalFor`.
+  function handleQuickExtend7Days(empCode) {
     const target = new Date();
-    target.setUTCDate(target.getUTCDate() + days);
+    target.setUTCDate(target.getUTCDate() + 7);
     const iso = target.toISOString().slice(0, 10);
     patchEmployee(empCode, { goalCreationEndsOn: iso, noGoalCycle: false });
-    setExtDialogFor(null);
-    setActionFeedback(`Goal creation extended to ${iso} for ${empCode}.`);
+    if (orgKey) {
+      void logAuditEvent({
+        orgKey, actorRole: 'hr-admin', actorName: userName || 'HR Admin',
+        actionType: 'goal-creation-extended', targetType: 'employee', targetCode: empCode,
+        details: { newDeadline: iso, days: 7, notified: false },
+      });
+    }
+    setActionFeedback(`${empCode} extended by 7 days (until ${iso}).`);
+  }
+
+  // Used by the custom-extend modal's "Send & extend" button. Atomic: writes
+  // the override, optionally resets the user's password, optionally dispatches
+  // a notification email. All audit-logged in one entry.
+  async function handleCustomExtend({ empCode, newDeadline, notifyEmail, emailSubject, emailBody, includeLoginInfo }) {
+    const code = String(empCode || '').trim();
+    const emp = employees.find((e) => String(e['Employee Code'] || e.empCode || '').trim() === code);
+    if (!emp) return { ok: false, error: 'Employee not found.' };
+
+    patchEmployee(code, { goalCreationEndsOn: newDeadline, noGoalCycle: false });
+
+    let tempPassword = '';
+    if (notifyEmail && includeLoginInfo) {
+      const credentialKey = resolveEmployeeEmail(emp);
+      if (credentialKey) {
+        const reset = await resetUserPasswordByAdmin({ orgKey, credentialKey, prefix: 'Ext' });
+        if (reset?.ok) tempPassword = reset.tempPassword || '';
+      }
+    }
+
+    let emailResult = { ok: true };
+    if (notifyEmail) {
+      const recipientEmail = resolveEmployeeEmail(emp);
+      if (!recipientEmail) {
+        emailResult = { ok: false, error: 'Employee has no email on file.' };
+      } else {
+        emailResult = await sendCustomBroadcast({
+          org,
+          recipients: [emp],
+          template: { subject: emailSubject || '', body: emailBody || '' },
+          plain: true,
+          tokensFor: () => ({
+            new_deadline: newDeadline,
+            extended_by: userName || 'HR Admin',
+            temporary_password: tempPassword,
+          }),
+        });
+      }
+    }
+
+    if (orgKey) {
+      void logAuditEvent({
+        orgKey, actorRole: 'hr-admin', actorName: userName || 'HR Admin',
+        actionType: 'goal-creation-extended', targetType: 'employee', targetCode: code,
+        details: {
+          newDeadline,
+          notified: !!notifyEmail,
+          credentialsReset: !!(notifyEmail && includeLoginInfo && tempPassword),
+          emailOk: !!emailResult?.ok,
+        },
+      });
+    }
+
+    if (!emailResult?.ok) {
+      setActionFeedback(`Extended to ${newDeadline}, but email failed: ${emailResult?.error || 'unknown error'}`);
+      return { ok: false, error: emailResult?.error };
+    }
+    const note = notifyEmail
+      ? `${code} extended to ${newDeadline} · email sent${includeLoginInfo && tempPassword ? ' with new login credentials' : ''}.`
+      : `${code} extended to ${newDeadline}.`;
+    setActionFeedback(note);
+    setExtendModalFor(null);
+    return { ok: true };
   }
 
   function handleClearOverride(empCode) {
@@ -6653,7 +6724,8 @@ function ModuleCycleCalendar({ org, onOrgChange, employees = [], orgKey, onEmplo
                             empCode={code}
                             employee={emp}
                             config={config}
-                            onExtend={() => { setExtDialogFor(code); setExtDays(7); }}
+                            onExtendQuick={() => handleQuickExtend7Days(code)}
+                            onExtendCustom={() => setExtendModalFor(code)}
                             onApplyDefaults={() => handleApplyDefaults(code)}
                             onClearOverride={() => handleClearOverride(code)}
                             onRemoveFromPms={handleRemoveFromPms}
@@ -6667,37 +6739,174 @@ function ModuleCycleCalendar({ org, onOrgChange, employees = [], orgKey, onEmplo
             </div>
           )}
 
-          {extDialogFor && (
-            <div onClick={() => setExtDialogFor(null)} style={{ position: 'fixed', inset: 0, background: 'rgba(15,23,42,.45)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 12000 }}>
-              <div onClick={(e) => e.stopPropagation()} style={{ background: '#fff', borderRadius: 12, padding: 22, width: 360, maxWidth: 'calc(100% - 32px)', boxShadow: '0 24px 60px rgba(15,23,42,.25)' }}>
-                <div style={{ fontSize: 15, fontWeight: 800, color: '#0F172A', marginBottom: 4 }}>Extend goal creation</div>
-                <div style={{ fontSize: 12.5, color: '#64748B', marginBottom: 16 }}>
-                  Give <strong>{extDialogFor}</strong> a grace period to finish setting goals. They will be treated as still in goal-creation regardless of the global window.
-                </div>
-                <label style={{ display: 'grid', gap: 6 }}>
-                  <span style={{ fontSize: 11.5, fontWeight: 700, color: '#475569', textTransform: 'uppercase', letterSpacing: '.05em' }}>Days from today</span>
-                  <input
-                    type="number"
-                    min={1}
-                    max={60}
-                    value={extDays}
-                    onChange={(e) => setExtDays(e.target.value)}
-                    style={{ padding: '9px 12px', borderRadius: 8, border: '1px solid #CBD5E1', fontSize: 13, fontFamily: 'inherit' }}
-                  />
-                </label>
-                <div style={{ marginTop: 18, display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
-                  <button type="button" onClick={() => setExtDialogFor(null)} style={{ padding: '8px 14px', borderRadius: 8, border: '1px solid #CBD5E1', background: '#fff', color: '#0F172A', fontSize: 12.5, fontWeight: 700, cursor: 'pointer', fontFamily: 'inherit' }}>
-                    Cancel
-                  </button>
-                  <button type="button" onClick={() => handleExtend(extDialogFor)} style={{ padding: '8px 14px', borderRadius: 8, border: 'none', background: '#2563EB', color: '#fff', fontSize: 12.5, fontWeight: 800, cursor: 'pointer', fontFamily: 'inherit' }}>
-                    Grant extension
-                  </button>
-                </div>
-              </div>
-            </div>
+          {extendModalFor && (
+            <ExtendCustomModal
+              empCode={extendModalFor}
+              employee={employees.find((e) => String(e['Employee Code'] || e.empCode || '').trim() === extendModalFor)}
+              org={org}
+              onClose={() => setExtendModalFor(null)}
+              onSubmit={(payload) => handleCustomExtend({ ...payload, empCode: extendModalFor })}
+            />
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+function ExtendCustomModal({ empCode, employee, org, onClose, onSubmit }) {
+  const defaultDate = useMemo(() => {
+    const d = new Date();
+    d.setUTCDate(d.getUTCDate() + 7);
+    return d.toISOString().slice(0, 10);
+  }, []);
+  const empName = String(employee?.['Employee Name'] || employee?.name || empCode || '').trim();
+  const empEmail = resolveEmployeeEmail(employee || {});
+  const orgName = org?.name || 'your organization';
+
+  const defaultSubject = `Goal-creation extended for you`;
+  const defaultBody = [
+    `Hi {employee_name},`,
+    ``,
+    `Your goal-creation deadline has been extended to {new_deadline}. Please log in to ${orgName} and finish setting your goals before that date.`,
+    ``,
+    `Login: {login_url}`,
+    ``,
+    `Thanks,`,
+    `{extended_by}`,
+  ].join('\n');
+  const loginBlock = `Login: {login_url}\nTemporary password: {temporary_password}\n(You'll be asked to set a new password on first sign-in.)`;
+
+  const [newDeadline, setNewDeadline] = useState(defaultDate);
+  const [notifyEmail, setNotifyEmail] = useState(true);
+  const [emailSubject, setEmailSubject] = useState(defaultSubject);
+  const [emailBody, setEmailBody] = useState(defaultBody);
+  const [includeLoginInfo, setIncludeLoginInfo] = useState(false);
+  const [sending, setSending] = useState(false);
+  const [error, setError] = useState('');
+
+  // When the user flips "include login credentials", swap the simple Login
+  // line in the body for the full credentials block (only if they haven't
+  // hand-edited the body yet).
+  useEffect(() => {
+    setEmailBody((prev) => {
+      if (includeLoginInfo) {
+        if (prev.includes('{temporary_password}')) return prev;
+        return prev.replace(/Login: \{login_url\}/, loginBlock);
+      }
+      // Toggle off — collapse the credentials block back to a single login line.
+      if (!prev.includes('{temporary_password}')) return prev;
+      return prev.replace(loginBlock, 'Login: {login_url}');
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [includeLoginInfo]);
+
+  const noEmailOnFile = notifyEmail && !empEmail;
+
+  async function handleSend() {
+    setError('');
+    if (!newDeadline) { setError('Pick a new deadline date.'); return; }
+    if (noEmailOnFile) { setError(`${empName} has no email on file — can't notify by email.`); return; }
+    setSending(true);
+    const result = await onSubmit({
+      newDeadline,
+      notifyEmail,
+      emailSubject,
+      emailBody,
+      includeLoginInfo,
+    });
+    setSending(false);
+    if (!result?.ok) setError(result?.error || 'Could not extend.');
+  }
+
+  return (
+    <div onClick={onClose} style={{ position: 'fixed', inset: 0, background: 'rgba(15,23,42,.45)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 12000, padding: 16 }}>
+      <div onClick={(e) => e.stopPropagation()} style={{ background: '#fff', borderRadius: 12, width: 520, maxWidth: '100%', maxHeight: 'calc(100vh - 32px)', overflow: 'auto', boxShadow: '0 24px 60px rgba(15,23,42,.25)' }}>
+        <div style={{ padding: '16px 20px', borderBottom: '1px solid #F1F5F9' }}>
+          <div style={{ fontSize: 15, fontWeight: 800, color: '#0F172A' }}>Extension settings — {empName}</div>
+          <div style={{ fontSize: 12, color: '#64748B', marginTop: 3 }}>
+            Pick a custom deadline and optionally notify the employee by email.
+          </div>
+        </div>
+
+        <div style={{ padding: 20, display: 'grid', gap: 16 }}>
+          <label style={{ display: 'grid', gap: 6 }}>
+            <span style={{ fontSize: 11.5, fontWeight: 700, color: '#475569', textTransform: 'uppercase', letterSpacing: '.05em' }}>New deadline</span>
+            <input
+              type="date"
+              value={newDeadline}
+              onChange={(e) => setNewDeadline(e.target.value)}
+              style={{ padding: '9px 12px', borderRadius: 8, border: '1px solid #CBD5E1', fontSize: 13, fontFamily: 'inherit', width: 180 }}
+            />
+          </label>
+
+          <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, color: '#0F172A', fontWeight: 700, cursor: 'pointer' }}>
+            <input type="checkbox" checked={notifyEmail} onChange={(e) => setNotifyEmail(e.target.checked)} style={{ width: 14, height: 14, accentColor: '#2563EB' }} />
+            Notify the employee by email
+            {empEmail && (
+              <span style={{ fontWeight: 500, color: '#64748B', fontSize: 12 }}>· {empEmail}</span>
+            )}
+          </label>
+
+          {notifyEmail && (
+            <div style={{ border: '1px solid #E2E8F0', borderRadius: 10, background: '#F8FAFC' }}>
+              <div style={{ padding: '12px 14px', display: 'grid', gap: 10 }}>
+                <label style={{ display: 'grid', gap: 5 }}>
+                  <span style={{ fontSize: 11, fontWeight: 700, color: '#475569', textTransform: 'uppercase', letterSpacing: '.05em' }}>Subject</span>
+                  <input
+                    type="text"
+                    value={emailSubject}
+                    onChange={(e) => setEmailSubject(e.target.value)}
+                    style={{ padding: '8px 11px', borderRadius: 7, border: '1px solid #CBD5E1', fontSize: 12.5, fontFamily: 'inherit', background: '#fff' }}
+                  />
+                </label>
+                <label style={{ display: 'grid', gap: 5 }}>
+                  <span style={{ fontSize: 11, fontWeight: 700, color: '#475569', textTransform: 'uppercase', letterSpacing: '.05em' }}>Body</span>
+                  <textarea
+                    value={emailBody}
+                    onChange={(e) => setEmailBody(e.target.value)}
+                    rows={8}
+                    style={{ padding: '8px 11px', borderRadius: 7, border: '1px solid #CBD5E1', fontSize: 12.5, fontFamily: 'inherit', resize: 'vertical', background: '#fff', lineHeight: 1.5 }}
+                  />
+                  <span style={{ fontSize: 10.5, color: '#94A3B8' }}>
+                    Tokens: <code>{`{employee_name}`}</code>, <code>{`{new_deadline}`}</code>, <code>{`{login_url}`}</code>, <code>{`{temporary_password}`}</code>, <code>{`{extended_by}`}</code>, <code>{`{organization_name}`}</code>.
+                  </span>
+                </label>
+              </div>
+
+              <label style={{ display: 'flex', alignItems: 'flex-start', gap: 10, padding: '11px 14px', borderTop: '1px solid #E2E8F0', cursor: 'pointer' }}>
+                <input
+                  type="checkbox"
+                  checked={includeLoginInfo}
+                  onChange={(e) => setIncludeLoginInfo(e.target.checked)}
+                  style={{ width: 14, height: 14, accentColor: '#2563EB', marginTop: 2 }}
+                />
+                <span style={{ display: 'grid', gap: 3 }}>
+                  <span style={{ fontSize: 12.5, fontWeight: 700, color: '#0F172A' }}>Include login link + credentials</span>
+                  <span style={{ fontSize: 11.5, color: '#92400E', background: '#FFFBEB', border: '1px solid #FCD34D', padding: '5px 8px', borderRadius: 6, lineHeight: 1.45 }}>
+                    Generates a new temporary password and embeds it in the email. The employee's current password will be reset.
+                  </span>
+                </span>
+              </label>
+            </div>
+          )}
+
+          {error && (
+            <div style={{ padding: '8px 11px', borderRadius: 7, background: '#FEF2F2', border: '1px solid #FCA5A5', color: '#991B1B', fontSize: 12 }}>
+              {error}
+            </div>
+          )}
+        </div>
+
+        <div style={{ padding: '14px 20px', borderTop: '1px solid #F1F5F9', display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+          <button type="button" onClick={onClose} disabled={sending} style={{ padding: '8px 14px', borderRadius: 8, border: '1px solid #CBD5E1', background: '#fff', color: '#0F172A', fontSize: 12.5, fontWeight: 700, cursor: sending ? 'not-allowed' : 'pointer', fontFamily: 'inherit' }}>
+            Cancel
+          </button>
+          <button type="button" onClick={handleSend} disabled={sending} style={{ padding: '8px 16px', borderRadius: 8, border: 'none', background: '#2563EB', color: '#fff', fontSize: 12.5, fontWeight: 800, cursor: sending ? 'not-allowed' : 'pointer', fontFamily: 'inherit', opacity: sending ? 0.7 : 1 }}>
+            {sending ? 'Sending…' : (notifyEmail ? 'Send & extend' : 'Extend')}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -6734,7 +6943,7 @@ function SubTabButton({ active, onClick, label, badge, badgeColor }) {
   );
 }
 
-function ComplianceRowActions({ status, override, empCode, employee, config, onExtend, onApplyDefaults, onClearOverride, onRemoveFromPms }) {
+function ComplianceRowActions({ status, override, empCode, employee, config, onExtendQuick, onExtendCustom, onApplyDefaults, onClearOverride, onRemoveFromPms }) {
   const ov = override || {};
   const deadlinePassed = DEADLINE_PASSED_STATUSES.includes(status);
 
@@ -6764,14 +6973,25 @@ function ComplianceRowActions({ status, override, empCode, employee, config, onE
   return (
     <div style={{ display: 'inline-flex', gap: 6, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
       {deadlinePassed && (
-        <button
-          type="button"
-          onClick={onExtend}
-          title={`Give ${empCode} more days to set their goals.`}
-          style={{ padding: '5px 11px', borderRadius: 6, border: '1px solid #CBD5E1', background: '#fff', color: '#1E40AF', fontSize: 11, fontWeight: 700, cursor: 'pointer', fontFamily: 'inherit' }}
-        >
-          Extend
-        </button>
+        <div style={{ display: 'inline-flex' }}>
+          <button
+            type="button"
+            onClick={onExtendQuick}
+            title={`Quick: extend ${empCode} by 7 days.`}
+            style={{ padding: '5px 11px', borderRadius: '6px 0 0 6px', border: '1px solid #CBD5E1', borderRight: 'none', background: '#fff', color: '#1E40AF', fontSize: 11, fontWeight: 700, cursor: 'pointer', fontFamily: 'inherit' }}
+          >
+            Extend 7d
+          </button>
+          <button
+            type="button"
+            onClick={onExtendCustom}
+            title="Custom date, email notification, or login credentials"
+            aria-label="Extension options"
+            style={{ padding: '5px 8px', borderRadius: '0 6px 6px 0', border: '1px solid #CBD5E1', background: '#fff', color: '#1E40AF', fontSize: 11, fontWeight: 700, cursor: 'pointer', fontFamily: 'inherit', lineHeight: 1 }}
+          >
+            ▾
+          </button>
+        </div>
       )}
       {deadlinePassed && (
         <button
