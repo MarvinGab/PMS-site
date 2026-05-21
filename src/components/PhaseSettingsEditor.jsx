@@ -2,12 +2,11 @@ import { useMemo } from 'react';
 import {
   defaultWindowsForFiscalYear,
   validateCycleWindows,
-  PHASE_KIND,
+  reviewCycleWindows,
 } from '../backend/cyclePhase';
 
-// Two-calendar editor. Used in CreateOrgPage (initial setup) and in
-// HRCycleDashboard (per-org edit). Pure controlled component: parent owns
-// `value` (a cyclePhaseWindows object) and `onChange`.
+// Compact two-calendar editor. Used in CreateOrgPage (initial setup) and in
+// HRCycleDashboard (per-org edit). Pure controlled component.
 export default function PhaseSettingsEditor({
   value,
   onChange,
@@ -16,6 +15,7 @@ export default function PhaseSettingsEditor({
   disabled = false,
 }) {
   const validation = useMemo(() => validateCycleWindows(value), [value]);
+  const review = useMemo(() => reviewCycleWindows(value, new Date()), [value]);
 
   function patch(updater) {
     const next = updater(JSON.parse(JSON.stringify(value || {})));
@@ -32,59 +32,52 @@ export default function PhaseSettingsEditor({
 
   const goal = value?.goalSetting || {};
   const evalPhase = value?.evaluation || {};
+  const hasFiscalRange = !!(fiscalYearStartsOn && fiscalYearEndsOn);
 
   return (
-    <div className="phase-settings-editor" style={{ display: 'grid', gap: 18 }}>
-      <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 16, flexWrap: 'wrap' }}>
-        <div style={{ minWidth: 0, flex: 1 }}>
-          <div style={{ fontSize: 14, fontWeight: 800, color: '#0F172A' }}>Cycle phase calendar</div>
-          <div style={{ fontSize: 12.5, color: '#64748B', marginTop: 4, lineHeight: 1.5 }}>
-            The calendar decides which phase the cycle is in. Set when goal-setting and evaluation open, and split each into its sub-phases.
-          </div>
-        </div>
-        {fiscalYearStartsOn && fiscalYearEndsOn && (
+    <div style={{ display: 'grid', gap: 12 }}>
+      {hasFiscalRange && (
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end' }}>
           <button
             type="button"
             onClick={applyDefaults}
             disabled={disabled}
             style={{
-              padding: '7px 13px',
-              borderRadius: 8,
+              padding: '5px 11px',
+              borderRadius: 7,
               border: '1px solid #CBD5E1',
               background: '#fff',
-              color: '#0F172A',
-              fontSize: 12.5,
+              color: '#1E40AF',
+              fontSize: 11.5,
               fontWeight: 700,
               cursor: disabled ? 'not-allowed' : 'pointer',
               fontFamily: 'inherit',
             }}
           >
-            Use smart defaults
+            Smart defaults from fiscal year
           </button>
-        )}
-      </div>
+        </div>
+      )}
 
       <PhaseCard
-        title="Goal-setting phase"
+        title="Goal-setting"
         accent="#2563EB"
-        helper="When employees create goals and managers approve them."
         phase={goal}
         subKeys={[
-          { key: 'goalCreation',    label: 'Goal creation',    helper: 'Employee adds KRAs / KPIs / targets.' },
-          { key: 'managerApproval', label: 'Manager approval', helper: 'Manager reviews and approves the plan.' },
+          { key: 'goalCreation',    label: 'Goal creation' },
+          { key: 'managerApproval', label: 'Manager approval' },
         ]}
         onPatch={(updater) => patch((draft) => { draft.goalSetting = updater(draft.goalSetting || {}); return draft; })}
         disabled={disabled}
       />
 
       <PhaseCard
-        title="Evaluation phase"
+        title="Evaluation"
         accent="#7C3AED"
-        helper="Year-end (or cycle-end) appraisal — self rating then manager rating."
         phase={evalPhase}
         subKeys={[
-          { key: 'selfEvaluation',    label: 'Self evaluation',    helper: 'Employee rates themselves against approved goals.' },
-          { key: 'managerEvaluation', label: 'Manager evaluation', helper: 'Manager rates the employee.' },
+          { key: 'selfEvaluation',    label: 'Self evaluation' },
+          { key: 'managerEvaluation', label: 'Manager evaluation' },
         ]}
         onPatch={(updater) => patch((draft) => { draft.evaluation = updater(draft.evaluation || {}); return draft; })}
         disabled={disabled}
@@ -95,98 +88,100 @@ export default function PhaseSettingsEditor({
       {!validation.ok && (
         <div
           role="alert"
-          style={{ padding: '11px 14px', borderRadius: 9, border: '1px solid #FCA5A5', background: '#FEF2F2', color: '#991B1B', fontSize: 12.5 }}
+          style={{ padding: '9px 12px', borderRadius: 8, border: '1px solid #FCA5A5', background: '#FEF2F2', color: '#991B1B', fontSize: 12 }}
         >
-          <div style={{ fontWeight: 800, marginBottom: 4 }}>Fix these before saving:</div>
-          <ul style={{ margin: 0, paddingLeft: 18, display: 'grid', gap: 3 }}>
-            {validation.errors.map((err, i) => <li key={i}>{err}</li>)}
-          </ul>
+          <strong>Fix:</strong> {validation.errors[0]}
+          {validation.errors.length > 1 && <span style={{ color: '#B91C1C', marginLeft: 6 }}>(+{validation.errors.length - 1} more)</span>}
+        </div>
+      )}
+      {validation.ok && review.warnings.length > 0 && (
+        <div
+          style={{ padding: '9px 12px', borderRadius: 8, border: '1px solid #FCD34D', background: '#FFFBEB', color: '#92400E', fontSize: 12 }}
+        >
+          <strong>Heads-up:</strong> {review.warnings[0]}
+          {review.warnings.length > 1 && <span style={{ color: '#92400E', marginLeft: 6 }}>(+{review.warnings.length - 1} more)</span>}
         </div>
       )}
     </div>
   );
 }
 
-function PhaseCard({ title, accent, helper, phase, subKeys, onPatch, disabled }) {
+function PhaseCard({ title, accent, phase, subKeys, onPatch, disabled }) {
   return (
-    <div style={{ border: '1px solid #E2E8F0', borderRadius: 12, background: '#fff', overflow: 'hidden' }}>
-      <div style={{ padding: '13px 16px', borderLeft: `4px solid ${accent}`, borderBottom: '1px solid #F1F5F9', display: 'grid', gap: 6 }}>
-        <div style={{ fontSize: 13.5, fontWeight: 800, color: '#0F172A' }}>{title}</div>
-        <div style={{ fontSize: 12, color: '#64748B' }}>{helper}</div>
-      </div>
-      <div style={{ padding: 16, display: 'grid', gap: 14 }}>
-        <DateRangeRow
-          label="Phase opens"
-          startLabel="Starts on"
-          endLabel="Ends on"
+    <div style={{ border: '1px solid #E2E8F0', borderRadius: 10, background: '#fff', overflow: 'hidden' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '9px 14px', borderLeft: `3px solid ${accent}`, borderBottom: '1px solid #F1F5F9', background: '#F8FAFC', flexWrap: 'wrap' }}>
+        <span style={{ fontSize: 12, fontWeight: 800, color: '#0F172A', textTransform: 'uppercase', letterSpacing: '.05em', flexShrink: 0 }}>{title}</span>
+        <DateRange
           startValue={phase.startsOn || ''}
           endValue={phase.endsOn || ''}
           disabled={disabled}
-          onChange={(startsOn, endsOn) => onPatch((draft) => {
-            draft.startsOn = startsOn;
-            draft.endsOn = endsOn;
-            return draft;
-          })}
+          onChange={(s, e) => onPatch((draft) => { draft.startsOn = s; draft.endsOn = e; return draft; })}
         />
-        <div style={{ display: 'grid', gap: 12, gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))' }}>
-          {subKeys.map(({ key, label, helper: subHelper }) => {
-            const sub = phase.subPhases?.[key] || {};
-            return (
-              <div key={key} style={{ border: '1px dashed #CBD5E1', borderRadius: 10, padding: 12, background: '#F8FAFC' }}>
-                <div style={{ fontSize: 12, fontWeight: 800, color: '#0F172A' }}>{label}</div>
-                <div style={{ fontSize: 11.5, color: '#64748B', marginTop: 3, marginBottom: 9 }}>{subHelper}</div>
-                <DateRangeRow
-                  startValue={sub.startsOn || ''}
-                  endValue={sub.endsOn || ''}
-                  disabled={disabled}
-                  compact
-                  onChange={(startsOn, endsOn) => onPatch((draft) => {
-                    if (!draft.subPhases) draft.subPhases = {};
-                    draft.subPhases[key] = { startsOn, endsOn };
-                    return draft;
-                  })}
-                />
-              </div>
-            );
-          })}
-        </div>
+      </div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))' }}>
+        {subKeys.map(({ key, label }, idx) => {
+          const sub = phase.subPhases?.[key] || {};
+          return (
+            <div
+              key={key}
+              style={{
+                padding: '9px 14px',
+                borderLeft: idx === 0 ? 'none' : '1px solid #F1F5F9',
+                display: 'flex',
+                alignItems: 'center',
+                gap: 10,
+                flexWrap: 'wrap',
+              }}
+            >
+              <span style={{ fontSize: 11.5, fontWeight: 700, color: '#475569', flexShrink: 0, minWidth: 120 }}>{label}</span>
+              <DateRange
+                startValue={sub.startsOn || ''}
+                endValue={sub.endsOn || ''}
+                disabled={disabled}
+                compact
+                onChange={(s, e) => onPatch((draft) => {
+                  if (!draft.subPhases) draft.subPhases = {};
+                  draft.subPhases[key] = { startsOn: s, endsOn: e };
+                  return draft;
+                })}
+              />
+            </div>
+          );
+        })}
       </div>
     </div>
   );
 }
 
-function DateRangeRow({ label, startLabel = 'From', endLabel = 'To', startValue, endValue, onChange, disabled, compact = false }) {
+function DateRange({ startValue, endValue, onChange, disabled, compact = false }) {
   return (
-    <div style={{ display: 'grid', gap: compact ? 6 : 8 }}>
-      {label && <div style={{ fontSize: 12, fontWeight: 700, color: '#475569' }}>{label}</div>}
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
-        <DateField label={startLabel} value={startValue} disabled={disabled} onChange={(v) => onChange(v, endValue)} compact={compact} />
-        <DateField label={endLabel}   value={endValue}   disabled={disabled} onChange={(v) => onChange(startValue, v)} compact={compact} />
-      </div>
+    <div style={{ display: 'flex', alignItems: 'center', gap: 6, flex: 1, minWidth: 0 }}>
+      <DateField value={startValue} disabled={disabled} onChange={(v) => onChange(v, endValue)} compact={compact} />
+      <span style={{ fontSize: 11, color: '#94A3B8', fontWeight: 700, flexShrink: 0 }}>→</span>
+      <DateField value={endValue} disabled={disabled} onChange={(v) => onChange(startValue, v)} compact={compact} />
     </div>
   );
 }
 
-function DateField({ label, value, onChange, disabled, compact }) {
+function DateField({ value, onChange, disabled, compact = false }) {
   return (
-    <label style={{ display: 'grid', gap: 4 }}>
-      <span style={{ fontSize: compact ? 10.5 : 11, fontWeight: 700, color: '#64748B', textTransform: 'uppercase', letterSpacing: '.05em' }}>{label}</span>
-      <input
-        type="date"
-        value={value || ''}
-        onChange={(e) => onChange(e.target.value)}
-        disabled={disabled}
-        style={{
-          padding: compact ? '7px 9px' : '9px 11px',
-          borderRadius: 8,
-          border: '1px solid #CBD5E1',
-          fontSize: compact ? 12.5 : 13,
-          fontFamily: 'inherit',
-          color: '#0F172A',
-          background: disabled ? '#F1F5F9' : '#fff',
-        }}
-      />
-    </label>
+    <input
+      type="date"
+      value={value || ''}
+      onChange={(e) => onChange(e.target.value)}
+      disabled={disabled}
+      style={{
+        padding: compact ? '5px 7px' : '6px 9px',
+        borderRadius: 6,
+        border: '1px solid #CBD5E1',
+        fontSize: compact ? 11.5 : 12,
+        fontFamily: 'inherit',
+        color: '#0F172A',
+        background: disabled ? '#F1F5F9' : '#fff',
+        flex: 1,
+        minWidth: 0,
+      }}
+    />
   );
 }
 
@@ -203,10 +198,10 @@ function Timeline({ value, fiscalYearStartsOn, fiscalYearEndsOn }) {
   };
 
   const bars = [
-    { label: 'Goal creation',       win: value?.goalSetting?.subPhases?.goalCreation,    color: '#3B82F6' },
-    { label: 'Manager approval',    win: value?.goalSetting?.subPhases?.managerApproval, color: '#2563EB' },
-    { label: 'Self evaluation',     win: value?.evaluation?.subPhases?.selfEvaluation,    color: '#A78BFA' },
-    { label: 'Manager evaluation',  win: value?.evaluation?.subPhases?.managerEvaluation, color: '#7C3AED' },
+    { label: 'Goal creation',       win: value?.goalSetting?.subPhases?.goalCreation,    color: '#3B82F6', row: 0 },
+    { label: 'Manager approval',    win: value?.goalSetting?.subPhases?.managerApproval, color: '#1D4ED8', row: 0 },
+    { label: 'Self evaluation',     win: value?.evaluation?.subPhases?.selfEvaluation,    color: '#A78BFA', row: 1 },
+    { label: 'Manager evaluation',  win: value?.evaluation?.subPhases?.managerEvaluation, color: '#7C3AED', row: 1 },
   ].map((bar) => {
     const start = pctFor(bar.win?.startsOn);
     const end   = pctFor(bar.win?.endsOn);
@@ -215,37 +210,38 @@ function Timeline({ value, fiscalYearStartsOn, fiscalYearEndsOn }) {
   });
 
   return (
-    <div style={{ border: '1px solid #E2E8F0', borderRadius: 10, background: '#fff', padding: 14 }}>
-      <div style={{ fontSize: 11.5, fontWeight: 800, color: '#475569', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 10 }}>Cycle timeline</div>
-      <div style={{ position: 'relative', height: 26, background: '#F1F5F9', borderRadius: 999 }}>
-        {bars.filter((b) => b.render).map((bar, i) => (
-          <div
-            key={i}
-            title={`${bar.label}: ${bar.win?.startsOn || '?'} → ${bar.win?.endsOn || '?'}`}
-            style={{
-              position: 'absolute',
-              top: 4,
-              bottom: 4,
-              left: `${bar.leftPct}%`,
-              width: `${bar.widthPct}%`,
-              background: bar.color,
-              borderRadius: 999,
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              color: '#fff',
-              fontSize: 10.5,
-              fontWeight: 800,
-              overflow: 'hidden',
-              whiteSpace: 'nowrap',
-              padding: '0 6px',
-            }}
-          >
-            {bar.widthPct > 12 ? bar.label : ''}
-          </div>
-        ))}
-      </div>
-      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, color: '#94A3B8', marginTop: 6 }}>
+    <div style={{ border: '1px solid #E2E8F0', borderRadius: 8, background: '#fff', padding: '10px 14px' }}>
+      {[0, 1].map((row) => (
+        <div key={row} style={{ position: 'relative', height: 18, background: '#F1F5F9', borderRadius: 999, marginBottom: row === 0 ? 6 : 0 }}>
+          {bars.filter((b) => b.render && b.row === row).map((bar, i) => (
+            <div
+              key={i}
+              title={`${bar.label}: ${bar.win?.startsOn || '?'} → ${bar.win?.endsOn || '?'}`}
+              style={{
+                position: 'absolute',
+                top: 3,
+                bottom: 3,
+                left: `${bar.leftPct}%`,
+                width: `${bar.widthPct}%`,
+                background: bar.color,
+                borderRadius: 999,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                color: '#fff',
+                fontSize: 9.5,
+                fontWeight: 800,
+                overflow: 'hidden',
+                whiteSpace: 'nowrap',
+                padding: '0 6px',
+              }}
+            >
+              {bar.widthPct > 14 ? bar.label : ''}
+            </div>
+          ))}
+        </div>
+      ))}
+      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 10, color: '#94A3B8', marginTop: 5 }}>
         <span>{fiscalYearStartsOn}</span>
         <span>{fiscalYearEndsOn}</span>
       </div>

@@ -143,15 +143,10 @@ export function validateCycleWindows(windows) {
         errors.push(`${phase.label} > ${subLabel}: must lie within the parent phase window.`);
       }
     }
-    const goalCreation = safeWindow(subs.goalCreation || subs.selfEvaluation);
-    const followUp = safeWindow(subs.managerApproval || subs.managerEvaluation);
-    if (goalCreation && followUp) {
-      const aEnd = parseDate(goalCreation.endsOn);
-      const bStart = parseDate(followUp.startsOn);
-      if (aEnd && bStart && bStart < aEnd) {
-        errors.push(`${phase.label}: sub-phases cannot overlap.`);
-      }
-    }
+    // Sub-phase OVERLAP is intentionally allowed — e.g. once an employee's
+    // goal is rejected by the manager they re-enter goal-creation while
+    // others are still being approved. Both surfaces light up concurrently
+    // for the employees in their respective state.
   }
 
   const goal = windows[PHASE_KIND.GOAL_SETTING];
@@ -165,6 +160,81 @@ export function validateCycleWindows(windows) {
   }
 
   return { ok: errors.length === 0, errors };
+}
+
+// Pre-save sanity warnings — non-blocking. Surface to the editor as a hint
+// strip so HR can confirm the choice rather than be silently surprised.
+export function reviewCycleWindows(windows, now) {
+  const warnings = [];
+  if (!windows) return { warnings };
+  const t = asNow(now);
+  const today = startOfDay(t.toISOString().slice(0, 10));
+
+  const goalStart = parseDate(windows.goalSetting?.startsOn);
+  const goalEnd   = parseDate(windows.goalSetting?.endsOn);
+  const evalStart = parseDate(windows.evaluation?.startsOn);
+  const evalEnd   = parseDate(windows.evaluation?.endsOn);
+
+  if (goalStart && today && goalStart < today && goalEnd && goalEnd >= today) {
+    warnings.push('Goal-setting started in the past — employees who join later may miss the window.');
+  }
+  if (goalEnd && today && goalEnd < today) {
+    warnings.push('Goal-setting end date is in the past.');
+  }
+  if (evalStart && today && evalStart < today && evalEnd && evalEnd >= today) {
+    warnings.push('Evaluation started in the past — late starters lose time.');
+  }
+  if (evalEnd && today && evalEnd < today) {
+    warnings.push('Evaluation end date is in the past — the cycle is effectively closed.');
+  }
+  if (goalEnd && evalStart) {
+    const gapDays = Math.round((evalStart.getTime() - goalEnd.getTime()) / (24 * 60 * 60 * 1000));
+    if (gapDays > 365) warnings.push(`Evaluation is more than a year after goal-setting ends — confirm the year is correct.`);
+  }
+  if (goalStart && goalEnd) {
+    const dur = Math.round((goalEnd.getTime() - goalStart.getTime()) / (24 * 60 * 60 * 1000));
+    if (dur <= 1) warnings.push('Goal-setting window is 1 day or less — very tight.');
+  }
+  if (evalStart && evalEnd) {
+    const dur = Math.round((evalEnd.getTime() - evalStart.getTime()) / (24 * 60 * 60 * 1000));
+    if (dur <= 1) warnings.push('Evaluation window is 1 day or less — very tight.');
+  }
+  return { warnings };
+}
+
+// Find per-employee overrides that no longer line up with the new global
+// windows (e.g. an extension was granted to 2026-05-15, but HR just moved
+// the evaluation start earlier than that). HR sees a toast offering to
+// clear them in bulk.
+export function findStrandedOverrides(employees, windows, now) {
+  const stranded = [];
+  if (!Array.isArray(employees) || !windows) return stranded;
+  const t = asNow(now);
+  const evalStart = startOfDay(windows.evaluation?.startsOn);
+  for (const emp of employees) {
+    const ov = emp?.cycleOverrides || emp?.cycle_overrides;
+    if (!ov || ov.noGoalCycle) continue;
+    const extEnd = endOfDay(ov.goalCreationEndsOn);
+    if (!extEnd) continue;
+    if (evalStart && extEnd >= evalStart) {
+      stranded.push({
+        empCode: String(emp['Employee Code'] || emp.empCode || '').trim(),
+        name: String(emp['Employee Name'] || emp.name || '').trim(),
+        goalCreationEndsOn: ov.goalCreationEndsOn,
+        reason: 'extension-extends-into-evaluation',
+      });
+      continue;
+    }
+    if (extEnd < t) {
+      stranded.push({
+        empCode: String(emp['Employee Code'] || emp.empCode || '').trim(),
+        name: String(emp['Employee Name'] || emp.name || '').trim(),
+        goalCreationEndsOn: ov.goalCreationEndsOn,
+        reason: 'extension-expired',
+      });
+    }
+  }
+  return stranded;
 }
 
 // Build sensible defaults from a fiscal-year date range. Goal-setting takes

@@ -11,9 +11,22 @@ import {
   readCycleWindows,
 } from '../backend/cyclePhase';
 
-// React hook that surfaces the current cycle sub-phase for a given org. The
-// `now` value re-ticks once per minute (and on tab focus) so a phase rollover
-// at midnight is reflected without a hard reload.
+// Inclusive day-precision check used for independent sub-phase booleans.
+// Sub-phases CAN overlap (e.g. goal-creation and manager-approval running
+// side-by-side during a rejection cycle), so each boolean is computed
+// directly off its own window rather than off the single `subPhase` label.
+function isInWindow(win, now) {
+  if (!win?.startsOn || !win?.endsOn) return false;
+  const startStr = String(win.startsOn);
+  const endStr = String(win.endsOn);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(startStr) || !/^\d{4}-\d{2}-\d{2}$/.test(endStr)) return false;
+  const [sy, sm, sd] = startStr.split('-').map(Number);
+  const [ey, em, ed] = endStr.split('-').map(Number);
+  const start = new Date(Date.UTC(sy, sm - 1, sd, 0, 0, 0, 0));
+  const end = new Date(Date.UTC(ey, em - 1, ed, 23, 59, 59, 999));
+  return now >= start && now <= end;
+}
+
 export function useCyclePhase(orgOrWindows) {
   const [now, setNow] = useState(() => new Date());
 
@@ -39,6 +52,16 @@ export function useCyclePhase(orgOrWindows) {
     const subPhase = getCurrentSubPhase(windows, now);
     const active = getActiveWindow(windows, now);
     const next = getNextWindow(windows, now);
+
+    // Independent flags — both within Goal-setting OR within Evaluation can
+    // be true simultaneously when their windows overlap.
+    const goalSubs = windows?.goalSetting?.subPhases || {};
+    const evalSubs = windows?.evaluation?.subPhases || {};
+    const isInGoalCreation      = isInWindow(goalSubs.goalCreation, now);
+    const isInManagerApproval   = isInWindow(goalSubs.managerApproval, now);
+    const isInSelfEvaluation    = isInWindow(evalSubs.selfEvaluation, now);
+    const isInManagerEvaluation = isInWindow(evalSubs.managerEvaluation, now);
+
     return {
       now,
       subPhase,
@@ -47,15 +70,15 @@ export function useCyclePhase(orgOrWindows) {
       nextWindow: next,
       daysRemainingInPhase: active ? daysRemaining(active, now) : null,
       daysUntilNextPhase:   next   ? daysUntil(next, now) : null,
-      isInGoalCreation:      subPhase === SUB_PHASE.GOAL_CREATION,
-      isInManagerApproval:   subPhase === SUB_PHASE.MANAGER_APPROVAL,
-      isInSelfEvaluation:    subPhase === SUB_PHASE.SELF_EVALUATION,
-      isInManagerEvaluation: subPhase === SUB_PHASE.MANAGER_EVALUATION,
+      isInGoalCreation,
+      isInManagerApproval,
+      isInSelfEvaluation,
+      isInManagerEvaluation,
       isPreCycle:  subPhase === SUB_PHASE.PRE_CYCLE,
       isPostCycle: subPhase === SUB_PHASE.POST_CYCLE,
       isBetween:   subPhase === SUB_PHASE.BETWEEN,
-      goalSettingLocked:  subPhase !== SUB_PHASE.GOAL_CREATION && subPhase !== SUB_PHASE.MANAGER_APPROVAL,
-      evaluationLocked:   subPhase !== SUB_PHASE.SELF_EVALUATION && subPhase !== SUB_PHASE.MANAGER_EVALUATION,
+      goalSettingLocked:  !isInGoalCreation && !isInManagerApproval,
+      evaluationLocked:   !isInSelfEvaluation && !isInManagerEvaluation,
       hasWindows: !!windows,
       windows,
       PHASE_KIND,

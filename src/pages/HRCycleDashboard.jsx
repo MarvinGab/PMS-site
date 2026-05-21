@@ -40,6 +40,7 @@ import {
   defaultWindowsForFiscalYear,
   getEmployeeComplianceStatus,
   COMPLIANCE_LABELS,
+  findStrandedOverrides,
 } from '../backend/cyclePhase';
 import { useCyclePhase } from '../hooks/useCyclePhase';
 
@@ -6157,8 +6158,10 @@ function cardAccentStylePreview(mode, tint) {
 }
 
 function ModuleCycleCalendar({ org, onOrgChange, employees = [], orgKey, onEmployeesUpdate }) {
+  const { userName } = useApp();
   const [draft, setDraft] = useState(() => org?.cyclePhaseWindows || null);
   const [saveState, setSaveState] = useState({ status: 'idle', message: '' });
+  const [confirmOpen, setConfirmOpen] = useState(false);
   const [complianceFilter, setComplianceFilter] = useState('all');
   const [extDialogFor, setExtDialogFor] = useState(null);
   const [extDays, setExtDays] = useState(7);
@@ -6167,6 +6170,8 @@ function ModuleCycleCalendar({ org, onOrgChange, employees = [], orgKey, onEmplo
   const workflow = orgKey ? loadWorkflowState(orgKey) : { submissions: {} };
   const submissions = workflow?.submissions || {};
   const now = phase.now;
+  const lastEditedAt = org?.cyclePhaseWindowsLastEditedAt || '';
+  const lastEditedBy = org?.cyclePhaseWindowsLastEditedBy || '';
 
   // Keep the editor's draft in sync if the parent org changes externally (e.g.
   // realtime push from another tab) — but don't clobber edits in progress.
@@ -6196,16 +6201,62 @@ function ModuleCycleCalendar({ org, onOrgChange, employees = [], orgKey, onEmplo
     }
   }
 
-  function handleSave() {
+  function requestSave() {
     const check = validateCycleWindows(draft);
     if (!check.ok) {
       setSaveState({ status: 'failed', message: check.errors[0] || 'Invalid calendar.' });
       return;
     }
-    const ok = onOrgChange({ cyclePhaseWindows: draft });
-    setSaveState(ok
-      ? { status: 'saved', message: 'Cycle calendar updated. New windows are active immediately.' }
-      : { status: 'failed', message: 'Could not save changes.' });
+    setConfirmOpen(true);
+  }
+
+  function handleSaveConfirmed() {
+    setConfirmOpen(false);
+    const stranded = findStrandedOverrides(employees, draft, now);
+    const ok = onOrgChange({
+      cyclePhaseWindows: draft,
+      cyclePhaseWindowsLastEditedAt: new Date().toISOString(),
+      cyclePhaseWindowsLastEditedBy: userName || 'HR Admin',
+    });
+    if (orgKey) {
+      void logAuditEvent({
+        orgKey,
+        actorRole: 'hr-admin',
+        actorName: userName || 'HR Admin',
+        actionType: 'cycle-calendar-updated',
+        targetType: 'organization',
+        targetCode: orgKey,
+        details: { strandedOverrideCount: stranded.length },
+      });
+    }
+    if (stranded.length > 0) {
+      setSaveState({
+        status: 'saved-with-warning',
+        message: `Calendar saved. ${stranded.length} employee override${stranded.length === 1 ? '' : 's'} no longer fit the new windows.`,
+        stranded,
+      });
+    } else {
+      setSaveState(ok
+        ? { status: 'saved', message: 'Cycle calendar updated. New windows are active immediately.' }
+        : { status: 'failed', message: 'Could not save changes.' });
+    }
+  }
+
+  function handleClearStranded() {
+    const stranded = saveState.stranded || [];
+    if (stranded.length === 0) return;
+    const codes = new Set(stranded.map((s) => s.empCode));
+    const next = employees.map((e) => {
+      const myCode = String(e['Employee Code'] || e.empCode || '').trim();
+      if (!codes.has(myCode)) return e;
+      const prev = e.cycleOverrides && typeof e.cycleOverrides === 'object' ? e.cycleOverrides : {};
+      return {
+        ...e,
+        cycleOverrides: { ...prev, goalCreationEndsOn: '', updatedAt: new Date().toISOString() },
+      };
+    });
+    onEmployeesUpdate?.(next);
+    setSaveState({ status: 'saved', message: `Cleared ${stranded.length} stranded override${stranded.length === 1 ? '' : 's'}.` });
   }
 
   function handleDiscard() {
@@ -6330,52 +6381,94 @@ function ModuleCycleCalendar({ org, onOrgChange, employees = [], orgKey, onEmplo
         </div>
       )}
 
-      {(saveState.status === 'saved' || saveState.status === 'failed') && (
+      {saveState.status !== 'idle' && saveState.status !== 'editing' && (
         <div
           style={{
             marginTop: 14,
             padding: '10px 13px',
             borderRadius: 8,
-            background: saveState.status === 'saved' ? '#ECFDF5' : '#FEF2F2',
-            color: saveState.status === 'saved' ? '#065F46' : '#991B1B',
-            border: `1px solid ${saveState.status === 'saved' ? '#A7F3D0' : '#FCA5A5'}`,
+            background: saveState.status === 'failed' ? '#FEF2F2' : saveState.status === 'saved-with-warning' ? '#FFFBEB' : '#ECFDF5',
+            color:      saveState.status === 'failed' ? '#991B1B' : saveState.status === 'saved-with-warning' ? '#92400E' : '#065F46',
+            border:     `1px solid ${saveState.status === 'failed' ? '#FCA5A5' : saveState.status === 'saved-with-warning' ? '#FCD34D' : '#A7F3D0'}`,
             fontSize: 12.5,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            gap: 10,
+            flexWrap: 'wrap',
           }}
         >
-          {saveState.message}
+          <span>{saveState.message}</span>
+          {saveState.status === 'saved-with-warning' && (saveState.stranded || []).length > 0 && (
+            <button
+              type="button"
+              onClick={handleClearStranded}
+              style={{ padding: '5px 11px', borderRadius: 6, border: '1px solid #92400E', background: '#fff', color: '#92400E', fontSize: 11.5, fontWeight: 700, cursor: 'pointer', fontFamily: 'inherit' }}
+            >
+              Clear stranded overrides
+            </button>
+          )}
         </div>
       )}
 
-      <div style={{ marginTop: 18, display: 'flex', justifyContent: 'flex-end', gap: 10 }}>
-        {dirty && (
+      <div style={{ marginTop: 14, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, flexWrap: 'wrap' }}>
+        <div style={{ fontSize: 11.5, color: '#94A3B8' }}>
+          {lastEditedAt ? (
+            <>Last edited by <strong style={{ color: '#475569' }}>{lastEditedBy || 'someone'}</strong> on {formatRelativeDate(lastEditedAt) || new Date(lastEditedAt).toLocaleString()}.</>
+          ) : (
+            <>Calendar has not been edited yet.</>
+          )}
+        </div>
+        <div style={{ display: 'flex', gap: 10 }}>
+          {dirty && (
+            <button
+              type="button"
+              onClick={handleDiscard}
+              style={{ padding: '9px 16px', borderRadius: 8, border: '1px solid #CBD5E1', background: '#fff', color: '#0F172A', fontSize: 13, fontWeight: 700, cursor: 'pointer', fontFamily: 'inherit' }}
+            >
+              Discard changes
+            </button>
+          )}
           <button
             type="button"
-            onClick={handleDiscard}
-            style={{ padding: '9px 16px', borderRadius: 8, border: '1px solid #CBD5E1', background: '#fff', color: '#0F172A', fontSize: 13, fontWeight: 700, cursor: 'pointer', fontFamily: 'inherit' }}
+            onClick={requestSave}
+            disabled={!dirty || !validation.ok}
+            style={{
+              padding: '9px 18px',
+              borderRadius: 8,
+              border: 'none',
+              background: dirty && validation.ok ? '#2563EB' : '#CBD5E1',
+              color: '#fff',
+              fontSize: 13,
+              fontWeight: 800,
+              cursor: dirty && validation.ok ? 'pointer' : 'not-allowed',
+              fontFamily: 'inherit',
+              boxShadow: dirty && validation.ok ? '0 8px 18px rgba(37,99,235,.22)' : 'none',
+            }}
           >
-            Discard changes
+            Save calendar
           </button>
-        )}
-        <button
-          type="button"
-          onClick={handleSave}
-          disabled={!dirty || !validation.ok}
-          style={{
-            padding: '9px 18px',
-            borderRadius: 8,
-            border: 'none',
-            background: dirty && validation.ok ? '#2563EB' : '#CBD5E1',
-            color: '#fff',
-            fontSize: 13,
-            fontWeight: 800,
-            cursor: dirty && validation.ok ? 'pointer' : 'not-allowed',
-            fontFamily: 'inherit',
-            boxShadow: dirty && validation.ok ? '0 8px 18px rgba(37,99,235,.22)' : 'none',
-          }}
-        >
-          Save calendar
-        </button>
+        </div>
       </div>
+
+      {confirmOpen && (
+        <div onClick={() => setConfirmOpen(false)} style={{ position: 'fixed', inset: 0, background: 'rgba(15,23,42,.45)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 12000 }}>
+          <div onClick={(e) => e.stopPropagation()} style={{ background: '#fff', borderRadius: 12, padding: 22, width: 420, maxWidth: 'calc(100% - 32px)', boxShadow: '0 24px 60px rgba(15,23,42,.25)' }}>
+            <div style={{ fontSize: 15, fontWeight: 800, color: '#0F172A', marginBottom: 6 }}>Update cycle calendar?</div>
+            <div style={{ fontSize: 12.5, color: '#475569', lineHeight: 1.55, marginBottom: 16 }}>
+              These windows govern who can do what across the org. Changes take effect immediately — anyone currently mid-action may find their phase has moved.
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+              <button type="button" onClick={() => setConfirmOpen(false)} style={{ padding: '8px 14px', borderRadius: 8, border: '1px solid #CBD5E1', background: '#fff', color: '#0F172A', fontSize: 12.5, fontWeight: 700, cursor: 'pointer', fontFamily: 'inherit' }}>
+                Cancel
+              </button>
+              <button type="button" onClick={handleSaveConfirmed} style={{ padding: '8px 14px', borderRadius: 8, border: 'none', background: '#2563EB', color: '#fff', fontSize: 12.5, fontWeight: 800, cursor: 'pointer', fontFamily: 'inherit' }}>
+                Yes, update calendar
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {totalEmps > 0 && (
         <div style={{ marginTop: 32 }}>

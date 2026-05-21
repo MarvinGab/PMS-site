@@ -17,6 +17,8 @@ import {
   daysRemaining,
   validateCycleWindows,
   defaultWindowsForFiscalYear,
+  reviewCycleWindows,
+  findStrandedOverrides,
 } from './cyclePhase.js';
 
 const windows = {
@@ -171,11 +173,11 @@ check('missing phase fails cleanly', () => {
   const r = validateCycleWindows({ goalSetting: windows.goalSetting });
   assert.equal(r.ok, false);
 });
-check('overlapping sub-phases fails', () => {
-  const broken = JSON.parse(JSON.stringify(windows));
-  broken.goalSetting.subPhases.managerApproval.startsOn = '2026-04-15';
-  const r = validateCycleWindows(broken);
-  assert.equal(r.ok, false);
+check('overlapping sub-phases are ALLOWED (intentional)', () => {
+  const overlap = JSON.parse(JSON.stringify(windows));
+  overlap.goalSetting.subPhases.managerApproval.startsOn = '2026-04-15';
+  const r = validateCycleWindows(overlap);
+  assert.equal(r.ok, true, r.errors.join('; '));
 });
 
 console.log('cyclePhase.defaultWindowsForFiscalYear');
@@ -255,6 +257,54 @@ check('noGoalCycle flag → no-goal-cycle bucket', () => {
   const emp = { cycleOverrides: { noGoalCycle: true } };
   const s = getEmployeeComplianceStatus({ org, employee: emp, submission: null, now: at('2026-05-15T12:00:00') });
   assert.equal(s, 'no-goal-cycle');
+});
+
+console.log('cyclePhase.reviewCycleWindows');
+check('windows entirely in the future → no warnings', () => {
+  const r = reviewCycleWindows(windows, at('2025-12-01T12:00:00'));
+  assert.equal(r.warnings.length, 0);
+});
+check('goal-setting end in past → warning', () => {
+  const r = reviewCycleWindows(windows, at('2027-06-01T12:00:00'));
+  assert.ok(r.warnings.some((w) => /goal-setting end date is in the past/i.test(w)));
+});
+check('1-day window → tight warning', () => {
+  const tight = JSON.parse(JSON.stringify(windows));
+  tight.evaluation.endsOn = tight.evaluation.startsOn;
+  tight.evaluation.subPhases.selfEvaluation = { startsOn: tight.evaluation.startsOn, endsOn: tight.evaluation.startsOn };
+  tight.evaluation.subPhases.managerEvaluation = { startsOn: tight.evaluation.startsOn, endsOn: tight.evaluation.startsOn };
+  const r = reviewCycleWindows(tight, at('2025-12-01T12:00:00'));
+  assert.ok(r.warnings.some((w) => /evaluation window is 1 day or less/i.test(w)));
+});
+
+console.log('cyclePhase.findStrandedOverrides');
+check('extension extending into evaluation → flagged', () => {
+  const employees = [{
+    'Employee Code': 'E001',
+    'Employee Name': 'Alpha',
+    cycleOverrides: { goalCreationEndsOn: '2027-02-15' },
+  }];
+  const list = findStrandedOverrides(employees, windows, at('2026-09-01T12:00:00'));
+  assert.equal(list.length, 1);
+  assert.equal(list[0].reason, 'extension-extends-into-evaluation');
+});
+check('expired extension → flagged', () => {
+  const employees = [{
+    'Employee Code': 'E002',
+    'Employee Name': 'Bravo',
+    cycleOverrides: { goalCreationEndsOn: '2026-05-15' },
+  }];
+  const list = findStrandedOverrides(employees, windows, at('2026-06-01T12:00:00'));
+  assert.equal(list.length, 1);
+  assert.equal(list[0].reason, 'extension-expired');
+});
+check('no-goal-cycle override is skipped', () => {
+  const employees = [{
+    'Employee Code': 'E003',
+    cycleOverrides: { goalCreationEndsOn: '2027-02-15', noGoalCycle: true },
+  }];
+  const list = findStrandedOverrides(employees, windows, at('2026-09-01T12:00:00'));
+  assert.equal(list.length, 0);
 });
 
 if (process.exitCode) {

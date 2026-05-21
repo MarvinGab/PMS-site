@@ -155,7 +155,10 @@ export default function CreateOrgPage() {
       financial_year: s.financial_year || org.pmsCalendar || 'April–March',
       custom_pms_start_date: s.custom_pms_start_date || org.customPmsStartDate || '',
       custom_pms_end_date: s.custom_pms_end_date || org.customPmsEndDate || '',
-      cycle_phase_windows: s.cycle_phase_windows || org.cyclePhaseWindows || null,
+      // Live `org.cyclePhaseWindows` wins over `setupFormSnapshot` so that
+      // HR-admin edits made via HRCycleDashboard show up here instead of being
+      // shadowed by the (now-stale) snapshot captured at create-time.
+      cycle_phase_windows: org.cyclePhaseWindows || s.cycle_phase_windows || null,
       hr_admin_name: s.hr_admin_name || org.hrAdminName || '',
       hr_admin_email: s.hr_admin_email || org.hrAdminEmail || '',
       temporary_password: s.temporary_password || org.temporaryPassword || '',
@@ -324,6 +327,16 @@ export default function CreateOrgPage() {
       customPmsStartDate: form.custom_pms_start_date || '',
       customPmsEndDate: form.custom_pms_end_date || '',
       cyclePhaseWindows: form.cycle_phase_windows || null,
+      // Stamp the last-edit only when the calendar actually changed; preserves
+      // an existing stamp when the user just opens edit-mode and clicks Save.
+      cyclePhaseWindowsLastEditedAt:
+        JSON.stringify(form.cycle_phase_windows || null) !== JSON.stringify(existingOrg?.cyclePhaseWindows || null)
+          ? new Date().toISOString()
+          : (existingOrg?.cyclePhaseWindowsLastEditedAt || null),
+      cyclePhaseWindowsLastEditedBy:
+        JSON.stringify(form.cycle_phase_windows || null) !== JSON.stringify(existingOrg?.cyclePhaseWindows || null)
+          ? 'Super Admin'
+          : (existingOrg?.cyclePhaseWindowsLastEditedBy || null),
       selectedModules: [...modules],
       setupFormSnapshot: snapshot,
       hrAdminName,
