@@ -61,8 +61,8 @@ export default function PhaseSettingsEditor({
         minDate={fiscalYearStartsOn}
         maxDate={fiscalYearEndsOn}
         subKeys={[
-          { key: 'goalCreation',    label: 'Goal creation' },
-          { key: 'managerApproval', label: 'Manager approval' },
+          { key: 'goalCreation',    label: 'Goal creation',    ratio: 0.7 },
+          { key: 'managerApproval', label: 'Manager approval', ratio: 0.3 },
         ]}
         onPatch={(updater) => patch((d) => { d.goalSetting = updater(d.goalSetting || {}); return d; })}
         disabled={disabled}
@@ -75,8 +75,8 @@ export default function PhaseSettingsEditor({
         minDate={fiscalYearStartsOn}
         maxDate={fiscalYearEndsOn}
         subKeys={[
-          { key: 'selfEvaluation',    label: 'Self evaluation' },
-          { key: 'managerEvaluation', label: 'Manager evaluation' },
+          { key: 'selfEvaluation',    label: 'Self evaluation',    ratio: 0.5 },
+          { key: 'managerEvaluation', label: 'Manager evaluation', ratio: 0.5 },
         ]}
         onPatch={(updater) => patch((d) => { d.evaluation = updater(d.evaluation || {}); return d; })}
         disabled={disabled}
@@ -186,6 +186,33 @@ function syncSubWindowsToPhase(draft, subKeys, startsOn = draft.startsOn || '', 
   return draft;
 }
 
+// Split the parent phase window into N consecutive sub-ranges, weighted by
+// each subKey's `ratio` (defaults to equal split). Called when the user flips
+// "Customize windows" on — gives the timeline two distinct bars to show
+// immediately instead of one merged bar.
+function splitSubWindowsFromPhase(draft, subKeys) {
+  const start = parseISODate(draft?.startsOn);
+  const end   = parseISODate(draft?.endsOn);
+  if (!start || !end || end <= start) return draft;
+  const totalDays = Math.max(subKeys.length, Math.round((end.getTime() - start.getTime()) / DAY_MS) + 1);
+  const weights = subKeys.map((k) => (Number.isFinite(k.ratio) && k.ratio > 0 ? k.ratio : 1));
+  const sumWeights = weights.reduce((a, b) => a + b, 0) || 1;
+
+  if (!draft.subPhases) draft.subPhases = {};
+  let cursorDay = 0;
+  subKeys.forEach((k, i) => {
+    const isLast = i === subKeys.length - 1;
+    const slotDays = isLast
+      ? Math.max(1, totalDays - cursorDay)
+      : Math.max(1, Math.round((weights[i] / sumWeights) * totalDays));
+    const subStart = shiftDays(draft.startsOn, cursorDay);
+    const subEnd = shiftDays(draft.startsOn, cursorDay + slotDays - 1);
+    draft.subPhases[k.key] = { startsOn: subStart, endsOn: subEnd };
+    cursorDay += slotDays;
+  });
+  return draft;
+}
+
 function clampDate(value, minDate, maxDate) {
   if (!value) return '';
   if (minDate && value < minDate) return minDate;
@@ -258,7 +285,11 @@ function PhaseCard({ title, accent, phase, subKeys, onPatch, disabled, minDate, 
               onPatch((draft) => syncSubWindowsToPhase(draft, subKeys));
               setCustomSubWindows(false);
             } else {
-              // Synced → custom: leave existing windows so the admin can edit them.
+              // Synced → custom: split the parent window into N sub-ranges by
+              // the configured ratio so the timeline shows two distinct bars
+              // immediately. Without this the data still matches the parent
+              // and the timeline keeps rendering a single merged bar.
+              onPatch((draft) => splitSubWindowsFromPhase(draft, subKeys));
               setCustomSubWindows(true);
             }
           }}
