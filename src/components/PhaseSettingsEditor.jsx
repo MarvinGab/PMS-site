@@ -1,4 +1,4 @@
-import { useMemo } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   defaultWindowsForFiscalYear,
   validateCycleWindows,
@@ -106,7 +106,32 @@ export default function PhaseSettingsEditor({
   );
 }
 
+function subWindowsMatchPhase(phase, subKeys) {
+  if (!phase?.startsOn || !phase?.endsOn) return true;
+  return subKeys.every(({ key }) => {
+    const sub = phase.subPhases?.[key] || {};
+    return sub.startsOn === phase.startsOn && sub.endsOn === phase.endsOn;
+  });
+}
+
+function syncSubWindowsToPhase(draft, subKeys, startsOn = draft.startsOn || '', endsOn = draft.endsOn || '') {
+  if (!draft.subPhases) draft.subPhases = {};
+  subKeys.forEach(({ key }) => {
+    draft.subPhases[key] = { startsOn, endsOn };
+  });
+  return draft;
+}
+
 function PhaseCard({ title, accent, phase, subKeys, onPatch, disabled }) {
+  const subWindowsSynced = subWindowsMatchPhase(phase, subKeys);
+  const [customSubWindows, setCustomSubWindows] = useState(!subWindowsSynced);
+
+  useEffect(() => {
+    if (!subWindowsSynced) setCustomSubWindows(true);
+  }, [subWindowsSynced]);
+
+  const subLabel = subKeys.map((item) => item.label).join(' and ');
+
   return (
     <div style={{ border: '1px solid #E2E8F0', borderRadius: 10, background: '#fff', overflow: 'hidden' }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '9px 14px', borderLeft: `3px solid ${accent}`, borderBottom: '1px solid #F1F5F9', background: '#F8FAFC', flexWrap: 'wrap' }}>
@@ -115,40 +140,80 @@ function PhaseCard({ title, accent, phase, subKeys, onPatch, disabled }) {
           startValue={phase.startsOn || ''}
           endValue={phase.endsOn || ''}
           disabled={disabled}
-          onChange={(s, e) => onPatch((draft) => { draft.startsOn = s; draft.endsOn = e; return draft; })}
+          onChange={(s, e) => onPatch((draft) => {
+            const wasSynced = subWindowsMatchPhase(draft, subKeys);
+            draft.startsOn = s;
+            draft.endsOn = e;
+            if (wasSynced || !customSubWindows) syncSubWindowsToPhase(draft, subKeys, s, e);
+            return draft;
+          })}
         />
+        <button
+          type="button"
+          disabled={disabled || !phase.startsOn || !phase.endsOn}
+          onClick={() => {
+            if (customSubWindows) {
+              onPatch((draft) => syncSubWindowsToPhase(draft, subKeys));
+              setCustomSubWindows(false);
+            } else {
+              onPatch((draft) => syncSubWindowsToPhase(draft, subKeys));
+              setCustomSubWindows(true);
+            }
+          }}
+          style={{
+            marginLeft: 'auto',
+            padding: '5px 10px',
+            borderRadius: 999,
+            border: `1px solid ${customSubWindows ? '#CBD5E1' : '#BFDBFE'}`,
+            background: customSubWindows ? '#fff' : '#EFF6FF',
+            color: customSubWindows ? '#475569' : '#1D4ED8',
+            fontSize: 11.5,
+            fontWeight: 800,
+            cursor: disabled ? 'not-allowed' : 'pointer',
+            fontFamily: 'inherit',
+            whiteSpace: 'nowrap',
+          }}
+        >
+          {customSubWindows ? 'Use same dates' : 'Customize windows'}
+        </button>
       </div>
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))' }}>
-        {subKeys.map(({ key, label }, idx) => {
-          const sub = phase.subPhases?.[key] || {};
-          return (
-            <div
-              key={key}
-              style={{
-                padding: '9px 14px',
-                borderLeft: idx === 0 ? 'none' : '1px solid #F1F5F9',
-                display: 'flex',
-                alignItems: 'center',
-                gap: 10,
-                flexWrap: 'wrap',
-              }}
-            >
-              <span style={{ fontSize: 11.5, fontWeight: 700, color: '#475569', flexShrink: 0, minWidth: 120 }}>{label}</span>
-              <DateRange
-                startValue={sub.startsOn || ''}
-                endValue={sub.endsOn || ''}
-                disabled={disabled}
-                compact
-                onChange={(s, e) => onPatch((draft) => {
-                  if (!draft.subPhases) draft.subPhases = {};
-                  draft.subPhases[key] = { startsOn: s, endsOn: e };
-                  return draft;
-                })}
-              />
-            </div>
-          );
-        })}
-      </div>
+      {customSubWindows ? (
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))' }}>
+          {subKeys.map(({ key, label }, idx) => {
+            const sub = phase.subPhases?.[key] || {};
+            return (
+              <div
+                key={key}
+                style={{
+                  padding: '9px 14px',
+                  borderLeft: idx === 0 ? 'none' : '1px solid #F1F5F9',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 10,
+                  flexWrap: 'wrap',
+                }}
+              >
+                <span style={{ fontSize: 11.5, fontWeight: 700, color: '#475569', flexShrink: 0, minWidth: 120 }}>{label}</span>
+                <DateRange
+                  startValue={sub.startsOn || ''}
+                  endValue={sub.endsOn || ''}
+                  disabled={disabled}
+                  compact
+                  onChange={(s, e) => onPatch((draft) => {
+                    if (!draft.subPhases) draft.subPhases = {};
+                    draft.subPhases[key] = { startsOn: s, endsOn: e };
+                    return draft;
+                  })}
+                />
+              </div>
+            );
+          })}
+        </div>
+      ) : (
+        <div style={{ padding: '10px 14px', background: '#FFFFFF', fontSize: 12, color: '#64748B', borderTop: '1px solid #F1F5F9' }}>
+          <strong style={{ color: '#334155' }}>{subLabel}</strong> use the same dates as the {title.toLowerCase()} phase.
+        </div>
+      )}
     </div>
   );
 }
@@ -197,12 +262,31 @@ function Timeline({ value, fiscalYearStartsOn, fiscalYearEndsOn }) {
     return Math.max(0, Math.min(1, (d.getTime() - fyStart.getTime()) / span));
   };
 
-  const bars = [
-    { label: 'Goal creation',       win: value?.goalSetting?.subPhases?.goalCreation,    color: '#3B82F6', row: 0 },
-    { label: 'Manager approval',    win: value?.goalSetting?.subPhases?.managerApproval, color: '#1D4ED8', row: 0 },
-    { label: 'Self evaluation',     win: value?.evaluation?.subPhases?.selfEvaluation,    color: '#A78BFA', row: 1 },
-    { label: 'Manager evaluation',  win: value?.evaluation?.subPhases?.managerEvaluation, color: '#7C3AED', row: 1 },
-  ].map((bar) => {
+  const goalSynced = subWindowsMatchPhase(value?.goalSetting, [
+    { key: 'goalCreation' },
+    { key: 'managerApproval' },
+  ]);
+  const evaluationSynced = subWindowsMatchPhase(value?.evaluation, [
+    { key: 'selfEvaluation' },
+    { key: 'managerEvaluation' },
+  ]);
+
+  const rawBars = [
+    ...(goalSynced
+      ? [{ label: 'Goal-setting', win: value?.goalSetting, color: 'linear-gradient(90deg,#3B82F6,#1D4ED8)', row: 0 }]
+      : [
+          { label: 'Goal creation',    win: value?.goalSetting?.subPhases?.goalCreation,    color: '#3B82F6', row: 0 },
+          { label: 'Manager approval', win: value?.goalSetting?.subPhases?.managerApproval, color: '#1D4ED8', row: 0 },
+        ]),
+    ...(evaluationSynced
+      ? [{ label: 'Evaluation', win: value?.evaluation, color: 'linear-gradient(90deg,#A78BFA,#7C3AED)', row: 1 }]
+      : [
+          { label: 'Self evaluation',    win: value?.evaluation?.subPhases?.selfEvaluation,    color: '#A78BFA', row: 1 },
+          { label: 'Manager evaluation', win: value?.evaluation?.subPhases?.managerEvaluation, color: '#7C3AED', row: 1 },
+        ]),
+  ];
+
+  const bars = rawBars.map((bar) => {
     const start = pctFor(bar.win?.startsOn);
     const end   = pctFor(bar.win?.endsOn);
     if (start == null || end == null || end < start) return { ...bar, render: false };

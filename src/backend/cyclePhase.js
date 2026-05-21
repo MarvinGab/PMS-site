@@ -238,8 +238,9 @@ export function findStrandedOverrides(employees, windows, now) {
 }
 
 // Build sensible defaults from a fiscal-year date range. Goal-setting takes
-// the first 30 days (20-day creation + 10-day approval); evaluation takes the
-// last 60 days (30 self + 30 manager). Editable in the UI.
+// the first 30 days and evaluation takes the last 60 days. By default, each
+// sub-window inherits its parent phase dates; admins can split the inner
+// windows manually only when they have a concrete reason to do so.
 export function defaultWindowsForFiscalYear({ startsOn, endsOn } = {}) {
   const start = parseDate(startsOn);
   const end = parseDate(endsOn);
@@ -250,42 +251,31 @@ export function defaultWindowsForFiscalYear({ startsOn, endsOn } = {}) {
   const cap = (n, max) => Math.max(1, Math.min(n, max));
   const goalSpan = cap(30, Math.floor(totalDays / 2));
   const evalSpan = cap(60, Math.floor(totalDays / 2));
-  const creationSpan = Math.max(1, Math.floor(goalSpan * (2 / 3)));
-  const approvalSpan = Math.max(1, goalSpan - creationSpan);
-  const selfSpan = Math.max(1, Math.floor(evalSpan / 2));
-  const managerSpan = Math.max(1, evalSpan - selfSpan);
 
   const addDays = (date, days) => new Date(date.getTime() + days * day);
   const iso = (date) => date.toISOString().slice(0, 10);
 
   const gsStart = start;
   const gsEnd = addDays(start, goalSpan - 1);
-  const gcEnd = addDays(start, creationSpan - 1);
-  const maStart = addDays(start, creationSpan);
-  const maEnd = addDays(start, creationSpan + approvalSpan - 1);
 
   const evStart = addDays(end, -(evalSpan - 1));
   const evEnd = end;
-  const seStart = evStart;
-  const seEnd = addDays(evStart, selfSpan - 1);
-  const meStart = addDays(evStart, selfSpan);
-  const meEnd = addDays(evStart, selfSpan + managerSpan - 1);
 
   return {
     goalSetting: {
       startsOn: iso(gsStart),
       endsOn: iso(gsEnd),
       subPhases: {
-        goalCreation:    { startsOn: iso(gsStart), endsOn: iso(gcEnd) },
-        managerApproval: { startsOn: iso(maStart), endsOn: iso(maEnd) },
+        goalCreation:    { startsOn: iso(gsStart), endsOn: iso(gsEnd) },
+        managerApproval: { startsOn: iso(gsStart), endsOn: iso(gsEnd) },
       },
     },
     evaluation: {
       startsOn: iso(evStart),
       endsOn: iso(evEnd),
       subPhases: {
-        selfEvaluation:    { startsOn: iso(seStart), endsOn: iso(seEnd) },
-        managerEvaluation: { startsOn: iso(meStart), endsOn: iso(meEnd) },
+        selfEvaluation:    { startsOn: iso(evStart), endsOn: iso(evEnd) },
+        managerEvaluation: { startsOn: iso(evStart), endsOn: iso(evEnd) },
       },
     },
   };

@@ -189,6 +189,25 @@ check('April–March fiscal year produces valid defaults', () => {
   assert.equal(d.goalSetting.startsOn, '2026-04-01');
   assert.equal(d.evaluation.endsOn, '2027-03-31');
 });
+check('defaults keep sub-windows synced to parent phase dates', () => {
+  const d = defaultWindowsForFiscalYear({ startsOn: '2026-04-01', endsOn: '2027-03-31' });
+  assert.deepEqual(d.goalSetting.subPhases.goalCreation, {
+    startsOn: d.goalSetting.startsOn,
+    endsOn: d.goalSetting.endsOn,
+  });
+  assert.deepEqual(d.goalSetting.subPhases.managerApproval, {
+    startsOn: d.goalSetting.startsOn,
+    endsOn: d.goalSetting.endsOn,
+  });
+  assert.deepEqual(d.evaluation.subPhases.selfEvaluation, {
+    startsOn: d.evaluation.startsOn,
+    endsOn: d.evaluation.endsOn,
+  });
+  assert.deepEqual(d.evaluation.subPhases.managerEvaluation, {
+    startsOn: d.evaluation.startsOn,
+    endsOn: d.evaluation.endsOn,
+  });
+});
 check('Jan–Dec fiscal year produces valid defaults', () => {
   const d = defaultWindowsForFiscalYear({ startsOn: '2026-01-01', endsOn: '2026-12-31' });
   assert.ok(d);
