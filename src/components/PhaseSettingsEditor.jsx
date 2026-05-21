@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
-  defaultWindowsForFiscalYear,
   validateCycleWindows,
   reviewCycleWindows,
 } from '../backend/cyclePhase';
@@ -22,47 +21,17 @@ export default function PhaseSettingsEditor({
     onChange(next);
   }
 
-  function applyDefaults() {
-    const defaults = defaultWindowsForFiscalYear({
-      startsOn: fiscalYearStartsOn,
-      endsOn:   fiscalYearEndsOn,
-    });
-    if (defaults) onChange(defaults);
-  }
-
   const goal = value?.goalSetting || {};
   const evalPhase = value?.evaluation || {};
-  const hasFiscalRange = !!(fiscalYearStartsOn && fiscalYearEndsOn);
 
   return (
-    <div style={{ display: 'grid', gap: 12 }}>
-      {hasFiscalRange && (
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end' }}>
-          <button
-            type="button"
-            onClick={applyDefaults}
-            disabled={disabled}
-            style={{
-              padding: '5px 11px',
-              borderRadius: 7,
-              border: '1px solid #CBD5E1',
-              background: '#fff',
-              color: '#1E40AF',
-              fontSize: 11.5,
-              fontWeight: 700,
-              cursor: disabled ? 'not-allowed' : 'pointer',
-              fontFamily: 'inherit',
-            }}
-          >
-            Smart defaults from fiscal year
-          </button>
-        </div>
-      )}
-
+    <div style={{ display: 'grid', gap: 14 }}>
       <PhaseCard
         title="Goal-setting"
         accent="#2563EB"
         phase={goal}
+        minDate={fiscalYearStartsOn}
+        maxDate={fiscalYearEndsOn}
         subKeys={[
           { key: 'goalCreation',    label: 'Goal creation' },
           { key: 'managerApproval', label: 'Manager approval' },
@@ -75,6 +44,8 @@ export default function PhaseSettingsEditor({
         title="Evaluation"
         accent="#7C3AED"
         phase={evalPhase}
+        minDate={fiscalYearStartsOn}
+        maxDate={fiscalYearEndsOn}
         subKeys={[
           { key: 'selfEvaluation',    label: 'Self evaluation' },
           { key: 'managerEvaluation', label: 'Manager evaluation' },
@@ -122,7 +93,32 @@ function syncSubWindowsToPhase(draft, subKeys, startsOn = draft.startsOn || '', 
   return draft;
 }
 
-function PhaseCard({ title, accent, phase, subKeys, onPatch, disabled }) {
+function clampDate(value, minDate, maxDate) {
+  if (!value) return '';
+  if (minDate && value < minDate) return minDate;
+  if (maxDate && value > maxDate) return maxDate;
+  return value;
+}
+
+function normalizeRange(startValue, endValue, minDate, maxDate) {
+  let startsOn = clampDate(startValue || '', minDate, maxDate);
+  let endsOn = clampDate(endValue || '', minDate, maxDate);
+  if (startsOn && endsOn && endsOn < startsOn) {
+    endsOn = startsOn;
+  }
+  return { startsOn, endsOn };
+}
+
+function clampSubWindowsToPhase(draft, subKeys) {
+  if (!draft.subPhases) draft.subPhases = {};
+  subKeys.forEach(({ key }) => {
+    const sub = draft.subPhases[key] || {};
+    draft.subPhases[key] = normalizeRange(sub.startsOn, sub.endsOn, draft.startsOn || '', draft.endsOn || '');
+  });
+  return draft;
+}
+
+function PhaseCard({ title, accent, phase, subKeys, onPatch, disabled, minDate, maxDate }) {
   const subWindowsSynced = subWindowsMatchPhase(phase, subKeys);
   const [customSubWindows, setCustomSubWindows] = useState(!subWindowsSynced);
 
@@ -133,21 +129,33 @@ function PhaseCard({ title, accent, phase, subKeys, onPatch, disabled }) {
   const subLabel = subKeys.map((item) => item.label).join(' and ');
 
   return (
-    <div style={{ border: '1px solid #E2E8F0', borderRadius: 10, background: '#fff', overflow: 'hidden' }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '9px 14px', borderLeft: `3px solid ${accent}`, borderBottom: '1px solid #F1F5F9', background: '#F8FAFC', flexWrap: 'wrap' }}>
-        <span style={{ fontSize: 12, fontWeight: 800, color: '#0F172A', textTransform: 'uppercase', letterSpacing: '.05em', flexShrink: 0 }}>{title}</span>
-        <DateRange
-          startValue={phase.startsOn || ''}
-          endValue={phase.endsOn || ''}
-          disabled={disabled}
-          onChange={(s, e) => onPatch((draft) => {
-            const wasSynced = subWindowsMatchPhase(draft, subKeys);
-            draft.startsOn = s;
-            draft.endsOn = e;
-            if (wasSynced || !customSubWindows) syncSubWindowsToPhase(draft, subKeys, s, e);
-            return draft;
-          })}
-        />
+    <div style={{ border: '1px solid #D8E1EE', borderRadius: 12, background: '#fff', overflow: 'hidden', boxShadow: '0 1px 2px rgba(15,23,42,.04)' }}>
+      <div style={{ display: 'grid', gridTemplateColumns: '176px minmax(280px, 1fr) auto', alignItems: 'center', gap: 16, padding: '13px 16px', borderLeft: `4px solid ${accent}`, borderBottom: '1px solid #E8EEF6', background: 'linear-gradient(180deg,#FFFFFF 0%,#F8FAFC 100%)' }}>
+        <div>
+          <div style={{ fontSize: 12.5, fontWeight: 850, color: '#0F172A', textTransform: 'uppercase', letterSpacing: '.04em' }}>{title}</div>
+          <div style={{ marginTop: 3, fontSize: 11.5, fontWeight: 700, color: '#94A3B8' }}>Phase window</div>
+        </div>
+        <div style={{ minWidth: 0 }}>
+          <DateRange
+            startValue={phase.startsOn || ''}
+            endValue={phase.endsOn || ''}
+            minDate={minDate}
+            maxDate={maxDate}
+            disabled={disabled}
+            onChange={(s, e) => onPatch((draft) => {
+              const wasSynced = subWindowsMatchPhase(draft, subKeys);
+              const next = normalizeRange(s, e, minDate, maxDate);
+              draft.startsOn = next.startsOn;
+              draft.endsOn = next.endsOn;
+              if (wasSynced || !customSubWindows) {
+                syncSubWindowsToPhase(draft, subKeys, next.startsOn, next.endsOn);
+              } else {
+                clampSubWindowsToPhase(draft, subKeys);
+              }
+              return draft;
+            })}
+          />
+        </div>
         <button
           type="button"
           disabled={disabled || !phase.startsOn || !phase.endsOn}
@@ -161,13 +169,12 @@ function PhaseCard({ title, accent, phase, subKeys, onPatch, disabled }) {
             }
           }}
           style={{
-            marginLeft: 'auto',
-            padding: '5px 10px',
+            padding: '8px 15px',
             borderRadius: 999,
             border: `1px solid ${customSubWindows ? '#CBD5E1' : '#BFDBFE'}`,
             background: customSubWindows ? '#fff' : '#EFF6FF',
             color: customSubWindows ? '#475569' : '#1D4ED8',
-            fontSize: 11.5,
+            fontSize: 12.5,
             fontWeight: 800,
             cursor: disabled ? 'not-allowed' : 'pointer',
             fontFamily: 'inherit',
@@ -178,30 +185,32 @@ function PhaseCard({ title, accent, phase, subKeys, onPatch, disabled }) {
         </button>
       </div>
       {customSubWindows ? (
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))' }}>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(340px, 1fr))', background: '#FBFCFE' }}>
           {subKeys.map(({ key, label }, idx) => {
             const sub = phase.subPhases?.[key] || {};
             return (
               <div
                 key={key}
                 style={{
-                  padding: '9px 14px',
-                  borderLeft: idx === 0 ? 'none' : '1px solid #F1F5F9',
-                  display: 'flex',
+                  padding: '14px 16px',
+                  borderLeft: idx === 0 ? 'none' : '1px solid #E8EEF6',
+                  display: 'grid',
+                  gridTemplateColumns: '150px minmax(220px, 1fr)',
                   alignItems: 'center',
-                  gap: 10,
-                  flexWrap: 'wrap',
+                  gap: 14,
                 }}
               >
-                <span style={{ fontSize: 11.5, fontWeight: 700, color: '#475569', flexShrink: 0, minWidth: 120 }}>{label}</span>
+                <span style={{ fontSize: 12.5, fontWeight: 800, color: '#475569' }}>{label}</span>
                 <DateRange
                   startValue={sub.startsOn || ''}
                   endValue={sub.endsOn || ''}
+                  minDate={phase.startsOn || ''}
+                  maxDate={phase.endsOn || ''}
                   disabled={disabled}
                   compact
                   onChange={(s, e) => onPatch((draft) => {
                     if (!draft.subPhases) draft.subPhases = {};
-                    draft.subPhases[key] = { startsOn: s, endsOn: e };
+                    draft.subPhases[key] = normalizeRange(s, e, draft.startsOn || '', draft.endsOn || '');
                     return draft;
                   })}
                 />
@@ -210,7 +219,7 @@ function PhaseCard({ title, accent, phase, subKeys, onPatch, disabled }) {
           })}
         </div>
       ) : (
-        <div style={{ padding: '10px 14px', background: '#FFFFFF', fontSize: 12, color: '#64748B', borderTop: '1px solid #F1F5F9' }}>
+        <div style={{ padding: '13px 16px', background: '#FBFCFE', fontSize: 13, color: '#64748B', borderTop: '1px solid #E8EEF6' }}>
           <strong style={{ color: '#334155' }}>{subLabel}</strong> use the same dates as the {title.toLowerCase()} phase.
         </div>
       )}
@@ -218,33 +227,49 @@ function PhaseCard({ title, accent, phase, subKeys, onPatch, disabled }) {
   );
 }
 
-function DateRange({ startValue, endValue, onChange, disabled, compact = false }) {
+function DateRange({ startValue, endValue, onChange, disabled, compact = false, minDate = '', maxDate = '' }) {
   return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: 6, flex: 1, minWidth: 0 }}>
-      <DateField value={startValue} disabled={disabled} onChange={(v) => onChange(v, endValue)} compact={compact} />
-      <span style={{ fontSize: 11, color: '#94A3B8', fontWeight: 700, flexShrink: 0 }}>→</span>
-      <DateField value={endValue} disabled={disabled} onChange={(v) => onChange(startValue, v)} compact={compact} />
+    <div style={{ display: 'grid', gridTemplateColumns: 'minmax(130px, 1fr) 18px minmax(130px, 1fr)', alignItems: 'center', gap: compact ? 8 : 10, minWidth: 0 }}>
+      <DateField value={startValue} minDate={minDate} maxDate={endValue || maxDate} disabled={disabled} onChange={(v) => onChange(v, endValue)} compact={compact} />
+      <span style={{ fontSize: 13, color: '#94A3B8', fontWeight: 800, textAlign: 'center' }}>→</span>
+      <DateField value={endValue} minDate={startValue || minDate} maxDate={maxDate} disabled={disabled} onChange={(v) => onChange(startValue, v)} compact={compact} />
     </div>
   );
 }
 
-function DateField({ value, onChange, disabled, compact = false }) {
+function openNativePicker(event) {
+  try {
+    event.currentTarget.showPicker?.();
+  } catch {
+    // Some browsers only allow showPicker from a direct click. The input still
+    // works normally when that API is blocked.
+  }
+}
+
+function DateField({ value, onChange, disabled, compact = false, minDate = '', maxDate = '' }) {
   return (
     <input
       type="date"
       value={value || ''}
+      min={minDate || undefined}
+      max={maxDate || undefined}
       onChange={(e) => onChange(e.target.value)}
+      onFocus={openNativePicker}
+      onClick={openNativePicker}
       disabled={disabled}
       style={{
-        padding: compact ? '5px 7px' : '6px 9px',
-        borderRadius: 6,
+        width: '100%',
+        padding: compact ? '8px 10px' : '10px 12px',
+        borderRadius: 9,
         border: '1px solid #CBD5E1',
-        fontSize: compact ? 11.5 : 12,
+        boxShadow: 'inset 0 1px 0 rgba(15,23,42,.03)',
+        fontSize: compact ? 13 : 14,
+        fontWeight: 650,
         fontFamily: 'inherit',
         color: '#0F172A',
         background: disabled ? '#F1F5F9' : '#fff',
-        flex: 1,
         minWidth: 0,
+        colorScheme: 'light',
       }}
     />
   );
