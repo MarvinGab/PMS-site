@@ -1278,7 +1278,8 @@ function generateRewriteSuggestions(text) {
   return Array.from(suggestions).slice(0, 3);
 }
 
-function GoalLibraryPanel({ kras, libraryType, libraryName, canAdd, onAdd, addedIds = new Set(), draggedGoalId = null, canReturnGoal, onReturnGoal }) {
+function GoalLibraryPanel({ kras, libraryType, libraryName, canAdd, onAdd, addedIds = new Set(), draggedGoalId = null, canReturnGoal, onReturnGoal, displayMode = 'rotating' }) {
+  const isStatic = displayMode === 'static';
   const [selectedId, setSelectedId] = useState(null);
   const [hoveredId, setHoveredId] = useState(null);
   const [returnDropActive, setReturnDropActive] = useState(false);
@@ -1302,7 +1303,7 @@ function GoalLibraryPanel({ kras, libraryType, libraryName, canAdd, onAdd, added
   });
 
   const hasAnyKpis = visibleKras.some((k) => (k.kpis || []).length > 0);
-  const carouselItems = carouselOverflow ? [...visibleKras, ...visibleKras] : visibleKras;
+  const carouselItems = (!isStatic && carouselOverflow) ? [...visibleKras, ...visibleKras] : visibleKras;
   const selectedKra = visibleKras.find((kra) => (kra.id || kra.name) === selectedId) || null;
   const selectedKpis = selectedKra?.kpis || [];
 
@@ -1316,6 +1317,13 @@ function GoalLibraryPanel({ kras, libraryType, libraryName, canAdd, onAdd, added
 
   useEffect(() => {
     if (collapsed) return undefined;
+    if (isStatic) {
+      // Static mode renders KRAs in a wrap grid — no carousel measurements.
+      setCarouselOverflow(false);
+      setCarouselLoopWidth(0);
+      applyCarouselOffset(0);
+      return undefined;
+    }
     const measure = () => {
       const viewport = carouselRef.current;
       const track = carouselTrackRef.current;
@@ -1338,13 +1346,14 @@ function GoalLibraryPanel({ kras, libraryType, libraryName, canAdd, onAdd, added
       observer?.disconnect();
       window.removeEventListener('resize', measure);
     };
-  }, [collapsed, visibleKras.length]);
+  }, [collapsed, visibleKras.length, isStatic]);
 
   useEffect(() => {
     if (carouselFrameRef.current) {
       cancelAnimationFrame(carouselFrameRef.current);
       carouselFrameRef.current = null;
     }
+    if (isStatic) return undefined;
     if (!carouselOverflow || carouselPaused || selectedId || returnDropActive || collapsed || carouselLoopWidth <= 0) return undefined;
     const speedPxPerSecond = 18;
     carouselLastFrameRef.current = performance.now();
@@ -1359,7 +1368,7 @@ function GoalLibraryPanel({ kras, libraryType, libraryName, canAdd, onAdd, added
       if (carouselFrameRef.current) cancelAnimationFrame(carouselFrameRef.current);
       carouselFrameRef.current = null;
     };
-  }, [carouselOverflow, carouselPaused, selectedId, returnDropActive, collapsed, carouselLoopWidth]);
+  }, [carouselOverflow, carouselPaused, selectedId, returnDropActive, collapsed, carouselLoopWidth, isStatic]);
 
   useEffect(() => {
     if (!selectedId) return undefined;
@@ -1475,12 +1484,17 @@ function GoalLibraryPanel({ kras, libraryType, libraryName, canAdd, onAdd, added
         onFocus={() => setCarouselPaused(true)}
         onBlur={() => setCarouselPaused(false)}
         onWheel={(e) => {
+          if (isStatic) return;
           if (!carouselOverflow || carouselLoopWidth <= 0) return;
           e.preventDefault();
           const delta = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
           applyCarouselOffset(carouselOffsetRef.current + delta);
         }}
-        style={{
+        style={isStatic ? {
+          overflow: 'visible',
+          padding: '6px 2px 3px',
+          position: 'relative',
+        } : {
           overflowX: 'hidden',
           overflowY: 'visible',
           padding: '6px 2px 3px',
@@ -1492,8 +1506,14 @@ function GoalLibraryPanel({ kras, libraryType, libraryName, canAdd, onAdd, added
       >
       <div
         ref={carouselTrackRef}
-        data-looping={carouselOverflow ? 'true' : 'false'}
-        style={{
+        data-looping={(!isStatic && carouselOverflow) ? 'true' : 'false'}
+        style={isStatic ? {
+          display: 'flex',
+          flexWrap: 'wrap',
+          alignItems: 'flex-start',
+          gap: 12,
+          width: '100%',
+        } : {
           display: 'flex',
           flexWrap: 'nowrap',
           alignItems: 'flex-start',
@@ -3615,6 +3635,7 @@ export default function EmployeePage() {
             draggedGoalId={dragGoalId}
             canReturnGoal={canReturnGoalToLibrary}
             onReturnGoal={returnGoalToLibrary}
+            displayMode={config?.goalLibraryDisplay || 'rotating'}
           />
         )}
 
@@ -3678,17 +3699,23 @@ export default function EmployeePage() {
 
             {/* Flat 2-col card grid */}
             {myGoals.length > 0 && (() => {
-              // After a sent-back submission, surface the goals that actually
-              // need the employee's attention (reviewStatus === 'rejected')
-              // at the top of the grid. Storage order is untouched —
-              // originalIndex is forwarded into the map so colours and any
-              // other index-derived visuals stay stable per goal.
+              // After a sent-back submission, surface the goals that need the
+              // employee's attention at the top: rejected first, then pending
+              // (still awaiting a decision), then approved at the bottom.
+              // Storage order is untouched — originalIndex is forwarded into
+              // the map so colours and any other index-derived visuals stay
+              // stable per goal.
               const withIndex = myGoals.map((goal, originalIndex) => ({ goal, originalIndex }));
+              const statusRank = (goal) => {
+                const s = getGoalReviewStatus(goal, mySubmission);
+                if (s === 'rejected') return 0;
+                if (s === 'approved') return 2;
+                return 1; // pending / no decision yet
+              };
               const ordered = mySubmission?.status === 'sent-back'
-                ? [
-                    ...withIndex.filter(({ goal }) => getGoalReviewStatus(goal, mySubmission) === 'rejected'),
-                    ...withIndex.filter(({ goal }) => getGoalReviewStatus(goal, mySubmission) !== 'rejected'),
-                  ]
+                ? [...withIndex].sort((a, b) =>
+                    statusRank(a.goal) - statusRank(b.goal) || a.originalIndex - b.originalIndex
+                  )
                 : withIndex;
               return (
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))', gap: 16, marginBottom: 16 }}>
@@ -5446,16 +5473,21 @@ export default function EmployeePage() {
 
     const picks = goalReviewPicks[submission.employeeCode] || {};
     const reviewableGoals = getReviewableGoals(submission.goals || []);
-    const orderedReviewGoals = readOnly && submission.status === 'sent-back'
-      ? reviewableGoals
-          .map((goal, originalIndex) => ({ goal, originalIndex }))
-          .sort((a, b) => {
-            const aRejected = getGoalReviewStatus(a.goal, submission) === 'rejected';
-            const bRejected = getGoalReviewStatus(b.goal, submission) === 'rejected';
-            if (aRejected === bRejected) return a.originalIndex - b.originalIndex;
-            return aRejected ? -1 : 1;
-          })
-      : reviewableGoals.map((goal, originalIndex) => ({ goal, originalIndex }));
+    // Approved goals always sink to the bottom; rejected and pending stay on
+    // top where the manager (or admin in proxy mode) still has decisions to
+    // make. On a fresh submission every goal ranks the same and originalIndex
+    // ties keep the original order.
+    const orderedReviewGoals = reviewableGoals
+      .map((goal, originalIndex) => ({ goal, originalIndex }))
+      .sort((a, b) => {
+        const rank = (g) => {
+          const s = getGoalReviewStatus(g, submission);
+          if (s === 'rejected') return 0;
+          if (s === 'approved') return 2;
+          return 1; // pending / no decision yet
+        };
+        return rank(a.goal) - rank(b.goal) || a.originalIndex - b.originalIndex;
+      });
     const pendingGoals = reviewableGoals.filter((g) => g.reviewStatus !== 'approved');
     const lockedGoals = reviewableGoals.filter((g) => g.reviewStatus === 'approved');
     const rejectedPickCount = Object.values(picks).filter((p) => p.status === 'reject').length;
