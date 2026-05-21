@@ -91,15 +91,27 @@ export default function PhaseSettingsEditor({
       />
 
       {!validation.ok && (
-        <div role="alert" style={alertStyles.error}>
-          <strong>Fix:</strong> {validation.errors[0]}
-          {validation.errors.length > 1 && <span style={{ color: '#B91C1C', marginLeft: 6 }}>(+{validation.errors.length - 1} more)</span>}
+        <div role="alert" style={{ ...alertStyles.error, display: 'flex', alignItems: 'center', gap: 10 }}>
+          <span style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: 18, height: 18, borderRadius: '50%', background: '#DC2626', color: '#fff', fontSize: 11, fontWeight: 800, flexShrink: 0 }}>!</span>
+          <span>
+            <strong style={{ marginRight: 6 }}>Action required.</strong>
+            {validation.errors[0]}
+            {validation.errors.length > 1 && (
+              <span style={{ color: '#B91C1C', marginLeft: 6 }}>(+{validation.errors.length - 1} more)</span>
+            )}
+          </span>
         </div>
       )}
       {validation.ok && review.warnings.length > 0 && (
-        <div style={alertStyles.warn}>
-          <strong>Heads-up:</strong> {review.warnings[0]}
-          {review.warnings.length > 1 && <span style={{ color: '#92400E', marginLeft: 6 }}>(+{review.warnings.length - 1} more)</span>}
+        <div style={{ ...alertStyles.warn, display: 'flex', alignItems: 'center', gap: 10 }}>
+          <span style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: 18, height: 18, borderRadius: '50%', background: '#F59E0B', color: '#fff', fontSize: 11, fontWeight: 800, flexShrink: 0 }}>i</span>
+          <span>
+            <strong style={{ marginRight: 6 }}>Notice.</strong>
+            {review.warnings[0]}
+            {review.warnings.length > 1 && (
+              <span style={{ color: '#92400E', marginLeft: 6 }}>(+{review.warnings.length - 1} more)</span>
+            )}
+          </span>
         </div>
       )}
 
@@ -287,13 +299,23 @@ function PhaseCard({ title, accent, phase, subKeys, onPatch, disabled, minDate, 
                 <DateRange
                   startValue={sub.startsOn || ''}
                   endValue={sub.endsOn || ''}
-                  minDate={phase.startsOn || ''}
-                  maxDate={phase.endsOn || ''}
+                  minDate={minDate}
+                  maxDate={maxDate}
                   disabled={disabled}
                   compact
                   onChange={(s, e) => onPatch((draft) => {
                     if (!draft.subPhases) draft.subPhases = {};
-                    draft.subPhases[key] = normalizeRange(s, e, draft.startsOn || '', draft.endsOn || '');
+                    const nextSub = normalizeRange(s, e, minDate, maxDate);
+                    draft.subPhases[key] = nextSub;
+                    // Auto-grow the parent phase window so it always contains
+                    // every sub-phase. Lets the admin extend "Manager approval"
+                    // past the current phase end without having to bump the
+                    // phase window first.
+                    const allSubs = subKeys.map(({ key: k }) => draft.subPhases?.[k] || {});
+                    const starts = allSubs.map((s2) => s2.startsOn).filter(Boolean).sort();
+                    const ends   = allSubs.map((s2) => s2.endsOn).filter(Boolean).sort();
+                    if (starts.length) draft.startsOn = starts[0];
+                    if (ends.length)   draft.endsOn   = ends[ends.length - 1];
                     return draft;
                   })}
                 />
@@ -320,16 +342,10 @@ function DateRange({ startValue, endValue, onChange, disabled, compact = false, 
   );
 }
 
-function openNativePicker(event) {
-  try {
-    event.currentTarget.showPicker?.();
-  } catch {
-    // Some browsers only allow showPicker from a direct click. The input still
-    // works normally when that API is blocked.
-  }
-}
-
 function DateField({ value, onChange, disabled, compact = false, minDate = '', maxDate = '' }) {
+  // Native click opens the picker on its own — calling showPicker() manually
+  // on every focus/click was fighting Chromium's month-nav and made the
+  // calendar feel frozen on scroll.
   return (
     <input
       type="date"
@@ -337,8 +353,6 @@ function DateField({ value, onChange, disabled, compact = false, minDate = '', m
       min={minDate || undefined}
       max={maxDate || undefined}
       onChange={(e) => onChange(e.target.value)}
-      onFocus={openNativePicker}
-      onClick={openNativePicker}
       disabled={disabled}
       style={{
         width: '100%',
@@ -411,96 +425,98 @@ function Timeline({ value, fiscalYearStartsOn, fiscalYearEndsOn, onPatch, disabl
   const goalSubKeys = [{ key: 'goalCreation' }, { key: 'managerApproval' }];
   const evalSubKeys = [{ key: 'selfEvaluation' }, { key: 'managerEvaluation' }];
 
-  const rawBars = [
-    ...(goalSynced
-      ? [{
-          key: 'goal',
-          label: 'Goal-setting',
-          win: value?.goalSetting,
-          color: 'linear-gradient(90deg,#3B82F6,#1D4ED8)',
-          solid: '#2563EB',
+  // Two separate rows so Goal-setting and Evaluation never collide visually,
+  // even if their dates overlap. Within a row, sub-phases can still overlap
+  // (which is the intended HR workflow — manager approval can run alongside
+  // goal creation when rejections bounce back).
+  const goalRow = goalSynced
+    ? [{
+        key: 'goal',
+        label: 'Goal-setting',
+        win: value?.goalSetting,
+        color: 'linear-gradient(90deg,#3B82F6,#1D4ED8)',
+        solid: '#2563EB',
+        apply(draft, s, e) {
+          draft.goalSetting = draft.goalSetting || {};
+          draft.goalSetting.startsOn = s;
+          draft.goalSetting.endsOn = e;
+          syncSubWindowsToPhase(draft.goalSetting, goalSubKeys, s, e);
+          return draft;
+        },
+      }]
+    : [
+        {
+          key: 'goal-creation', label: 'Goal creation', win: value?.goalSetting?.subPhases?.goalCreation,
+          color: '#3B82F6', solid: '#3B82F6',
           apply(draft, s, e) {
             draft.goalSetting = draft.goalSetting || {};
-            draft.goalSetting.startsOn = s;
-            draft.goalSetting.endsOn = e;
-            syncSubWindowsToPhase(draft.goalSetting, goalSubKeys, s, e);
+            if (!draft.goalSetting.subPhases) draft.goalSetting.subPhases = {};
+            draft.goalSetting.subPhases.goalCreation = { startsOn: s, endsOn: e };
             return draft;
           },
-        }]
-      : [
-          {
-            key: 'goal-creation', label: 'Goal creation', win: value?.goalSetting?.subPhases?.goalCreation,
-            color: '#3B82F6', solid: '#3B82F6',
-            apply(draft, s, e) {
-              draft.goalSetting = draft.goalSetting || {};
-              if (!draft.goalSetting.subPhases) draft.goalSetting.subPhases = {};
-              draft.goalSetting.subPhases.goalCreation = { startsOn: s, endsOn: e };
-              return draft;
-            },
+        },
+        {
+          key: 'manager-approval', label: 'Manager approval', win: value?.goalSetting?.subPhases?.managerApproval,
+          color: '#1D4ED8', solid: '#1D4ED8',
+          apply(draft, s, e) {
+            draft.goalSetting = draft.goalSetting || {};
+            if (!draft.goalSetting.subPhases) draft.goalSetting.subPhases = {};
+            draft.goalSetting.subPhases.managerApproval = { startsOn: s, endsOn: e };
+            return draft;
           },
-          {
-            key: 'manager-approval', label: 'Manager approval', win: value?.goalSetting?.subPhases?.managerApproval,
-            color: '#1D4ED8', solid: '#1D4ED8',
-            apply(draft, s, e) {
-              draft.goalSetting = draft.goalSetting || {};
-              if (!draft.goalSetting.subPhases) draft.goalSetting.subPhases = {};
-              draft.goalSetting.subPhases.managerApproval = { startsOn: s, endsOn: e };
-              return draft;
-            },
-          },
-        ]),
-    ...(evaluationSynced
-      ? [{
-          key: 'eval',
-          label: 'Evaluation',
-          win: value?.evaluation,
-          color: 'linear-gradient(90deg,#A78BFA,#7C3AED)',
-          solid: '#7C3AED',
+        },
+      ];
+
+  const evalRow = evaluationSynced
+    ? [{
+        key: 'eval',
+        label: 'Evaluation',
+        win: value?.evaluation,
+        color: 'linear-gradient(90deg,#A78BFA,#7C3AED)',
+        solid: '#7C3AED',
+        apply(draft, s, e) {
+          draft.evaluation = draft.evaluation || {};
+          draft.evaluation.startsOn = s;
+          draft.evaluation.endsOn = e;
+          syncSubWindowsToPhase(draft.evaluation, evalSubKeys, s, e);
+          return draft;
+        },
+      }]
+    : [
+        {
+          key: 'self-eval', label: 'Self evaluation', win: value?.evaluation?.subPhases?.selfEvaluation,
+          color: '#A78BFA', solid: '#A78BFA',
           apply(draft, s, e) {
             draft.evaluation = draft.evaluation || {};
-            draft.evaluation.startsOn = s;
-            draft.evaluation.endsOn = e;
-            syncSubWindowsToPhase(draft.evaluation, evalSubKeys, s, e);
+            if (!draft.evaluation.subPhases) draft.evaluation.subPhases = {};
+            draft.evaluation.subPhases.selfEvaluation = { startsOn: s, endsOn: e };
             return draft;
           },
-        }]
-      : [
-          {
-            key: 'self-eval', label: 'Self evaluation', win: value?.evaluation?.subPhases?.selfEvaluation,
-            color: '#A78BFA', solid: '#A78BFA',
-            apply(draft, s, e) {
-              draft.evaluation = draft.evaluation || {};
-              if (!draft.evaluation.subPhases) draft.evaluation.subPhases = {};
-              draft.evaluation.subPhases.selfEvaluation = { startsOn: s, endsOn: e };
-              return draft;
-            },
+        },
+        {
+          key: 'mgr-eval', label: 'Manager evaluation', win: value?.evaluation?.subPhases?.managerEvaluation,
+          color: '#7C3AED', solid: '#7C3AED',
+          apply(draft, s, e) {
+            draft.evaluation = draft.evaluation || {};
+            if (!draft.evaluation.subPhases) draft.evaluation.subPhases = {};
+            draft.evaluation.subPhases.managerEvaluation = { startsOn: s, endsOn: e };
+            return draft;
           },
-          {
-            key: 'mgr-eval', label: 'Manager evaluation', win: value?.evaluation?.subPhases?.managerEvaluation,
-            color: '#7C3AED', solid: '#7C3AED',
-            apply(draft, s, e) {
-              draft.evaluation = draft.evaluation || {};
-              if (!draft.evaluation.subPhases) draft.evaluation.subPhases = {};
-              draft.evaluation.subPhases.managerEvaluation = { startsOn: s, endsOn: e };
-              return draft;
-            },
-          },
-        ]),
-  ];
+        },
+      ];
 
-  const bars = rawBars.map((bar) => {
-    const start = pctFor(bar.win?.startsOn);
-    const end   = pctFor(bar.win?.endsOn);
-    if (start == null || end == null || end < start) return { ...bar, render: false };
-    const widthPct = Math.max(1.5, (end - start) * 100);
-    return { ...bar, render: true, leftPct: start * 100, widthPct };
-  });
+  function buildRowBars(rawBars) {
+    return rawBars.map((bar) => {
+      const start = pctFor(bar.win?.startsOn);
+      const end   = pctFor(bar.win?.endsOn);
+      if (start == null || end == null || end < start) return { ...bar, render: false };
+      const widthPct = Math.max(1.5, (end - start) * 100);
+      return { ...bar, render: true, leftPct: start * 100, widthPct };
+    }).filter((b) => b.render);
+  }
 
-  const renderedBars = bars.filter((b) => b.render);
-  // All bars share label placement so the timeline doesn't look lopsided
-  // when one phase happens to be wider than the other.
-  const allFitInline = renderedBars.length > 0 && renderedBars.every((b) => b.widthPct >= 9);
-  const hasOffsetLabels = !allFitInline && renderedBars.length > 0;
+  const goalBars = buildRowBars(goalRow);
+  const evalBars = buildRowBars(evalRow);
 
   function startDrag(bar, mode) {
     return (e) => {
@@ -559,18 +575,63 @@ function Timeline({ value, fiscalYearStartsOn, fiscalYearEndsOn, onPatch, disabl
   const interactive = !disabled && onPatch;
 
   return (
-    <div style={{ border: '1px solid #E2E8F0', borderRadius: 10, background: '#fff', padding: '14px 16px 12px', userSelect: dragging ? 'none' : 'auto' }}>
-      <div
-        ref={trackRef}
-        style={{ position: 'relative', height: 22, background: '#F1F5F9', borderRadius: 999 }}
-      >
-        {renderedBars.map((bar) => {
-          const showInline = allFitInline;
+    <div
+      ref={trackRef}
+      style={{ border: '1px solid #E2E8F0', borderRadius: 10, background: '#fff', padding: '14px 16px 12px', userSelect: dragging ? 'none' : 'auto' }}
+    >
+      <TimelineRow
+        label="Goal-setting"
+        bars={goalBars}
+        accent="#2563EB"
+        todayPct={todayPct}
+        interactive={interactive}
+        dragging={dragging}
+        startDrag={startDrag}
+      />
+      <TimelineRow
+        label="Evaluation"
+        bars={evalBars}
+        accent="#7C3AED"
+        todayPct={todayPct}
+        interactive={interactive}
+        dragging={dragging}
+        startDrag={startDrag}
+        marginTop={10}
+      />
+
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: 10.5, color: '#64748B', marginTop: 10, fontWeight: 600, paddingLeft: ROW_LABEL_WIDTH }}>
+        <span>{formatPrettyDate(fiscalYearStartsOn) || fiscalYearStartsOn}</span>
+        {todayPct != null && (
+          <span style={{ color: '#0F172A' }}>Today · {formatPrettyDate(toISODate(now))}</span>
+        )}
+        <span>{formatPrettyDate(fiscalYearEndsOn) || fiscalYearEndsOn}</span>
+      </div>
+
+      {interactive && (
+        <div style={{ marginTop: 8, fontSize: 11, color: '#94A3B8', fontWeight: 600, paddingLeft: ROW_LABEL_WIDTH }}>
+          Drag a bar to move its window · drag the edges to resize · changes apply when you save.
+        </div>
+      )}
+    </div>
+  );
+}
+
+const ROW_LABEL_WIDTH = 116;
+
+function TimelineRow({ label, bars, accent, todayPct, interactive, dragging, startDrag, marginTop = 0 }) {
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginTop }}>
+      <div style={{ flexShrink: 0, width: ROW_LABEL_WIDTH, display: 'flex', alignItems: 'center', gap: 8 }}>
+        <span style={{ width: 8, height: 8, borderRadius: '50%', background: accent, flexShrink: 0 }} />
+        <span style={{ fontSize: 11.5, fontWeight: 800, color: '#334155', textTransform: 'uppercase', letterSpacing: '.04em' }}>{label}</span>
+      </div>
+      <div style={{ position: 'relative', flex: 1, height: 22, background: '#F1F5F9', borderRadius: 999 }}>
+        {bars.map((bar) => {
           const isDragging = dragging?.key === bar.key;
           return (
             <div
               key={bar.key}
-              title={`${bar.label}: ${formatPrettyDate(bar.win?.startsOn) || '?'} → ${formatPrettyDate(bar.win?.endsOn) || '?'}\n${interactive ? 'Drag to move · drag the edges to resize' : ''}`}
+              title={`${bar.label}: ${formatPrettyDate(bar.win?.startsOn) || '?'} → ${formatPrettyDate(bar.win?.endsOn) || '?'}`}
               onPointerDown={interactive ? startDrag(bar, 'move') : undefined}
               style={{
                 position: 'absolute',
@@ -580,41 +641,27 @@ function Timeline({ value, fiscalYearStartsOn, fiscalYearEndsOn, onPatch, disabl
                 width: `${bar.widthPct}%`,
                 background: bar.color,
                 borderRadius: 999,
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                color: '#fff',
-                fontSize: 10.5,
-                fontWeight: 800,
-                overflow: 'visible',
-                whiteSpace: 'nowrap',
-                padding: '0 8px',
-                boxShadow: isDragging ? '0 0 0 2px rgba(15,23,42,0.55), 0 4px 10px rgba(15,23,42,0.15)' : '0 1px 2px rgba(15,23,42,0.12)',
+                boxShadow: isDragging
+                  ? '0 0 0 2px rgba(15,23,42,0.55), 0 4px 10px rgba(15,23,42,0.15)'
+                  : '0 1px 2px rgba(15,23,42,0.12)',
                 cursor: interactive ? (isDragging ? 'grabbing' : 'grab') : 'default',
                 touchAction: 'none',
                 transition: isDragging ? 'none' : 'box-shadow 120ms ease',
               }}
             >
-              {showInline ? bar.label : ''}
               {interactive && (
                 <>
                   <span
                     onPointerDown={startDrag(bar, 'start')}
                     title="Drag to change start date"
-                    style={{
-                      position: 'absolute', left: -3, top: -4, bottom: -4, width: 10,
-                      cursor: 'ew-resize', borderRadius: 4,
-                    }}
+                    style={{ position: 'absolute', left: -3, top: -4, bottom: -4, width: 10, cursor: 'ew-resize', borderRadius: 4 }}
                   >
                     <span style={resizeGripStyle(bar.solid)} />
                   </span>
                   <span
                     onPointerDown={startDrag(bar, 'end')}
                     title="Drag to change end date"
-                    style={{
-                      position: 'absolute', right: -3, top: -4, bottom: -4, width: 10,
-                      cursor: 'ew-resize', borderRadius: 4,
-                    }}
+                    style={{ position: 'absolute', right: -3, top: -4, bottom: -4, width: 10, cursor: 'ew-resize', borderRadius: 4 }}
                   >
                     <span style={{ ...resizeGripStyle(bar.solid), left: 'auto', right: 0 }} />
                   </span>
@@ -625,7 +672,7 @@ function Timeline({ value, fiscalYearStartsOn, fiscalYearEndsOn, onPatch, disabl
         })}
         {todayPct != null && (
           <div
-            title={`Today · ${formatPrettyDate(toISODate(now))}`}
+            title={`Today`}
             style={{
               position: 'absolute',
               top: -5,
@@ -640,41 +687,6 @@ function Timeline({ value, fiscalYearStartsOn, fiscalYearEndsOn, onPatch, disabl
           />
         )}
       </div>
-
-      {hasOffsetLabels && (
-        <div style={{ position: 'relative', height: 14, marginTop: 6 }}>
-          {renderedBars.map((bar) => (
-            <div
-              key={bar.key}
-              style={{
-                position: 'absolute',
-                left: `${Math.min(95, Math.max(5, bar.leftPct + bar.widthPct / 2))}%`,
-                transform: 'translateX(-50%)',
-                fontSize: 10.5,
-                fontWeight: 800,
-                color: '#334155',
-                whiteSpace: 'nowrap',
-              }}
-            >
-              {bar.label}
-            </div>
-          ))}
-        </div>
-      )}
-
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: 10.5, color: '#64748B', marginTop: 8, fontWeight: 600 }}>
-        <span>{formatPrettyDate(fiscalYearStartsOn) || fiscalYearStartsOn}</span>
-        {todayPct != null && (
-          <span style={{ color: '#0F172A' }}>Today · {formatPrettyDate(toISODate(now))}</span>
-        )}
-        <span>{formatPrettyDate(fiscalYearEndsOn) || fiscalYearEndsOn}</span>
-      </div>
-
-      {interactive && (
-        <div style={{ marginTop: 8, fontSize: 11, color: '#94A3B8', fontWeight: 600 }}>
-          Tip: drag a bar to move its window · drag the edges to resize · changes stay local until you hit Save.
-        </div>
-      )}
     </div>
   );
 }

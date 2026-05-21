@@ -149,20 +149,14 @@ export function validateCycleWindows(windows) {
     // for the employees in their respective state.
   }
 
-  const goal = windows[PHASE_KIND.GOAL_SETTING];
-  const evalPhase = windows[PHASE_KIND.EVALUATION];
-  if (goal && evalPhase) {
-    const goalEnd = parseDate(goal.endsOn);
-    const evalStart = parseDate(evalPhase.startsOn);
-    if (goalEnd && evalStart && evalStart < goalEnd) {
-      errors.push('Evaluation phase cannot start before the goal-setting phase ends.');
-    }
-  }
+  // Goal-setting overlapping with Evaluation is allowed (degraded to a
+  // warning in `reviewCycleWindows`). Some orgs run staggered evaluations
+  // for late joiners while others are still wrapping up goal-setting.
 
   return { ok: errors.length === 0, errors };
 }
 
-// Pre-save sanity warnings — non-blocking. Surface to the editor as a hint
+// Pre-save sanity notices — non-blocking. Surface to the editor as a hint
 // strip so HR can confirm the choice rather than be silently surprised.
 export function reviewCycleWindows(windows, now) {
   const warnings = [];
@@ -176,28 +170,31 @@ export function reviewCycleWindows(windows, now) {
   const evalEnd   = parseDate(windows.evaluation?.endsOn);
 
   if (goalStart && today && goalStart < today && goalEnd && goalEnd >= today) {
-    warnings.push('Goal-setting started in the past — employees who join later may miss the window.');
+    warnings.push('Goal-setting window is already open.');
   }
   if (goalEnd && today && goalEnd < today) {
-    warnings.push('Goal-setting end date is in the past.');
+    warnings.push('Goal-setting window has already closed.');
   }
   if (evalStart && today && evalStart < today && evalEnd && evalEnd >= today) {
-    warnings.push('Evaluation started in the past — late starters lose time.');
+    warnings.push('Evaluation window is already open.');
   }
   if (evalEnd && today && evalEnd < today) {
-    warnings.push('Evaluation end date is in the past — the cycle is effectively closed.');
+    warnings.push('Evaluation window has already closed.');
+  }
+  if (goalEnd && evalStart && evalStart < goalEnd) {
+    warnings.push('Evaluation begins while goal-setting is still open — phases will run in parallel.');
   }
   if (goalEnd && evalStart) {
     const gapDays = Math.round((evalStart.getTime() - goalEnd.getTime()) / (24 * 60 * 60 * 1000));
-    if (gapDays > 365) warnings.push(`Evaluation is more than a year after goal-setting ends — confirm the year is correct.`);
+    if (gapDays > 365) warnings.push('Evaluation is more than a year after goal-setting ends — confirm the year.');
   }
   if (goalStart && goalEnd) {
     const dur = Math.round((goalEnd.getTime() - goalStart.getTime()) / (24 * 60 * 60 * 1000));
-    if (dur <= 1) warnings.push('Goal-setting window is 1 day or less — very tight.');
+    if (dur <= 1) warnings.push('Goal-setting window spans one day or less.');
   }
   if (evalStart && evalEnd) {
     const dur = Math.round((evalEnd.getTime() - evalStart.getTime()) / (24 * 60 * 60 * 1000));
-    if (dur <= 1) warnings.push('Evaluation window is 1 day or less — very tight.');
+    if (dur <= 1) warnings.push('Evaluation window spans one day or less.');
   }
   return { warnings };
 }

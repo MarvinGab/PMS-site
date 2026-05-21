@@ -158,16 +158,18 @@ check('sub-phase outside parent fails', () => {
   const r = validateCycleWindows(broken);
   assert.equal(r.ok, false);
 });
-check('evaluation before goal-setting end fails', () => {
-  const broken = JSON.parse(JSON.stringify(windows));
-  broken.evaluation.startsOn = '2026-04-15';
-  broken.evaluation.subPhases.selfEvaluation.startsOn = '2026-04-15';
-  broken.evaluation.subPhases.selfEvaluation.endsOn   = '2026-04-30';
-  broken.evaluation.subPhases.managerEvaluation.startsOn = '2026-05-01';
-  broken.evaluation.subPhases.managerEvaluation.endsOn   = '2026-05-15';
-  broken.evaluation.endsOn = '2026-05-15';
-  const r = validateCycleWindows(broken);
-  assert.equal(r.ok, false);
+check('evaluation overlapping goal-setting is ALLOWED (with notice)', () => {
+  const overlap = JSON.parse(JSON.stringify(windows));
+  overlap.evaluation.startsOn = '2026-04-15';
+  overlap.evaluation.subPhases.selfEvaluation.startsOn = '2026-04-15';
+  overlap.evaluation.subPhases.selfEvaluation.endsOn   = '2026-04-30';
+  overlap.evaluation.subPhases.managerEvaluation.startsOn = '2026-05-01';
+  overlap.evaluation.subPhases.managerEvaluation.endsOn   = '2026-05-15';
+  overlap.evaluation.endsOn = '2026-05-15';
+  const r = validateCycleWindows(overlap);
+  assert.equal(r.ok, true, r.errors.join('; '));
+  const review = reviewCycleWindows(overlap, at('2025-12-01T12:00:00'));
+  assert.ok(review.warnings.some((w) => /run in parallel/i.test(w)));
 });
 check('missing phase fails cleanly', () => {
   const r = validateCycleWindows({ goalSetting: windows.goalSetting });
@@ -292,17 +294,17 @@ check('windows entirely in the future → no warnings', () => {
   const r = reviewCycleWindows(windows, at('2025-12-01T12:00:00'));
   assert.equal(r.warnings.length, 0);
 });
-check('goal-setting end in past → warning', () => {
+check('goal-setting closed → notice', () => {
   const r = reviewCycleWindows(windows, at('2027-06-01T12:00:00'));
-  assert.ok(r.warnings.some((w) => /goal-setting end date is in the past/i.test(w)));
+  assert.ok(r.warnings.some((w) => /goal-setting window has already closed/i.test(w)));
 });
-check('1-day window → tight warning', () => {
+check('one-day window → notice', () => {
   const tight = JSON.parse(JSON.stringify(windows));
   tight.evaluation.endsOn = tight.evaluation.startsOn;
   tight.evaluation.subPhases.selfEvaluation = { startsOn: tight.evaluation.startsOn, endsOn: tight.evaluation.startsOn };
   tight.evaluation.subPhases.managerEvaluation = { startsOn: tight.evaluation.startsOn, endsOn: tight.evaluation.startsOn };
   const r = reviewCycleWindows(tight, at('2025-12-01T12:00:00'));
-  assert.ok(r.warnings.some((w) => /evaluation window is 1 day or less/i.test(w)));
+  assert.ok(r.warnings.some((w) => /evaluation window spans one day or less/i.test(w)));
 });
 
 console.log('cyclePhase.findStrandedOverrides');
