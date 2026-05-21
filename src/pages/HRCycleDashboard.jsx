@@ -40,9 +40,15 @@ import {
   defaultWindowsForFiscalYear,
   getEmployeeComplianceStatus,
   COMPLIANCE_LABELS,
+  DEADLINE_PASSED_STATUSES,
   findStrandedOverrides,
 } from '../backend/cyclePhase';
 import { useCyclePhase } from '../hooks/useCyclePhase';
+import {
+  resolveEmployeeLibrary,
+  summarizeLibrary,
+  buildLibraryGoalPlan,
+} from '../backend/goalLibraryResolver';
 
 const WIZARD_STATE_KEY = 'zarohr_pms_wizard_state_v1';
 const GOAL_WORKFLOW_KEY = 'zarohr_goal_workflow_v1';
@@ -6157,8 +6163,9 @@ function cardAccentStylePreview(mode, tint) {
   };
 }
 
-function ModuleCycleCalendar({ org, onOrgChange, employees = [], orgKey, onEmployeesUpdate }) {
+function ModuleCycleCalendar({ org, onOrgChange, employees = [], orgKey, onEmployeesUpdate, config, onNavigate }) {
   const { userName } = useApp();
+  const [subTab, setSubTab] = useState('calendar'); // 'calendar' | 'compliance'
   const [draft, setDraft] = useState(() => org?.cyclePhaseWindows || null);
   const [saveState, setSaveState] = useState({ status: 'idle', message: '' });
   const [confirmOpen, setConfirmOpen] = useState(false);
@@ -6166,12 +6173,18 @@ function ModuleCycleCalendar({ org, onOrgChange, employees = [], orgKey, onEmplo
   const [extDialogFor, setExtDialogFor] = useState(null);
   const [extDays, setExtDays] = useState(7);
   const [actionFeedback, setActionFeedback] = useState('');
+  const [wfTick, setWfTick] = useState(0); // bump after auto-applying default goals
   const phase = useCyclePhase(org);
-  const workflow = orgKey ? loadWorkflowState(orgKey) : { submissions: {} };
+  const workflow = useMemo(
+    () => (orgKey ? loadWorkflowState(orgKey) : { submissions: {} }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [orgKey, wfTick],
+  );
   const submissions = workflow?.submissions || {};
   const now = phase.now;
   const lastEditedAt = org?.cyclePhaseWindowsLastEditedAt || '';
   const lastEditedBy = org?.cyclePhaseWindowsLastEditedBy || '';
+  const calendarConfigured = !!org?.cyclePhaseWindows;
 
   // Keep the editor's draft in sync if the parent org changes externally (e.g.
   // realtime push from another tab) — but don't clobber edits in progress.
@@ -6321,45 +6334,91 @@ function ModuleCycleCalendar({ org, onOrgChange, employees = [], orgKey, onEmplo
     setActionFeedback(`Goal creation extended to ${iso} for ${empCode}.`);
   }
 
-  function handleMarkNoGoal(empCode) {
-    patchEmployee(empCode, { noGoalCycle: true });
-    setActionFeedback(`${empCode} marked as no-goal cycle. They will be skipped in evaluation.`);
-  }
-
   function handleClearOverride(empCode) {
     patchEmployee(empCode, { goalCreationEndsOn: '', noGoalCycle: false });
     setActionFeedback(`Override cleared for ${empCode}.`);
   }
 
-  function handleBulkMarkOverdueAsNoGoal() {
-    const overdueList = compliance['overdue'] || [];
-    if (overdueList.length === 0) return;
-    const codes = new Set(overdueList.map((e) => String(e['Employee Code'] || e.empCode || '').trim()));
-    const next = employees.map((e) => {
-      const myCode = String(e['Employee Code'] || e.empCode || '').trim();
-      if (!codes.has(myCode)) return e;
-      const prevOverrides = e.cycleOverrides && typeof e.cycleOverrides === 'object' ? e.cycleOverrides : {};
-      return {
-        ...e,
-        cycleOverrides: { ...prevOverrides, noGoalCycle: true, updatedAt: new Date().toISOString() },
-      };
-    });
-    onEmployeesUpdate?.(next);
-    setActionFeedback(`${overdueList.length} overdue employees marked as no-goal cycle.`);
+  function handleApplyDefaults(empCode) {
+    const code = String(empCode || '').trim();
+    const emp = employees.find((e) => String(e['Employee Code'] || e.empCode || '').trim() === code);
+    if (!emp) {
+      setActionFeedback(`Couldn't find employee ${empCode}.`);
+      return;
+    }
+    const resolution = resolveEmployeeLibrary(config, emp);
+    if (!resolution) {
+      setActionFeedback(`No goal library is assigned to ${code}'s group.`);
+      return;
+    }
+    const plan = buildLibraryGoalPlan(resolution.library);
+    if (!plan.ok) {
+      setActionFeedback(`Cannot auto-apply: ${plan.reason}`);
+      return;
+    }
+    const wf = loadWorkflowState(orgKey) || { submissions: {}, notifications: [] };
+    const nextSubs = { ...(wf.submissions || {}) };
+    nextSubs[code] = {
+      ...(nextSubs[code] || {}),
+      status: 'approved',
+      goals: plan.goals,
+      appliedByDefault: true,
+      appliedByDefaultAt: new Date().toISOString(),
+      appliedByDefaultBy: userName || 'HR Admin',
+    };
+    saveWorkflowState(orgKey, { ...wf, submissions: nextSubs });
+    if (orgKey) {
+      void logAuditEvent({
+        orgKey,
+        actorRole: 'hr-admin',
+        actorName: userName || 'HR Admin',
+        actionType: 'default-goals-applied',
+        targetType: 'employee',
+        targetCode: code,
+        details: { goalCount: plan.goals.length, libraryId: resolution.library.id },
+      });
+    }
+    setWfTick((t) => t + 1);
+    setActionFeedback(`Default goals applied to ${code} (${plan.goals.length} KRAs).`);
   }
+
+  function handleRemoveFromPms() {
+    if (typeof onNavigate === 'function') {
+      onNavigate('roster');
+    } else {
+      setActionFeedback('Open the Add / Remove module to remove an employee from PMS.');
+    }
+  }
+
+  const overdueCount = (compliance['overdue'] || []).length;
 
   return (
     <div style={{ padding: '24px 28px 40px' }}>
-      <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 18, flexWrap: 'wrap', marginBottom: 18 }}>
+      <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 18, flexWrap: 'wrap', marginBottom: 14 }}>
         <div style={{ minWidth: 0, flex: 1 }}>
           <h2 style={{ fontSize: 20, fontWeight: 700, color: '#0F172A', margin: 0 }}>Cycle Calendar</h2>
           <p style={{ margin: '6px 0 0', fontSize: 13, color: '#64748B', lineHeight: 1.55 }}>
-            Edit when goal-setting and evaluation open. Changes take effect immediately — the active phase is computed from these dates.
+            {subTab === 'calendar'
+              ? 'Edit when goal-setting and evaluation open. Changes take effect immediately — the active phase is computed from these dates.'
+              : 'Track who has set their goals and resolve stragglers after the deadline.'}
           </p>
         </div>
         <CurrentPhaseChip phase={phase} />
       </div>
 
+      <div style={{ display: 'flex', gap: 4, borderBottom: '1px solid #E2E8F0', marginBottom: 20 }}>
+        <SubTabButton active={subTab === 'calendar'}   onClick={() => setSubTab('calendar')}   label="Calendar" />
+        <SubTabButton
+          active={subTab === 'compliance'}
+          onClick={() => setSubTab('compliance')}
+          label="Phase Compliance"
+          badge={!calendarConfigured ? null : (overdueCount > 0 ? overdueCount : null)}
+          badgeColor="#DC2626"
+        />
+      </div>
+
+      {subTab === 'calendar' && (
+      <>
       <PhaseSettingsEditor
         value={draft}
         onChange={handleChange}
@@ -6469,9 +6528,41 @@ function ModuleCycleCalendar({ org, onOrgChange, employees = [], orgKey, onEmplo
           </div>
         </div>
       )}
+      </>
+      )}
 
-      {totalEmps > 0 && (
-        <div style={{ marginTop: 32 }}>
+      {subTab === 'compliance' && !calendarConfigured && (
+        <div style={{ padding: '40px 24px', textAlign: 'center', border: '1px dashed #CBD5E1', borderRadius: 12, background: '#F8FAFC' }}>
+          <div style={{ fontSize: 32, marginBottom: 8 }}>📅</div>
+          <div style={{ fontSize: 14, fontWeight: 700, color: '#0F172A', marginBottom: 4 }}>Set up the cycle calendar first</div>
+          <div style={{ fontSize: 12.5, color: '#64748B', marginBottom: 16, lineHeight: 1.55 }}>
+            Phase Compliance shows who has set goals against the goal-creation window. Configure the calendar before tracking compliance.
+          </div>
+          <button
+            type="button"
+            onClick={() => setSubTab('calendar')}
+            style={{ padding: '8px 16px', borderRadius: 8, border: 'none', background: '#2563EB', color: '#fff', fontSize: 12.5, fontWeight: 800, cursor: 'pointer', fontFamily: 'inherit' }}
+          >
+            Open Calendar
+          </button>
+        </div>
+      )}
+
+      {subTab === 'compliance' && calendarConfigured && totalEmps === 0 && (
+        <div style={{ padding: '32px 24px', textAlign: 'center', border: '1px dashed #CBD5E1', borderRadius: 12, background: '#F8FAFC', color: '#64748B', fontSize: 13 }}>
+          No employees in the roster yet.
+        </div>
+      )}
+
+      {subTab === 'compliance' && calendarConfigured && totalEmps > 0 && (
+        <div>
+          <div style={{ padding: '11px 14px', borderRadius: 9, background: '#F1F5F9', color: '#475569', fontSize: 12, marginBottom: 14, lineHeight: 1.5 }}>
+            <strong style={{ color: '#0F172A' }}>About actions:</strong>{' '}
+            <strong>Extend</strong> grants extra days past the deadline (only shown after the window closes).{' '}
+            <strong>Apply default goals</strong> attaches the assigned library's KRAs as approved goals — only available when the library totals exactly 100%.{' '}
+            <strong>Remove from PMS</strong> takes the employee out of the cycle entirely (opens the Add / Remove module).
+          </div>
+
           <div style={{ display: 'flex', alignItems: 'flex-end', justifyContent: 'space-between', gap: 14, flexWrap: 'wrap', marginBottom: 14 }}>
             <div>
               <h3 style={{ margin: 0, fontSize: 16, fontWeight: 800, color: '#0F172A' }}>Goal-creation compliance</h3>
@@ -6479,13 +6570,13 @@ function ModuleCycleCalendar({ org, onOrgChange, employees = [], orgKey, onEmplo
                 {totalEmps} employees · live snapshot based on the cycle calendar
               </p>
             </div>
-            {(compliance['overdue'] || []).length > 0 && (
+            {overdueCount > 0 && (
               <button
                 type="button"
-                onClick={handleBulkMarkOverdueAsNoGoal}
-                style={{ padding: '8px 14px', borderRadius: 8, border: '1px solid #FCA5A5', background: '#FEF2F2', color: '#991B1B', fontSize: 12.5, fontWeight: 700, cursor: 'pointer', fontFamily: 'inherit' }}
+                onClick={() => handleRemoveFromPms()}
+                style={{ padding: '8px 14px', borderRadius: 8, border: '1px solid #CBD5E1', background: '#fff', color: '#0F172A', fontSize: 12.5, fontWeight: 700, cursor: 'pointer', fontFamily: 'inherit' }}
               >
-                Mark {(compliance['overdue'] || []).length} overdue as no-goal cycle
+                Open Add / Remove to bulk-remove
               </button>
             )}
           </div>
@@ -6556,33 +6647,17 @@ function ModuleCycleCalendar({ org, onOrgChange, employees = [], orgKey, onEmplo
                           {overrideLabel}
                         </td>
                         <td style={{ padding: '11px 14px', textAlign: 'right' }}>
-                          {status !== 'approved' && status !== 'no-goal-cycle' && (
-                            <button
-                              type="button"
-                              onClick={() => { setExtDialogFor(code); setExtDays(7); }}
-                              style={{ padding: '5px 11px', borderRadius: 6, border: '1px solid #CBD5E1', background: '#fff', color: '#1E40AF', fontSize: 11.5, fontWeight: 700, cursor: 'pointer', fontFamily: 'inherit', marginRight: 6 }}
-                            >
-                              Extend
-                            </button>
-                          )}
-                          {status !== 'approved' && status !== 'no-goal-cycle' && (
-                            <button
-                              type="button"
-                              onClick={() => handleMarkNoGoal(code)}
-                              style={{ padding: '5px 11px', borderRadius: 6, border: '1px solid #FCA5A5', background: '#FEF2F2', color: '#991B1B', fontSize: 11.5, fontWeight: 700, cursor: 'pointer', fontFamily: 'inherit', marginRight: 6 }}
-                            >
-                              No-goal
-                            </button>
-                          )}
-                          {(ov.noGoalCycle || ov.goalCreationEndsOn) && (
-                            <button
-                              type="button"
-                              onClick={() => handleClearOverride(code)}
-                              style={{ padding: '5px 11px', borderRadius: 6, border: '1px solid #E2E8F0', background: '#fff', color: '#475569', fontSize: 11.5, fontWeight: 700, cursor: 'pointer', fontFamily: 'inherit' }}
-                            >
-                              Clear
-                            </button>
-                          )}
+                          <ComplianceRowActions
+                            status={status}
+                            override={ov}
+                            empCode={code}
+                            employee={emp}
+                            config={config}
+                            onExtend={() => { setExtDialogFor(code); setExtDays(7); }}
+                            onApplyDefaults={() => handleApplyDefaults(code)}
+                            onClearOverride={() => handleClearOverride(code)}
+                            onRemoveFromPms={handleRemoveFromPms}
+                          />
                         </td>
                       </tr>
                     );
@@ -6622,6 +6697,120 @@ function ModuleCycleCalendar({ org, onOrgChange, employees = [], orgKey, onEmplo
             </div>
           )}
         </div>
+      )}
+    </div>
+  );
+}
+
+function SubTabButton({ active, onClick, label, badge, badgeColor }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      style={{
+        padding: '10px 16px',
+        borderRadius: 0,
+        border: 'none',
+        borderBottom: `2px solid ${active ? '#2563EB' : 'transparent'}`,
+        background: 'transparent',
+        color: active ? '#0F172A' : '#64748B',
+        fontSize: 13,
+        fontWeight: active ? 800 : 600,
+        cursor: 'pointer',
+        fontFamily: 'inherit',
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: 8,
+        marginBottom: -1,
+      }}
+    >
+      {label}
+      {badge != null && (
+        <span style={{ padding: '1px 7px', borderRadius: 999, background: badgeColor || '#64748B', color: '#fff', fontSize: 11, fontWeight: 800 }}>
+          {badge}
+        </span>
+      )}
+    </button>
+  );
+}
+
+function ComplianceRowActions({ status, override, empCode, employee, config, onExtend, onApplyDefaults, onClearOverride, onRemoveFromPms }) {
+  const ov = override || {};
+  const deadlinePassed = DEADLINE_PASSED_STATUSES.includes(status);
+
+  // Resolve library readiness once per row so the Apply button can disable
+  // with the right reason in its tooltip.
+  const resolution = useMemo(() => resolveEmployeeLibrary(config, employee), [config, employee]);
+  const librarySummary = useMemo(() => summarizeLibrary(resolution?.library), [resolution]);
+
+  // Pre-deadline → no overrides needed. Just a Remove icon.
+  if (!deadlinePassed && !ov.goalCreationEndsOn && !ov.noGoalCycle) {
+    return (
+      <button
+        type="button"
+        onClick={onRemoveFromPms}
+        title="Remove this employee from PMS (opens Add / Remove)"
+        style={{ padding: '5px 9px', borderRadius: 6, border: '1px solid #E2E8F0', background: '#fff', color: '#475569', fontSize: 11, fontWeight: 700, cursor: 'pointer', fontFamily: 'inherit' }}
+      >
+        Remove from PMS
+      </button>
+    );
+  }
+
+  const applyTitle = librarySummary.ready
+    ? `Auto-apply ${librarySummary.kraCount} KRAs from "${resolution?.library?.name || 'library'}" as approved goals.`
+    : librarySummary.reason;
+
+  return (
+    <div style={{ display: 'inline-flex', gap: 6, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+      {deadlinePassed && (
+        <button
+          type="button"
+          onClick={onExtend}
+          title={`Give ${empCode} more days to set their goals.`}
+          style={{ padding: '5px 11px', borderRadius: 6, border: '1px solid #CBD5E1', background: '#fff', color: '#1E40AF', fontSize: 11, fontWeight: 700, cursor: 'pointer', fontFamily: 'inherit' }}
+        >
+          Extend
+        </button>
+      )}
+      {deadlinePassed && (
+        <button
+          type="button"
+          onClick={librarySummary.ready ? onApplyDefaults : undefined}
+          disabled={!librarySummary.ready}
+          title={applyTitle}
+          style={{
+            padding: '5px 11px',
+            borderRadius: 6,
+            border: '1px solid ' + (librarySummary.ready ? '#A7F3D0' : '#E2E8F0'),
+            background: librarySummary.ready ? '#ECFDF5' : '#F8FAFC',
+            color: librarySummary.ready ? '#065F46' : '#94A3B8',
+            fontSize: 11,
+            fontWeight: 700,
+            cursor: librarySummary.ready ? 'pointer' : 'not-allowed',
+            fontFamily: 'inherit',
+          }}
+        >
+          Apply default goals
+        </button>
+      )}
+      <button
+        type="button"
+        onClick={onRemoveFromPms}
+        title="Remove this employee from PMS (opens Add / Remove)"
+        style={{ padding: '5px 9px', borderRadius: 6, border: '1px solid #E2E8F0', background: '#fff', color: '#475569', fontSize: 11, fontWeight: 700, cursor: 'pointer', fontFamily: 'inherit' }}
+      >
+        Remove
+      </button>
+      {(ov.goalCreationEndsOn || ov.noGoalCycle) && (
+        <button
+          type="button"
+          onClick={onClearOverride}
+          title="Clear any override on this employee"
+          style={{ padding: '5px 9px', borderRadius: 6, border: '1px solid #E2E8F0', background: '#fff', color: '#94A3B8', fontSize: 11, fontWeight: 700, cursor: 'pointer', fontFamily: 'inherit' }}
+        >
+          Clear
+        </button>
       )}
     </div>
   );
@@ -7947,7 +8136,7 @@ export default function HRCycleDashboard() {
             <ModuleOverview employees={empsForModules} groups={groups} orgName={org.name} congratsDismissed={congratsDismissed} onDismiss={() => setCongratsDismissed(true)} showConfetti={showConfetti} />
           )}
           {activeModule === 'emp-status' && <ModuleEmpStatus employees={empsForModules} groups={groups} orgKey={orgKey} org={org} />}
-          {activeModule === 'cycle-calendar' && <ModuleCycleCalendar org={org} onOrgChange={updateOrgBrand} employees={empsForModules} orgKey={orgKey} onEmployeesUpdate={handleEmpUpdate} />}
+          {activeModule === 'cycle-calendar' && <ModuleCycleCalendar org={org} onOrgChange={updateOrgBrand} employees={empsForModules} orgKey={orgKey} onEmployeesUpdate={handleEmpUpdate} config={config} onNavigate={setActiveModule} />}
           {activeModule === 'comms'      && <ModuleComms     employees={empsForModules} groups={groups} org={org} config={config} onUpdate={handleEmpUpdate} onConfigPatch={handleConfigPatch} orgKey={orgKey} onNavigate={setActiveModule} />}
           {activeModule === 'stage'      && <ModuleStageControl  employees={empsForModules} onUpdate={handleEmpUpdate} orgKey={orgKey} />}
           {activeModule === 'mgr-change' && <ModuleMgrChange     employees={empsForModules} config={config} onUpdate={handleEmpUpdate} orgKey={orgKey} />}

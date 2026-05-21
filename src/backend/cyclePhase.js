@@ -430,6 +430,7 @@ export function getEmployeeComplianceStatus({ org, employee, submission, now }) 
   const t = asNow(now);
   const override = readEmployeeOverride(employee);
   const status = String(submission?.status || '').trim().toLowerCase();
+  const windows = readCycleWindows(org);
 
   if (status === 'approved' || status === 'manager_approved' || status === 'completed') {
     return 'approved';
@@ -440,6 +441,10 @@ export function getEmployeeComplianceStatus({ org, employee, submission, now }) 
   if (override?.noGoalCycle) {
     return 'no-goal-cycle';
   }
+  // No calendar configured for the org → can't say overdue. Treat as
+  // "calendar missing" so the UI shows a clean empty state rather than
+  // marking every employee as overdue.
+  if (!windows) return 'no-calendar';
 
   const effective = getEffectivePhaseForEmployee(org, employee, t);
   const inGoalCreation = effective === SUB_PHASE.GOAL_CREATION;
@@ -468,7 +473,17 @@ export const COMPLIANCE_LABELS = Object.freeze({
   'extended-not-started':  { label: 'Extended (not started)',   color: '#94A3B8' },
   'overdue':               { label: 'Overdue — window closed',  color: '#DC2626' },
   'no-goal-cycle':         { label: 'No goals this cycle',      color: '#475569' },
+  'no-calendar':           { label: 'Calendar not configured',  color: '#94A3B8' },
 });
+
+// Statuses where the goal-creation window has effectively closed for the
+// employee — used by the UI to decide whether to show the Extend / Apply
+// default goals actions (we only show them after the deadline).
+export const DEADLINE_PASSED_STATUSES = Object.freeze([
+  'overdue',
+  'extended-drafting',
+  'extended-not-started',
+]);
 
 export const PHASE_LABELS = Object.freeze({
   [SUB_PHASE.PRE_CYCLE]:          'Cycle has not started',

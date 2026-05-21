@@ -258,6 +258,15 @@ check('noGoalCycle flag → no-goal-cycle bucket', () => {
   const s = getEmployeeComplianceStatus({ org, employee: emp, submission: null, now: at('2026-05-15T12:00:00') });
   assert.equal(s, 'no-goal-cycle');
 });
+check('no calendar configured → no-calendar bucket (not overdue)', () => {
+  const s = getEmployeeComplianceStatus({ org: {}, employee: {}, submission: null, now: at('2026-05-15T12:00:00') });
+  assert.equal(s, 'no-calendar');
+});
+check('no calendar + draft submission → still drafting (submission wins)', () => {
+  // Submission status is authoritative — a draft is a draft regardless of calendar.
+  const s = getEmployeeComplianceStatus({ org: {}, employee: {}, submission: { status: 'draft' }, now: at('2026-05-15T12:00:00') });
+  assert.equal(s, 'no-calendar');
+});
 
 console.log('cyclePhase.reviewCycleWindows');
 check('windows entirely in the future → no warnings', () => {
