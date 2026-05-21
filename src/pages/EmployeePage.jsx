@@ -1542,17 +1542,17 @@ function GoalLibraryPanel({ kras, libraryType, libraryName, canAdd, onAdd, added
               }}
               onMouseEnter={() => setHoveredId(cardId)}
               onMouseLeave={() => setHoveredId(null)}
-              onClick={(e) => {
+              onClick={() => {
                 if (isSelected) {
                   setSelectedId(null);
                   setPreviewAnchor(null);
                   return;
                 }
-                const rect = e.currentTarget.getBoundingClientRect();
-                const width = 380;
-                const left = Math.max(16, Math.min(rect.left + rect.width / 2 - width / 2, window.innerWidth - width - 16));
+                // Preview now opens as a centered modal — no need to
+                // compute card-anchored coordinates. Set a sentinel so
+                // existing render paths still fire.
                 setSelectedId(cardId);
-                setPreviewAnchor({ top: rect.bottom + 10, left, width });
+                setPreviewAnchor({ centered: true });
               }}
               onDoubleClick={() => { if (canAdd) { onAdd(kra); setSelectedId(null); } }}
               aria-label={canAdd ? `${kra.name || 'KRA'}: drag or double-click to add to plan` : kra.name || 'KRA'}
@@ -1616,16 +1616,9 @@ function GoalLibraryPanel({ kras, libraryType, libraryName, canAdd, onAdd, added
                 )}
               </div>
 
-              {/* Add button — only in expanded/selected state */}
-              {isSelected && canAdd && (
-                <button
-                  type="button"
-                  onClick={(e) => { e.stopPropagation(); onAdd(kra); setSelectedId(null); }}
-                  style={{ padding: '7px', borderRadius: 8, border: 'none', background: actionColor, color: '#fff', cursor: 'pointer', fontFamily: 'inherit', fontSize: 12, fontWeight: 700 }}
-                >
-                  ＋ Add to plan
-                </button>
-              )}
+              {/* The Add-to-plan button lives inside the preview modal
+                  now; keeping a duplicate on the card under the popup
+                  was getting obscured and reading as broken UI. */}
             </div>
           );
         })}
@@ -1641,19 +1634,33 @@ function GoalLibraryPanel({ kras, libraryType, libraryName, canAdd, onAdd, added
       {panel}
       {selectedKra && previewAnchor && createPortal((
         <div
-          ref={previewRef}
+          onClick={() => { setSelectedId(null); setPreviewAnchor(null); }}
           style={{
-            position: 'fixed',
-            top: previewAnchor.top,
-            left: previewAnchor.left,
-            width: previewAnchor.width,
-            zIndex: 12000,
+            position: 'fixed', inset: 0, zIndex: 12000,
+            background: 'rgba(15,23,42,0.42)',
+            backdropFilter: 'blur(6px)',
+            WebkitBackdropFilter: 'blur(6px)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            padding: 20,
+            animation: 'kraPreviewFade 160ms ease',
+          }}
+        >
+          <style>{`
+            @keyframes kraPreviewFade { from { opacity: 0; } to { opacity: 1; } }
+            @keyframes kraPreviewPop { from { opacity: 0; transform: translateY(8px) scale(.96); } to { opacity: 1; transform: translateY(0) scale(1); } }
+          `}</style>
+        <div
+          ref={previewRef}
+          onClick={(e) => e.stopPropagation()}
+          style={{
+            width: 'min(440px, 100%)',
             background: '#FFFFFF',
             border: '1px solid #D9E2EC',
             borderRadius: 14,
-            boxShadow: '0 24px 60px rgba(15,23,42,.22)',
+            boxShadow: '0 24px 60px rgba(15,23,42,.25)',
             overflow: 'hidden',
             fontFamily: 'inherit',
+            animation: 'kraPreviewPop 180ms cubic-bezier(.2,.9,.3,1.2)',
           }}
         >
           <div style={{ padding: '14px 16px', borderBottom: '1px solid #EEF2F7', display: 'flex', alignItems: 'flex-start', gap: 12 }}>
@@ -1703,6 +1710,7 @@ function GoalLibraryPanel({ kras, libraryType, libraryName, canAdd, onAdd, added
               </button>
             </div>
           )}
+        </div>
         </div>
       ), document.body)}
     </>

@@ -6195,9 +6195,18 @@ function ModuleCycleCalendar({ org, onOrgChange, employees = [], orgKey, onEmplo
   const fyStart = String(org?.customPmsStartDate || '').trim();
   const fyEnd   = String(org?.customPmsEndDate   || '').trim();
 
+  // Editor only fires onChange when the admin explicitly clicks Save inside
+  // it, so every call here is a save-intent. We validate and pop the confirm
+  // modal directly — no separate outer Save button needed.
   function handleChange(next) {
     setDraft(next);
-    setSaveState({ status: 'editing', message: '' });
+    const check = validateCycleWindows(next);
+    if (!check.ok) {
+      setSaveState({ status: 'failed', message: check.errors[0] || 'Invalid calendar.' });
+      return;
+    }
+    setSaveState({ status: 'idle', message: '' });
+    setConfirmOpen(true);
   }
 
   function handleSeedDefaults() {
@@ -6208,18 +6217,10 @@ function ModuleCycleCalendar({ org, onOrgChange, employees = [], orgKey, onEmplo
     }
     const defaults = defaultWindowsForFiscalYear(range);
     if (defaults) {
+      // Seed straight into the editor's value — admin can review the bars
+      // and tweak before saving, since the editor stages edits internally.
       setDraft(defaults);
-      setSaveState({ status: 'editing', message: '' });
     }
-  }
-
-  function requestSave() {
-    const check = validateCycleWindows(draft);
-    if (!check.ok) {
-      setSaveState({ status: 'failed', message: check.errors[0] || 'Invalid calendar.' });
-      return;
-    }
-    setConfirmOpen(true);
   }
 
   function handleSaveConfirmed() {
@@ -6271,12 +6272,6 @@ function ModuleCycleCalendar({ org, onOrgChange, employees = [], orgKey, onEmplo
     setSaveState({ status: 'saved', message: `Cleared ${stranded.length} stranded override${stranded.length === 1 ? '' : 's'}.` });
   }
 
-  function handleDiscard() {
-    setDraft(org?.cyclePhaseWindows || null);
-    setSaveState({ status: 'idle', message: '' });
-  }
-
-  const dirty = JSON.stringify(draft || null) !== JSON.stringify(org?.cyclePhaseWindows || null);
   const validation = validateCycleWindows(draft);
 
   // ── Compliance: bucket each employee against the live calendar ─────────────
@@ -6541,44 +6536,12 @@ function ModuleCycleCalendar({ org, onOrgChange, employees = [], orgKey, onEmplo
         </div>
       )}
 
-      <div style={{ marginTop: 14, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, flexWrap: 'wrap' }}>
-        <div style={{ fontSize: 11.5, color: '#94A3B8' }}>
-          {lastEditedAt ? (
-            <>Last edited by <strong style={{ color: '#475569' }}>{lastEditedBy || 'someone'}</strong> on {formatRelativeDate(lastEditedAt) || new Date(lastEditedAt).toLocaleString()}.</>
-          ) : (
-            <>Calendar has not been edited yet.</>
-          )}
-        </div>
-        <div style={{ display: 'flex', gap: 10 }}>
-          {dirty && (
-            <button
-              type="button"
-              onClick={handleDiscard}
-              style={{ padding: '9px 16px', borderRadius: 8, border: '1px solid #CBD5E1', background: '#fff', color: '#0F172A', fontSize: 13, fontWeight: 700, cursor: 'pointer', fontFamily: 'inherit' }}
-            >
-              Discard changes
-            </button>
-          )}
-          <button
-            type="button"
-            onClick={requestSave}
-            disabled={!dirty || !validation.ok}
-            style={{
-              padding: '9px 18px',
-              borderRadius: 8,
-              border: 'none',
-              background: dirty && validation.ok ? '#2563EB' : '#CBD5E1',
-              color: '#fff',
-              fontSize: 13,
-              fontWeight: 800,
-              cursor: dirty && validation.ok ? 'pointer' : 'not-allowed',
-              fontFamily: 'inherit',
-              boxShadow: dirty && validation.ok ? '0 8px 18px rgba(37,99,235,.22)' : 'none',
-            }}
-          >
-            Save calendar
-          </button>
-        </div>
+      <div style={{ marginTop: 14, fontSize: 11.5, color: '#94A3B8' }}>
+        {lastEditedAt ? (
+          <>Last edited by <strong style={{ color: '#475569' }}>{lastEditedBy || 'someone'}</strong> on {formatRelativeDate(lastEditedAt) || new Date(lastEditedAt).toLocaleString()}.</>
+        ) : (
+          <>Calendar has not been edited yet.</>
+        )}
       </div>
 
       {confirmOpen && (
