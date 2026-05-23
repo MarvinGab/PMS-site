@@ -36,12 +36,11 @@ import {
 } from '../backend/emailSmtpService';
 import PhaseSettingsEditor from '../components/PhaseSettingsEditor';
 import {
-  validateCycleWindows,
-  defaultWindowsForFiscalYear,
   getEmployeeComplianceStatus,
   COMPLIANCE_LABELS,
   DEADLINE_PASSED_STATUSES,
   findStrandedOverrides,
+  resolveOrgFiscalRange,
 } from '../backend/cyclePhase';
 import { useCyclePhase } from '../hooks/useCyclePhase';
 import {
@@ -6166,12 +6165,10 @@ function cardAccentStylePreview(mode, tint) {
 function ModuleCycleCalendar({ org, onOrgChange, employees = [], orgKey, onEmployeesUpdate, config, onNavigate }) {
   const { userName } = useApp();
   const [subTab, setSubTab] = useState('calendar'); // 'calendar' | 'compliance'
-  const [draft, setDraft] = useState(() => org?.cyclePhaseWindows || null);
-  const [saveState, setSaveState] = useState({ status: 'idle', message: '' });
-  const [confirmOpen, setConfirmOpen] = useState(false);
   const [complianceFilter, setComplianceFilter] = useState('all');
   const [extendModalFor, setExtendModalFor] = useState(null);
   const [actionFeedback, setActionFeedback] = useState('');
+  const [calendarToast, setCalendarToast] = useState(null); // { status, message, stranded? }
   const [wfTick, setWfTick] = useState(0); // bump after auto-applying default goals
   const phase = useCyclePhase(org);
   const workflow = useMemo(
@@ -6185,49 +6182,20 @@ function ModuleCycleCalendar({ org, onOrgChange, employees = [], orgKey, onEmplo
   const lastEditedBy = org?.cyclePhaseWindowsLastEditedBy || '';
   const calendarConfigured = !!org?.cyclePhaseWindows;
 
-  // Keep the editor's draft in sync if the parent org changes externally (e.g.
-  // realtime push from another tab) — but don't clobber edits in progress.
-  useEffect(() => {
-    if (saveState.status === 'editing') return;
-    setDraft(org?.cyclePhaseWindows || null);
-  }, [org?.cyclePhaseWindows, saveState.status]);
+  // Resolve fiscal year the same way the SuperAdmin wizard does, so the
+  // editor's timeline strip works for April-March / Jan-Dec orgs too, not
+  // only Custom-range orgs.
+  const fiscalRange = useMemo(() => resolveOrgFiscalRange(org), [org]);
+  const fyStart = fiscalRange.startsOn;
+  const fyEnd   = fiscalRange.endsOn;
 
-  const fyStart = String(org?.customPmsStartDate || '').trim();
-  const fyEnd   = String(org?.customPmsEndDate   || '').trim();
-
-  // Editor only fires onChange when the admin explicitly clicks Save inside
-  // it, so every call here is a save-intent. We validate and pop the confirm
-  // modal directly — no separate outer Save button needed.
-  function handleChange(next) {
-    setDraft(next);
-    const check = validateCycleWindows(next);
-    if (!check.ok) {
-      setSaveState({ status: 'failed', message: check.errors[0] || 'Invalid calendar.' });
-      return;
-    }
-    setSaveState({ status: 'idle', message: '' });
-    setConfirmOpen(true);
-  }
-
-  function handleSeedDefaults() {
-    const range = fyStart && fyEnd ? { startsOn: fyStart, endsOn: fyEnd } : null;
-    if (!range) {
-      setSaveState({ status: 'failed', message: 'Set fiscal-year start and end dates first.' });
-      return;
-    }
-    const defaults = defaultWindowsForFiscalYear(range);
-    if (defaults) {
-      // Seed straight into the editor's value — admin can review the bars
-      // and tweak before saving, since the editor stages edits internally.
-      setDraft(defaults);
-    }
-  }
-
-  function handleSaveConfirmed() {
-    setConfirmOpen(false);
-    const stranded = findStrandedOverrides(employees, draft, now);
+  // PhaseSettingsEditor owns its own draft and SaveBar — onChange fires on
+  // explicit save, so each call here is a save-intent. We persist, audit, and
+  // scan for stranded overrides in one shot.
+  function handleCalendarSave(next) {
+    const stranded = findStrandedOverrides(employees, next, now);
     const ok = onOrgChange({
-      cyclePhaseWindows: draft,
+      cyclePhaseWindows: next,
       cyclePhaseWindowsLastEditedAt: new Date().toISOString(),
       cyclePhaseWindowsLastEditedBy: userName || 'HR Admin',
     });
@@ -6242,21 +6210,23 @@ function ModuleCycleCalendar({ org, onOrgChange, employees = [], orgKey, onEmplo
         details: { strandedOverrideCount: stranded.length },
       });
     }
+    if (!ok) {
+      setCalendarToast({ status: 'failed', message: 'Could not save changes.' });
+      return;
+    }
     if (stranded.length > 0) {
-      setSaveState({
+      setCalendarToast({
         status: 'saved-with-warning',
         message: `Calendar saved. ${stranded.length} employee override${stranded.length === 1 ? '' : 's'} no longer fit the new windows.`,
         stranded,
       });
     } else {
-      setSaveState(ok
-        ? { status: 'saved', message: 'Cycle calendar updated. New windows are active immediately.' }
-        : { status: 'failed', message: 'Could not save changes.' });
+      setCalendarToast({ status: 'saved', message: 'Cycle calendar updated. New windows are active immediately.' });
     }
   }
 
   function handleClearStranded() {
-    const stranded = saveState.stranded || [];
+    const stranded = calendarToast?.stranded || [];
     if (stranded.length === 0) return;
     const codes = new Set(stranded.map((s) => s.empCode));
     const next = employees.map((e) => {
@@ -6269,10 +6239,8 @@ function ModuleCycleCalendar({ org, onOrgChange, employees = [], orgKey, onEmplo
       };
     });
     onEmployeesUpdate?.(next);
-    setSaveState({ status: 'saved', message: `Cleared ${stranded.length} stranded override${stranded.length === 1 ? '' : 's'}.` });
+    setCalendarToast({ status: 'saved', message: `Cleared ${stranded.length} stranded override${stranded.length === 1 ? '' : 's'}.` });
   }
-
-  const validation = validateCycleWindows(draft);
 
   // ── Compliance: bucket each employee against the live calendar ─────────────
   const compliance = useMemo(() => {
@@ -6462,10 +6430,10 @@ function ModuleCycleCalendar({ org, onOrgChange, employees = [], orgKey, onEmplo
     <div style={{ padding: '24px 28px 40px' }}>
       <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 18, flexWrap: 'wrap', marginBottom: 14 }}>
         <div style={{ minWidth: 0, flex: 1 }}>
-          <h2 style={{ fontSize: 20, fontWeight: 700, color: '#0F172A', margin: 0 }}>Cycle Calendar</h2>
+          <h2 style={{ fontSize: 18, fontWeight: 800, color: '#0F172A', margin: 0 }}>Cycle calendar</h2>
           <p style={{ margin: '6px 0 0', fontSize: 13, color: '#64748B', lineHeight: 1.55 }}>
             {subTab === 'calendar'
-              ? 'Edit when goal-setting and evaluation open. Changes take effect immediately — the active phase is computed from these dates.'
+              ? 'Tell the system when goal-setting and evaluation should open. Phases turn on and off automatically based on these dates — no manual flips required.'
               : 'Track who has set their goals and resolve stragglers after the deadline.'}
           </p>
         </div>
@@ -6486,35 +6454,21 @@ function ModuleCycleCalendar({ org, onOrgChange, employees = [], orgKey, onEmplo
       {subTab === 'calendar' && (
       <>
       <PhaseSettingsEditor
-        value={draft}
-        onChange={handleChange}
+        value={org?.cyclePhaseWindows || null}
+        onChange={handleCalendarSave}
         fiscalYearStartsOn={fyStart}
         fiscalYearEndsOn={fyEnd}
       />
 
-      {!draft && (
-        <div style={{ marginTop: 14, padding: '12px 14px', borderRadius: 9, border: '1px dashed #CBD5E1', background: '#F8FAFC', color: '#475569', fontSize: 12.5 }}>
-          No cycle calendar configured yet.{' '}
-          <button
-            type="button"
-            onClick={handleSeedDefaults}
-            style={{ background: 'none', border: 'none', color: '#2563EB', fontWeight: 700, cursor: 'pointer', padding: 0, fontFamily: 'inherit' }}
-          >
-            Seed defaults from the fiscal year
-          </button>
-          .
-        </div>
-      )}
-
-      {saveState.status !== 'idle' && saveState.status !== 'editing' && (
+      {calendarToast && (
         <div
           style={{
             marginTop: 14,
             padding: '10px 13px',
             borderRadius: 8,
-            background: saveState.status === 'failed' ? '#FEF2F2' : saveState.status === 'saved-with-warning' ? '#FFFBEB' : '#ECFDF5',
-            color:      saveState.status === 'failed' ? '#991B1B' : saveState.status === 'saved-with-warning' ? '#92400E' : '#065F46',
-            border:     `1px solid ${saveState.status === 'failed' ? '#FCA5A5' : saveState.status === 'saved-with-warning' ? '#FCD34D' : '#A7F3D0'}`,
+            background: calendarToast.status === 'failed' ? '#FEF2F2' : calendarToast.status === 'saved-with-warning' ? '#FFFBEB' : '#ECFDF5',
+            color:      calendarToast.status === 'failed' ? '#991B1B' : calendarToast.status === 'saved-with-warning' ? '#92400E' : '#065F46',
+            border:     `1px solid ${calendarToast.status === 'failed' ? '#FCA5A5' : calendarToast.status === 'saved-with-warning' ? '#FCD34D' : '#A7F3D0'}`,
             fontSize: 12.5,
             display: 'flex',
             alignItems: 'center',
@@ -6523,8 +6477,8 @@ function ModuleCycleCalendar({ org, onOrgChange, employees = [], orgKey, onEmplo
             flexWrap: 'wrap',
           }}
         >
-          <span>{saveState.message}</span>
-          {saveState.status === 'saved-with-warning' && (saveState.stranded || []).length > 0 && (
+          <span>{calendarToast.message}</span>
+          {calendarToast.status === 'saved-with-warning' && (calendarToast.stranded || []).length > 0 && (
             <button
               type="button"
               onClick={handleClearStranded}
@@ -6543,25 +6497,6 @@ function ModuleCycleCalendar({ org, onOrgChange, employees = [], orgKey, onEmplo
           <>Calendar has not been edited yet.</>
         )}
       </div>
-
-      {confirmOpen && (
-        <div onClick={() => setConfirmOpen(false)} style={{ position: 'fixed', inset: 0, background: 'rgba(15,23,42,.45)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 12000 }}>
-          <div onClick={(e) => e.stopPropagation()} style={{ background: '#fff', borderRadius: 12, padding: 22, width: 420, maxWidth: 'calc(100% - 32px)', boxShadow: '0 24px 60px rgba(15,23,42,.25)' }}>
-            <div style={{ fontSize: 15, fontWeight: 800, color: '#0F172A', marginBottom: 6 }}>Update cycle calendar?</div>
-            <div style={{ fontSize: 12.5, color: '#475569', lineHeight: 1.55, marginBottom: 16 }}>
-              These windows govern who can do what across the org. Changes take effect immediately — anyone currently mid-action may find their phase has moved.
-            </div>
-            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
-              <button type="button" onClick={() => setConfirmOpen(false)} style={{ padding: '8px 14px', borderRadius: 8, border: '1px solid #CBD5E1', background: '#fff', color: '#0F172A', fontSize: 12.5, fontWeight: 700, cursor: 'pointer', fontFamily: 'inherit' }}>
-                Cancel
-              </button>
-              <button type="button" onClick={handleSaveConfirmed} style={{ padding: '8px 14px', borderRadius: 8, border: 'none', background: '#2563EB', color: '#fff', fontSize: 12.5, fontWeight: 800, cursor: 'pointer', fontFamily: 'inherit' }}>
-                Yes, update calendar
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
       </>
       )}
 
