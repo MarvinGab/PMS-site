@@ -266,7 +266,7 @@ const OUTSIDE_PMS_GROUP_LABEL = 'NONE';
 
 const EMP_STAGES = [
   { id: 'goal-creation',    label: 'Goal creation',       short: 'Goal creation',    color: '#4F46E5', bg: '#EEF2FF', border: '#C7D2FE' },
-  { id: 'pending-approval', label: 'Pending approval',    short: 'Pending approval', color: '#D97706', bg: '#FFFBEB', border: '#FDE68A' },
+  { id: 'pending-approval', label: 'Approval pending',    short: 'Approval pending', color: '#D97706', bg: '#FFFBEB', border: '#FDE68A' },
   { id: 'self-evaluation',  label: 'Self evaluation',     short: 'Self eval',        color: '#0891B2', bg: '#ECFEFF', border: '#A5F3FC' },
   { id: 'mgr-evaluation',   label: 'Manager evaluation',  short: 'Manager eval',     color: '#7C3AED', bg: '#F5F3FF', border: '#DDD6FE' },
   { id: 'completed',        label: 'Completed',           short: 'Completed',        color: '#16A34A', bg: '#F0FDF4', border: '#BBF7D0' },
@@ -780,7 +780,7 @@ function ModuleOverview({ employees, groups, orgName, congratsDismissed, onDismi
   const statCards = [
     { label: 'Total employees', value: total,                              color: '#4F46E5', bg: 'linear-gradient(135deg,#EEF2FF 0%,#FFFFFF 100%)' },
     { label: 'In goal creation', value: stageSummary['goal-creation'] || 0, color: '#4F46E5', bg: 'linear-gradient(135deg,#EEF2FF 0%,#FFFFFF 100%)' },
-    { label: 'Pending approval', value: stageSummary['pending-approval'] || 0, color: '#D97706', bg: 'linear-gradient(135deg,#FFFBEB 0%,#FFFFFF 100%)' },
+    { label: 'Approval pending', value: stageSummary['pending-approval'] || 0, color: '#D97706', bg: 'linear-gradient(135deg,#FFFBEB 0%,#FFFFFF 100%)' },
     { label: 'In evaluation',    value: inEvaluation,                       color: '#0891B2', bg: 'linear-gradient(135deg,#ECFEFF 0%,#FFFFFF 100%)' },
     { label: 'Completed',        value: completed,                          color: '#16A34A', bg: 'linear-gradient(135deg,#F0FDF4 0%,#FFFFFF 100%)' },
     ...(exemptEmployees.length > 0 ? [
@@ -3193,7 +3193,7 @@ function ModuleStageControl({ employees, onUpdate, orgKey }) {
       EMP_STAGES.find((s) => s.id === getEmpStage(e))?.label || '',
       '',
     ]);
-    const rows = dataRows.length > 0 ? dataRows : [['E001', 'Sample Name', 'Goal creation', 'Pending approval']];
+    const rows = dataRows.length > 0 ? dataRows : [['E001', 'Sample Name', 'Goal creation', 'Approval pending']];
     const csv = [headers, ...rows].map((r) => r.map((v) => /[",\n]/.test(v) ? `"${String(v).replace(/"/g, '""')}"` : v).join(',')).join('\n');
     const blob = new Blob([csv], { type: 'text/csv' });
     const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'stage_change.csv'; a.click();
