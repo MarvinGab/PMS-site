@@ -874,8 +874,8 @@ function getSubmissionStatusMeta(record) {
       // queue item, not a first submission.
       const isResubmit = Number(record?.submitCount || 0) > 1;
       return {
-        label: isResubmit ? 'Pending approval (re-submitted)' : 'Pending approval',
-        color: '#DC2626', bg: '#FEF2F2', border: '#FECACA',
+        label: isResubmit ? 'Approval pending (re-submitted)' : 'Approval pending',
+        color: '#D97706', bg: '#FFF7ED', border: '#FED7AA',
       };
     }
     case 'approved':
@@ -900,7 +900,7 @@ function getGoalReviewStatus(goal, submission) {
 function getGoalStatusMeta(status) {
   if (status === 'approved') return { label: 'Approved', color: '#16A34A', bg: '#F0FDF4', border: '#BBF7D0' };
   if (status === 'rejected') return { label: 'Sent back', color: '#D97706', bg: '#FFF7ED', border: '#FED7AA' };
-  if (status === 'pending') return { label: 'Pending approval', color: '#DC2626', bg: '#FEF2F2', border: '#FECACA' };
+  if (status === 'pending') return { label: 'Approval pending', color: '#D97706', bg: '#FFF7ED', border: '#FED7AA' };
   return null;
 }
 
