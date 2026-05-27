@@ -1090,15 +1090,72 @@ function ModuleEmpStatus({ employees, groups, orgKey, org }) {
     return m;
   }, [employees]);
 
+  function getCredentialForEmployee(empOrCode) {
+    const emp = empOrCode && typeof empOrCode === 'object' ? empOrCode : null;
+    const code = String(emp ? emp['Employee Code'] : empOrCode || '').trim();
+    const email = emp ? String(resolveEmployeeEmail(emp) || '').trim().toLowerCase() : '';
+    return (
+      credentials[code] ||
+      credentials[code.toLowerCase()] ||
+      (email ? credentials[email] : null) ||
+      null
+    );
+  }
+
   function getLoginStatus(codeOrEmployee) {
     const emp = codeOrEmployee && typeof codeOrEmployee === 'object' ? codeOrEmployee : null;
-    const c = String(emp ? emp['Employee Code'] : codeOrEmployee || '').trim();
-    const cred = credentials[c] || credentials[c.toLowerCase()];
+    const cred = getCredentialForEmployee(codeOrEmployee);
     if (cred && !cred.isTemp) return 'permanent';
     if (emp?._pmsSetupPending) return 'temp';
     if (!cred) return 'none';
     return cred.isTemp ? 'temp' : 'permanent';
   }
+
+  const stageOptions = useMemo(() => {
+    const counts = new Map();
+    employees.forEach((emp) => {
+      const stage = getEmpStage(emp);
+      counts.set(stage, (counts.get(stage) || 0) + 1);
+    });
+    return EMP_STAGES
+      .map((stage) => ({ ...stage, count: counts.get(stage.id) || 0 }))
+      .filter((stage) => stage.count > 0);
+  }, [employees]);
+
+  const groupOptions = useMemo(() => {
+    const counts = new Map();
+    employees.forEach((emp) => {
+      const groupName = getEmployeeDisplayGroup(emp, '', groups);
+      if (!groupName) return;
+      counts.set(groupName, (counts.get(groupName) || 0) + 1);
+    });
+    return Array.from(counts.entries())
+      .map(([name, count]) => ({ name, count }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+  }, [employees, groups]);
+
+  const loginStatusOptions = useMemo(() => {
+    const labels = {
+      permanent: 'Active',
+      temp: 'Setup pending',
+      none: 'Not logged in',
+    };
+    const counts = new Map();
+    employees.forEach((emp) => {
+      const status = getLoginStatus(emp);
+      counts.set(status, (counts.get(status) || 0) + 1);
+    });
+    return ['permanent', 'temp', 'none']
+      .map((id) => ({ id, label: labels[id], count: counts.get(id) || 0 }))
+      .filter((item) => item.count > 0);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [employees, credentials]);
+
+  useEffect(() => {
+    if (filterStage && !stageOptions.some((option) => option.id === filterStage)) setFilterStage('');
+    if (filterGroup && !groupOptions.some((option) => option.name === filterGroup)) setFilterGroup('');
+    if (filterLogin && !loginStatusOptions.some((option) => option.id === filterLogin)) setFilterLogin('');
+  }, [filterStage, filterGroup, filterLogin, stageOptions, groupOptions, loginStatusOptions]);
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -1196,23 +1253,21 @@ function ModuleEmpStatus({ employees, groups, orgKey, org }) {
                     <div style={{ fontSize: 11, fontWeight: 700, color: '#94A3B8', textTransform: 'uppercase', letterSpacing: '.05em', marginBottom: 5 }}>Stage</div>
                     <select value={filterStage} onChange={(e) => setFilterStage(e.target.value)} style={{ ...selectStyle, width: '100%' }}>
                       <option value="">All Stages</option>
-                      {EMP_STAGES.map((s) => <option key={s.id} value={s.id}>{s.label}</option>)}
+                      {stageOptions.map((s) => <option key={s.id} value={s.id}>{s.label} ({s.count})</option>)}
                     </select>
                   </div>
                   <div>
                     <div style={{ fontSize: 11, fontWeight: 700, color: '#94A3B8', textTransform: 'uppercase', letterSpacing: '.05em', marginBottom: 5 }}>Group</div>
                     <select value={filterGroup} onChange={(e) => setFilterGroup(e.target.value)} style={{ ...selectStyle, width: '100%' }}>
                       <option value="">All Groups</option>
-                      {groups.map((g) => <option key={g.id} value={g.name}>{g.name}</option>)}
+                      {groupOptions.map((g) => <option key={g.name} value={g.name}>{g.name} ({g.count})</option>)}
                     </select>
                   </div>
                   <div>
                     <div style={{ fontSize: 11, fontWeight: 700, color: '#94A3B8', textTransform: 'uppercase', letterSpacing: '.05em', marginBottom: 5 }}>Login Status</div>
                     <select value={filterLogin} onChange={(e) => setFilterLogin(e.target.value)} style={{ ...selectStyle, width: '100%' }}>
                       <option value="">All</option>
-                      <option value="permanent">Active</option>
-                      <option value="temp">Setup pending</option>
-                      <option value="none">Not logged in</option>
+                      {loginStatusOptions.map((status) => <option key={status.id} value={status.id}>{status.label} ({status.count})</option>)}
                     </select>
                   </div>
                 </div>
