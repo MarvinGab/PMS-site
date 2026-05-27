@@ -566,6 +566,74 @@ async function updateCredentialPassword(
   return next[credentialKey] as Record<string, unknown>
 }
 
+async function resetEmployeePmsCredentials(
+  client: ReturnType<typeof createClient>,
+  organizationKey: string,
+  employees: Array<Record<string, unknown>>,
+) {
+  const credentials = await getCredentialBlob(client)
+  const next = { ...credentials }
+  let reset = 0
+
+  for (const employee of employees) {
+    const empCode = normalizeCode(employee?.empCode)
+    const email = normalizeLower(employee?.email)
+    if (!empCode && !email) continue
+
+    const matchingKeys = new Set<string>()
+    if (empCode) matchingKeys.add(empCode)
+    if (email) matchingKeys.add(email)
+    for (const [key, value] of Object.entries(next)) {
+      const valueEmpCode = normalizeCode(value?.empCode || key)
+      const valueEmail = normalizeLower(value?.email)
+      const valueOrgKey = String(value?.orgKey || '')
+      if (organizationKey && valueOrgKey && valueOrgKey !== organizationKey) continue
+      if ((empCode && valueEmpCode === empCode) || (email && valueEmail === email)) {
+        matchingKeys.add(key)
+      }
+    }
+
+    const current =
+      (empCode ? next[empCode] : null) ||
+      (email ? next[email] : null) ||
+      [...matchingKeys].map((key) => next[key]).find(Boolean) ||
+      {}
+    const tempPassword = crypto.randomUUID()
+    const resetCredential: Record<string, unknown> = {
+      ...current,
+      passwordHash: await hashPasswordValue(tempPassword),
+      name: String(employee?.name || current?.name || '').trim(),
+      email: String(email || current?.email || '').trim().toLowerCase(),
+      empCode: String(empCode || current?.empCode || '').trim(),
+      designation: String(employee?.designation || current?.designation || '').trim(),
+      managerCode: String(employee?.managerCode || current?.managerCode || '').trim(),
+      orgKey: organizationKey,
+      isTemp: true,
+    }
+    delete resetCredential.password
+    delete resetCredential.pendingTempPassword
+
+    for (const key of matchingKeys) {
+      next[key] = {
+        ...(next[key] || {}),
+        ...resetCredential,
+      }
+      delete (next[key] as Record<string, unknown>).password
+      delete (next[key] as Record<string, unknown>).pendingTempPassword
+    }
+    reset += 1
+  }
+
+  const { error } = await client
+    .from('app_state')
+    .upsert(
+      { state_key: 'employee_credentials', org_key: '', payload: next },
+      { onConflict: 'state_key,org_key' },
+    )
+  if (error) throw error
+  return { reset, credentials: next }
+}
+
 // Once an HR admin has set a permanent password, strip the original OTP
 // from the org's setup_payload (and for HR team members, from their
 // hrTeam entry). Leaving it there means anyone who still has the welcome
@@ -1034,6 +1102,39 @@ Deno.serve(async (req: Request) => {
       revoked,
     })
     return json(200, { ok: true, revoked })
+  }
+
+  if (action === 'reset-employee-pms') {
+    const token = String(body.serverSessionToken || '').trim()
+    const organizationKey = String(body.organizationKey || '').trim()
+    const employees = Array.isArray(body.employees) ? body.employees as Array<Record<string, unknown>> : []
+    if (!token) return json(401, { ok: false, error: 'serverSessionToken is required.' })
+    if (!organizationKey) return json(400, { ok: false, error: 'organizationKey is required.' })
+    const session = await inspectSession(adminClient, token)
+    if (!session.ok) return json(403, { ok: false, error: session.error })
+    const actor = session.payload as Record<string, unknown>
+    const actorRole = String(actor.role || '')
+    if (actorRole !== 'super-admin' && actorRole !== 'hr-admin') {
+      return json(403, { ok: false, error: 'This session is not allowed to reset PMS.' })
+    }
+    if (actorRole !== 'super-admin' && String(actor.orgKey || '') !== organizationKey) {
+      return json(403, { ok: false, error: 'This session is not allowed to reset another organization.' })
+    }
+
+    const result = await resetEmployeePmsCredentials(adminClient, organizationKey, employees)
+    let revoked = 0
+    for (const employee of employees) {
+      const empCode = normalizeCode(employee?.empCode)
+      const email = normalizeLower(employee?.email)
+      if (!empCode && !email) continue
+      revoked += await revokeUserSessions(adminClient, { orgKey: organizationKey, empCode, email })
+    }
+    await logAudit(adminClient, organizationKey, 'employee-pms-reset', {
+      count: employees.length,
+      reset: result.reset,
+      revoked,
+    })
+    return json(200, { ok: true, reset: result.reset, revoked })
   }
 
   if (action === 'suggest-orgs') {

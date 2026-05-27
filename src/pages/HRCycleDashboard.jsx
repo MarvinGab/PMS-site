@@ -25,7 +25,7 @@ import { sendCustomBroadcast } from '../backend/emailService';
 import { shouldUseSupabase } from '../backend/config';
 import { supabase } from '../backend/supabaseClient';
 import { hashPasswordValue } from '../backend/passwordCrypto';
-import { revokeEmployeeSessions } from '../backend/serverAuth';
+import { resetEmployeePmsOnServer } from '../backend/serverAuth';
 import { logAuditEvent } from '../backend/auditLog';
 import { uploadBrandAsset, uploadEmailLogoAsset, ensureDefaultZaroLogoUrl } from '../backend/brandAssetStorage';
 import {
@@ -3135,7 +3135,7 @@ function ModuleStageControl({ employees, onUpdate, orgKey }) {
       if (code) employeeByCode.set(code, emp);
     });
     let credentialsChanged = false;
-    const sessionsToRevoke = [];
+    const employeesToResetOnServer = [];
     for (const code of list) {
       const key = normalizeCodeStr(code);
       const emp = employeeByCode.get(key);
@@ -3172,16 +3172,24 @@ function ModuleStageControl({ employees, onUpdate, orgKey }) {
         delete creds[credKey].password;
         delete creds[credKey].pendingTempPassword;
       });
-      sessionsToRevoke.push({
+      employeesToResetOnServer.push({
         empCode: String(emp['Employee Code'] || '').trim(),
         email: String(emailKey || current.email || '').trim().toLowerCase(),
+        name: String(emp['Employee Name'] || '').trim(),
+        designation: String(emp.Designation || emp.Role || '').trim(),
+        managerCode: String(emp['Reporting Manager Code'] || '').trim(),
       });
       credentialsChanged = true;
     }
-    if (credentialsChanged) await persistEmployeeCredentials(creds);
-    if (sessionsToRevoke.length > 0) {
-      void revokeEmployeeSessions({ organizationKey: orgKey, employees: sessionsToRevoke });
+    if (employeesToResetOnServer.length > 0 && shouldUseSupabase) {
+      const serverReset = await resetEmployeePmsOnServer({ organizationKey: orgKey, employees: employeesToResetOnServer });
+      if (!serverReset?.ok) {
+        showToast(serverReset?.error || 'Could not reset PMS credentials. Please sign in again and retry.');
+        setResetConfirmOpen(false);
+        return;
+      }
     }
+    if (credentialsChanged) await persistEmployeeCredentials(creds);
 
     // Reset the stage override so each employee starts at Goal Creation again.
     const updated = employees.map((e) => resetCodes.has(normalizeCodeStr(e['Employee Code']))
