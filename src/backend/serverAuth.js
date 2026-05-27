@@ -1,5 +1,6 @@
 import { shouldUseSupabase } from './config';
 import { supabase } from './supabaseClient';
+import { readAuthSessionSync } from './stateStore';
 
 async function invokeAuthFunction(body) {
   if (!shouldUseSupabase || !supabase) {
@@ -70,13 +71,33 @@ export async function suggestOrganizations(query) {
 }
 
 export async function revokeEmployeeSessions({ organizationKey = '', employees = [] } = {}) {
+  const authSession = readAuthSessionSync();
   return invokeAuthFunction({
     action: 'revoke-employee-sessions',
+    serverSessionToken: authSession?.serverSessionToken || null,
     organizationKey: String(organizationKey || '').trim(),
     employees: Array.isArray(employees)
       ? employees.map((employee) => ({
           empCode: String(employee?.empCode || '').trim(),
           email: String(employee?.email || '').trim(),
+        }))
+      : [],
+  });
+}
+
+export async function resetEmployeePmsOnServer({ organizationKey = '', employees = [] } = {}) {
+  const authSession = readAuthSessionSync();
+  return invokeAuthFunction({
+    action: 'reset-employee-pms',
+    serverSessionToken: authSession?.serverSessionToken || null,
+    organizationKey: String(organizationKey || '').trim(),
+    employees: Array.isArray(employees)
+      ? employees.map((employee) => ({
+          empCode: String(employee?.empCode || '').trim(),
+          email: String(employee?.email || '').trim(),
+          name: String(employee?.name || '').trim(),
+          designation: String(employee?.designation || '').trim(),
+          managerCode: String(employee?.managerCode || '').trim(),
         }))
       : [],
   });
