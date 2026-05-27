@@ -183,7 +183,6 @@ function Router() {
               setupReopened: false,
               setupReopenedAt: null,
               setupReopenedBy: null,
-              currentPhase: 'goal-setting',
               setupPct: 100,
               status: 'Active',
               statusBadgeClass: 'badge-green',

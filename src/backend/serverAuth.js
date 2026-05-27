@@ -68,3 +68,16 @@ export async function suggestOrganizations(query) {
     query: String(query || '').trim(),
   });
 }
+
+export async function revokeEmployeeSessions({ organizationKey = '', employees = [] } = {}) {
+  return invokeAuthFunction({
+    action: 'revoke-employee-sessions',
+    organizationKey: String(organizationKey || '').trim(),
+    employees: Array.isArray(employees)
+      ? employees.map((employee) => ({
+          empCode: String(employee?.empCode || '').trim(),
+          email: String(employee?.email || '').trim(),
+        }))
+      : [],
+  });
+}

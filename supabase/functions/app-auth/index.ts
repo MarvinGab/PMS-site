@@ -1005,6 +1005,37 @@ Deno.serve(async (req: Request) => {
     return json(200, { ok: true, session: session.payload })
   }
 
+  if (action === 'revoke-employee-sessions') {
+    const token = String(body.serverSessionToken || '').trim()
+    const organizationKey = String(body.organizationKey || '').trim()
+    const employees = Array.isArray(body.employees) ? body.employees as Array<Record<string, unknown>> : []
+    if (!token) return json(401, { ok: false, error: 'serverSessionToken is required.' })
+    if (!organizationKey) return json(400, { ok: false, error: 'organizationKey is required.' })
+    const session = await inspectSession(adminClient, token)
+    if (!session.ok) return json(403, { ok: false, error: session.error })
+    const actor = session.payload as Record<string, unknown>
+    const actorRole = String(actor.role || '')
+    if (actorRole !== 'super-admin' && actorRole !== 'hr-admin') {
+      return json(403, { ok: false, error: 'This session is not allowed to reset employee sessions.' })
+    }
+    if (actorRole !== 'super-admin' && String(actor.orgKey || '') !== organizationKey) {
+      return json(403, { ok: false, error: 'This session is not allowed to reset another organization.' })
+    }
+
+    let revoked = 0
+    for (const employee of employees) {
+      const empCode = normalizeCode(employee?.empCode)
+      const email = normalizeLower(employee?.email)
+      if (!empCode && !email) continue
+      revoked += await revokeUserSessions(adminClient, { orgKey: organizationKey, empCode, email })
+    }
+    await logAudit(adminClient, organizationKey, 'employee-sessions-revoked', {
+      count: employees.length,
+      revoked,
+    })
+    return json(200, { ok: true, revoked })
+  }
+
   if (action === 'suggest-orgs') {
     const query = String(body.query || '').trim()
     if (query.length < 2) return json(200, { ok: true, results: [] })
