@@ -975,9 +975,9 @@ function ModuleOverview({ employees, groups, orgName, congratsDismissed, onDismi
 /* ── Employee Status ────────────────────────────────────────── */
 function LoginStatusPill({ status }) {
   const map = {
-    permanent: { label: 'Active',          color: '#15803D', bg: '#F0FDF4', border: '#BBF7D0' },
-    temp:      { label: 'Setup pending',   color: '#BE185D', bg: '#FDF2F8', border: '#FBCFE8' },
-    none:      { label: 'Not logged in',  color: '#64748B', bg: '#F8FAFC', border: '#E2E8F0' },
+    permanent: { label: 'Logged in',       color: '#15803D', bg: '#F0FDF4', border: '#BBF7D0' },
+    temp:      { label: 'Not logged in',   color: '#BE185D', bg: '#FDF2F8', border: '#FBCFE8' },
+    none:      { label: 'Not logged in',   color: '#64748B', bg: '#F8FAFC', border: '#E2E8F0' },
   };
   const s = map[status] || map.none;
   return (
@@ -1040,9 +1040,9 @@ async function downloadEmpStatusExcel({ employees, credentials, workflow, orgNam
 
   const loginStatusLabel = (code, emp = null) => {
     const cred = credentials[code] || credentials[String(code || '').toLowerCase()];
-    if (!cred && emp?._pmsSetupPending) return 'Setup pending';
+    if (!cred && emp?._pmsSetupPending) return 'Not logged in';
     if (!cred) return 'Not logged in';
-    return cred.isTemp ? 'Setup pending' : 'Active';
+    return cred.isTemp ? 'Not logged in' : 'Logged in';
   };
 
   employees.forEach((emp, i) => {
@@ -1154,16 +1154,15 @@ function ModuleEmpStatus({ employees, groups, orgKey, org }) {
 
   const loginStatusOptions = useMemo(() => {
     const labels = {
-      permanent: 'Active',
-      temp: 'Setup pending',
-      none: 'Not logged in',
+      permanent: 'Logged in',
+      temp: 'Not logged in',
     };
     const counts = new Map();
     employees.forEach((emp) => {
       const status = getLoginStatus(emp);
       counts.set(status, (counts.get(status) || 0) + 1);
     });
-    return ['permanent', 'temp', 'none']
+    return ['permanent', 'temp']
       .map((id) => ({ id, label: labels[id], count: counts.get(id) || 0 }))
       .filter((item) => item.count > 0);
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1220,7 +1219,7 @@ function ModuleEmpStatus({ employees, groups, orgKey, org }) {
     search.trim()  && `Search = "${search.trim()}"`,
     filterStage    && `Stage = ${EMP_STAGES.find((s) => s.id === filterStage)?.label || filterStage}`,
     filterGroup    && `Group = ${filterGroup}`,
-    filterLogin    && `Status = ${filterLogin === 'permanent' ? 'Active' : filterLogin === 'temp' ? 'Setup pending' : 'Not logged in'}`,
+    filterLogin    && `Status = ${filterLogin === 'permanent' ? 'Logged in' : 'Not logged in'}`,
   ].filter(Boolean);
 
   return (
@@ -3202,7 +3201,7 @@ function ModuleStageControl({ employees, onUpdate, orgKey }) {
 
     // Reset credentials too. This is intentionally stronger than moving an
     // employee back to Goal creation: their current password is invalidated
-    // and the Employee Status module shows Setup pending. Communications can
+    // and the Employee Status module shows Not logged in. Communications can
     // then resend the cycle invite, which rotates and emails a fresh OTP.
     const creds = { ...(await hydrateEmployeeCredentials() || {}) };
     const employeeByCode = new Map();
