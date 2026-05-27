@@ -1979,6 +1979,14 @@ function ModuleComms({ employees, groups, org, config, onUpdate, onConfigPatch, 
   const [templates, setTemplates] = useState(initialTemplates);
   const [previewIndex, setPreviewIndex] = useState(0);
   const hrTeam = useMemo(() => org?.hrTeam || [], [org?.hrTeam]);
+  const employeeByCode = useMemo(() => {
+    const map = new Map();
+    (employees || []).forEach((emp) => {
+      const code = String(emp?.['Employee Code'] || '').trim();
+      if (code) map.set(code.toLowerCase(), emp);
+    });
+    return map;
+  }, [employees]);
 
   // Auto-populate the email-design logo from the org-level brand logo (captured
   // during setup or HR Team page) on first mount. Users can replace or remove it.
@@ -2051,13 +2059,26 @@ function ModuleComms({ employees, groups, org, config, onUpdate, onConfigPatch, 
     }
     if (activeTemplate === 'co-admin-invite' || activeTemplate === 'scoped-hr-invite') {
       const wantedType = activeTemplate === 'co-admin-invite' ? 'co-admin' : 'scoped-hr';
-      const team = hrTeam.filter((m) => m.type === wantedType && String(m.email || '').trim() && !m.isInPMS);
-      const recipients = team.map((m) => ({
-        'Employee Name': m.name || m.email,
-        'Employee Code': m.empCode || m.id || '',
-        'Email ID': m.email,
-        _hrTeamMember: m,
-      }));
+      const team = hrTeam.filter((m) => {
+        if (m.type !== wantedType) return false;
+        if (String(m.email || '').trim()) return true;
+        if (!m.isInPMS) return false;
+        const employee = employeeByCode.get(String(m.empCode || '').trim().toLowerCase());
+        return !!String(resolveEmployeeEmail(employee) || '').trim();
+      });
+      const recipients = team.map((m) => {
+        const employee = m.isInPMS
+          ? employeeByCode.get(String(m.empCode || '').trim().toLowerCase())
+          : null;
+        const email = String(m.email || resolveEmployeeEmail(employee) || '').trim();
+        return {
+          'Employee Name': m.name || employee?.['Employee Name'] || email,
+          'Employee Code': m.empCode || m.id || '',
+          'Email ID': email,
+          _hrTeamMember: m,
+          _linkedEmployee: employee || null,
+        };
+      });
       const label = activeTemplate === 'co-admin-invite' ? 'Co-Admin' : 'Scoped HR';
       return {
         label: `Send ${label} invite to ${recipients.length} member${recipients.length !== 1 ? 's' : ''}`,
@@ -2067,7 +2088,7 @@ function ModuleComms({ employees, groups, org, config, onUpdate, onConfigPatch, 
       };
     }
     return { label: 'Pick a template', disabled: true, recipients: [], kind: 'broadcast' };
-  }, [activeTemplate, employees, hrTeam]);
+  }, [activeTemplate, employees, employeeByCode, hrTeam]);
 
   async function handleSend(overrideRecipients = null) {
     if (sendConfig.disabled || sendState.status === 'sending') return;
@@ -7629,10 +7650,11 @@ function ModuleHRTeam({ org, orgKey, employees, groups, onOrgChange }) {
     if (!formIsInPMS && !formEmail.trim()) { setError('Email is required.'); return; }
     const type = panel;
     let name = formName.trim();
-    const email = formEmail.trim();
+    let email = formEmail.trim();
     if (formIsInPMS) {
       const emp = employees.find((e) => String(e['Employee Code'] || '').trim() === formEmpCode);
       name = emp?.['Employee Name'] || formEmpCode;
+      email = String(resolveEmployeeEmail(emp) || '').trim();
     }
     if (!formIsInPMS) {
       if (hrTeam.find((m) => m.email === email)) { setError('A team member with this email already exists.'); return; }
@@ -7642,7 +7664,7 @@ function ModuleHRTeam({ org, orgKey, employees, groups, onOrgChange }) {
       id: `hrm_${Date.now()}`,
       type,
       name,
-      email: formIsInPMS ? '' : email,
+      email,
       empCode: formIsInPMS ? formEmpCode : null,
       isInPMS: formIsInPMS,
       ...(type === 'scoped-hr' ? {
