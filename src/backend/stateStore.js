@@ -1100,8 +1100,11 @@ export function persistWizardState(orgKey, payload) {
   // see the storage event, and same-tab views would stay stale until reload.
   writeLocalJson(key, payload, { emit: true });
   writeLocalJson(key, payload, { session: true });
-  void writeRemoteState('wizard_state', orgKey, payload);
-  void syncNormalizedWizardState(orgKey, payload);
+  if (!shouldUseSupabase) return Promise.resolve(true);
+  return Promise.all([
+    Promise.resolve(writeRemoteState('wizard_state', orgKey, payload)),
+    Promise.resolve(syncNormalizedWizardState(orgKey, payload)),
+  ]).then((results) => results.every(Boolean));
 }
 
 export function readWorkflowSync(orgKey = '') {

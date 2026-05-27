@@ -350,7 +350,7 @@ function loadWizardConfig(orgKey) {
 }
 function saveWizardConfig(orgKey, newConfig) {
   const base = readWizardStateSync(orgKey) || {};
-  persistWizardState(orgKey, { ...base, config: newConfig });
+  return persistWizardState(orgKey, { ...base, config: newConfig });
 }
 
 const DEFAULT_LIBRARY_SLOT_KEY = '__default__';
@@ -4555,7 +4555,7 @@ function ModuleRoster({ employees, config, onUpdate, orgKey, initialIntent, onIn
     } catch (err) { showToast(err?.message || 'Could not parse file — use .xlsx or .csv'); }
   }
 
-  function applyAdd() {
+  async function applyAdd() {
     if (!addPreview) return;
     const toAdd = addPreview.filter((r) => !r._duplicate);
     const cleanedRows = toAdd.map((row) => {
@@ -4565,12 +4565,16 @@ function ModuleRoster({ employees, config, onUpdate, orgKey, initialIntent, onIn
       return normalizeEmployeeRosterGroup(clean, goalGroups, config?.goalLibraries || []);
     });
     const updated = [...employees, ...cleanedRows];
-    onUpdate(updated);
+    const saved = await Promise.resolve(onUpdate(updated));
+    if (saved === false) {
+      showToast('Could not save employees. Please retry.');
+      return;
+    }
     showToast(`${toAdd.length} employee${toAdd.length !== 1 ? 's' : ''} added`);
     setAddPreview(null);
   }
 
-  function applyManualAdd() {
+  async function applyManualAdd() {
     setManualError('');
     const code = String(manualForm['Employee Code'] || '').trim();
     const name = String(manualForm['Employee Name'] || '').trim();
@@ -4651,7 +4655,11 @@ function ModuleRoster({ employees, config, onUpdate, orgKey, initialIntent, onIn
     }
 
     const additions = (mgrEmp ? [mgrEmp, newEmp] : [newEmp]).map((emp) => normalizeEmployeeRosterGroup(emp, goalGroups, config?.goalLibraries || []));
-    onUpdate([...employees, ...additions]);
+    const saved = await Promise.resolve(onUpdate([...employees, ...additions]));
+    if (saved === false) {
+      setManualError('Could not save this employee. Please retry.');
+      return;
+    }
     showToast(mgrEmp ? `${name} added · manager ${mgrEmp['Employee Name']} also added to PMS` : `${name} added`);
     setManualForm({});
     setShowReportingManager(false);
@@ -4740,7 +4748,7 @@ function ModuleRoster({ employees, config, onUpdate, orgKey, initialIntent, onIn
         const submission = String(n?.submissionCode || '').trim().toLowerCase();
         return !normalized.has(recipient) && !normalized.has(sender) && !normalized.has(submission);
       });
-      saveWorkflowState(orgKey, { submissions: nextSubs, notifications: nextNotifications }, { replace: true });
+      await saveWorkflowState(orgKey, { submissions: nextSubs, notifications: nextNotifications }, { replace: true });
     }
 
     // Hydrate the credential blob from remote before deleting entries.
@@ -4758,7 +4766,7 @@ function ModuleRoster({ employees, config, onUpdate, orgKey, initialIntent, onIn
         changed = true;
       }
     });
-    if (changed) persistEmployeeCredentials(creds);
+    if (changed) await persistEmployeeCredentials(creds);
   }
 
   function openReassignPanel(manager) {
@@ -4822,7 +4830,7 @@ function ModuleRoster({ employees, config, onUpdate, orgKey, initialIntent, onIn
     setReassignError('');
   }
 
-  function applyRemove() {
+  async function applyRemove() {
     const removalSet = new Set(removeSelected.map((code) => String(code || '').trim().toLowerCase()));
     const blocked = selectedRealRemovalRecords.filter((emp) => getManagerBlock(emp, removalSet).blocked);
     if (blocked.length > 0) {
@@ -4833,8 +4841,12 @@ function ModuleRoster({ employees, config, onUpdate, orgKey, initialIntent, onIn
     const before = employees.length;
     const next = employees.filter((e) => !toRemove.has(String(e['Employee Code'] || '').trim().toLowerCase()));
     const removedCount = before - next.length;
-    cleanupRemovedEmployeeData(removeSelected);
-    onUpdate(next);
+    await cleanupRemovedEmployeeData(removeSelected);
+    const saved = await Promise.resolve(onUpdate(next));
+    if (saved === false) {
+      showToast('Could not save employee removal. Please retry.');
+      return;
+    }
     showToast(`${removedCount} employee${removedCount !== 1 ? 's' : ''} removed`);
     setRemoveSelected([]); setRemoveSearch(''); setConfirmRemove(false); setRemoveConfirmText('');
   }
@@ -4871,15 +4883,19 @@ function ModuleRoster({ employees, config, onUpdate, orgKey, initialIntent, onIn
     }
   }
 
-  function applyBulkDelete() {
+  async function applyBulkDelete() {
     const toRemove = new Set(bulkDelPreview.filter((r) => r.found && !r.blocked).map((r) => r.code.toLowerCase()));
     if (toRemove.size === 0) {
       const blockedCount = bulkDelPreview.filter((r) => r.blocked).length;
       showToast(blockedCount > 0 ? 'All matched managers have reportees — reassign first' : 'No matching employees to remove');
       return;
     }
-    cleanupRemovedEmployeeData(Array.from(toRemove));
-    onUpdate(employees.filter((e) => !toRemove.has(String(e['Employee Code'] || '').trim().toLowerCase())));
+    await cleanupRemovedEmployeeData(Array.from(toRemove));
+    const saved = await Promise.resolve(onUpdate(employees.filter((e) => !toRemove.has(String(e['Employee Code'] || '').trim().toLowerCase()))));
+    if (saved === false) {
+      showToast('Could not save employee removal. Please retry.');
+      return;
+    }
     showToast(`${toRemove.size} employee${toRemove.size !== 1 ? 's' : ''} removed`);
     setBulkDelPreview(null); setConfirmBulkDel(false);
   }
@@ -8100,14 +8116,15 @@ export default function HRCycleDashboard() {
     };
   }, [liveEmployees, org?.temporaryPassword, orgKey]);
 
-  function handleEmpUpdate(updated) {
+  async function handleEmpUpdate(updated) {
     const normalized = normalizeEmployeeRosterGroups(updated, groups, config?.goalLibraries || []);
     setLiveEmployees(normalized);
     if (config) {
       const nextConfig = { ...config, employeeUploadData: { ...config.employeeUploadData, employees: normalized } };
       setConfig(nextConfig);
-      saveWizardConfig(orgKey, nextConfig);
+      return saveWizardConfig(orgKey, nextConfig);
     }
+    return false;
   }
 
   function handleConfigPatch(patch) {
