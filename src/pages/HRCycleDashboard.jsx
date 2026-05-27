@@ -1020,8 +1020,9 @@ async function downloadEmpStatusExcel({ employees, credentials, workflow, orgNam
   });
   hRow.height = 20;
 
-  const loginStatusLabel = (code) => {
+  const loginStatusLabel = (code, emp = null) => {
     const cred = credentials[code] || credentials[String(code || '').toLowerCase()];
+    if (!cred && emp?._pmsSetupPending) return 'Setup pending';
     if (!cred) return 'Not logged in';
     return cred.isTemp ? 'Setup pending' : 'Active';
   };
@@ -1040,7 +1041,7 @@ async function downloadEmpStatusExcel({ employees, credentials, workflow, orgNam
       mgrName:    emp['Reporting Manager Name'] || '',
       mgrCode:    emp['Reporting Manager Code'] || '',
       stage,
-      loginStatus: loginStatusLabel(code),
+      loginStatus: loginStatusLabel(code, emp),
       goalsCount:  goals,
       subStatus:   sub.status || 'not started',
     });
@@ -1089,9 +1090,12 @@ function ModuleEmpStatus({ employees, groups, orgKey, org }) {
     return m;
   }, [employees]);
 
-  function getLoginStatus(code) {
-    const c = String(code || '').trim();
+  function getLoginStatus(codeOrEmployee) {
+    const emp = codeOrEmployee && typeof codeOrEmployee === 'object' ? codeOrEmployee : null;
+    const c = String(emp ? emp['Employee Code'] : codeOrEmployee || '').trim();
     const cred = credentials[c] || credentials[c.toLowerCase()];
+    if (cred && !cred.isTemp) return 'permanent';
+    if (emp?._pmsSetupPending) return 'temp';
     if (!cred) return 'none';
     return cred.isTemp ? 'temp' : 'permanent';
   }
@@ -1102,7 +1106,7 @@ function ModuleEmpStatus({ employees, groups, orgKey, org }) {
       const matchSearch = !q || `${e['Employee Name'] || ''} ${e['Employee Code'] || ''}`.toLowerCase().includes(q);
       const matchStage  = !filterStage || getEmpStage(e) === filterStage;
       const matchGroup  = !filterGroup || getEmployeeDisplayGroup(e, '', groups) === filterGroup;
-      const matchLogin  = !filterLogin || getLoginStatus(e['Employee Code']) === filterLogin;
+      const matchLogin  = !filterLogin || getLoginStatus(e) === filterLogin;
       return matchSearch && matchStage && matchGroup && matchLogin;
     });
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1273,9 +1277,9 @@ function ModuleEmpStatus({ employees, groups, orgKey, org }) {
                   <td style={{ padding: '9px 12px' }}>
                     {getEmpStage(emp) === 'exempt'
                       ? <StagePill stageId="exempt" />
-                      : getLoginStatus(code) === 'permanent'
+                      : getLoginStatus(emp) === 'permanent'
                         ? <StagePill stageId={getEmpStage(emp)} />
-                        : <LoginStatusPill status={getLoginStatus(code)} />}
+                        : <LoginStatusPill status={getLoginStatus(emp)} />}
                   </td>
                 </tr>
               );
@@ -3119,34 +3123,51 @@ function ModuleStageControl({ employees, onUpdate, orgKey }) {
       const emp = employeeByCode.get(key);
       if (!key || !emp || emp?._outsidePms) continue;
       const otp = generateSetupResetOtp();
-      const current = creds[key] || {};
-      creds[key] = {
+      const emailKey = String(resolveEmployeeEmail(emp) || '').trim().toLowerCase();
+      const matchingCredentialKeys = new Set([key]);
+      if (emailKey) matchingCredentialKeys.add(emailKey);
+      Object.entries(creds).forEach(([credKey, cred]) => {
+        const credEmpCode = normalizeCodeStr(cred?.empCode);
+        const credEmail = String(cred?.email || '').trim().toLowerCase();
+        if ((credEmpCode && credEmpCode === key) || (emailKey && credEmail === emailKey)) {
+          matchingCredentialKeys.add(credKey);
+        }
+      });
+      const current =
+        creds[key] ||
+        (emailKey ? creds[emailKey] : null) ||
+        [...matchingCredentialKeys].map((credKey) => creds[credKey]).find(Boolean) ||
+        {};
+      const resetCredential = {
         ...current,
         passwordHash: await hashPasswordValue(otp),
         name: String(emp['Employee Name'] || current.name || '').trim(),
-        email: String(resolveEmployeeEmail(emp) || current.email || '').trim().toLowerCase(),
+        email: String(emailKey || current.email || '').trim().toLowerCase(),
         empCode: String(emp['Employee Code'] || current.empCode || '').trim(),
         designation: String(emp.Designation || emp.Role || current.designation || '').trim(),
         managerCode: String(emp['Reporting Manager Code'] || current.managerCode || '').trim(),
         orgKey,
         isTemp: true,
       };
-      delete creds[key].password;
-      delete creds[key].pendingTempPassword;
+      matchingCredentialKeys.forEach((credKey) => {
+        creds[credKey] = { ...(creds[credKey] || {}), ...resetCredential };
+        delete creds[credKey].password;
+        delete creds[credKey].pendingTempPassword;
+      });
       sessionsToRevoke.push({
         empCode: String(emp['Employee Code'] || '').trim(),
-        email: String(resolveEmployeeEmail(emp) || current.email || '').trim().toLowerCase(),
+        email: String(emailKey || current.email || '').trim().toLowerCase(),
       });
       credentialsChanged = true;
     }
-    if (credentialsChanged) persistEmployeeCredentials(creds);
+    if (credentialsChanged) await persistEmployeeCredentials(creds);
     if (sessionsToRevoke.length > 0) {
       void revokeEmployeeSessions({ organizationKey: orgKey, employees: sessionsToRevoke });
     }
 
     // Reset the stage override so each employee starts at Goal Creation again.
-    const updated = employees.map((e) => selected.has(e['Employee Code'])
-      ? { ...e, _pmsStage: 'goal-creation' }
+    const updated = employees.map((e) => resetCodes.has(normalizeCodeStr(e['Employee Code']))
+      ? { ...e, _pmsStage: 'goal-creation', _pmsSetupPending: true }
       : e);
     onUpdate(updated);
 
