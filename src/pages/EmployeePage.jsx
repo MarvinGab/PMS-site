@@ -19,7 +19,6 @@ import {
   subscribeToScopedState,
 } from '../backend/stateStore';
 import { sendCustomBroadcast } from '../backend/emailService';
-import { useCyclePhase } from '../hooks/useCyclePhase';
 
 const EMP_SESSION_KEY = 'zarohr_emp_session';
 const WIZARD_STATE_KEY = 'zarohr_pms_wizard_state_v1';
@@ -1937,21 +1936,10 @@ export default function EmployeePage() {
         : [cachedBrand, ...existing],
     };
   });
-  // The calendar is the source of truth for phases (per
-  // feedback_calendar_is_source_of_truth): derive currentPhase from the
-  // org's stored cycle windows + now() rather than reading a persisted flag
-  // that drifts the moment HR moves a window.
-  const orgForPhase = useMemo(() => {
-    return (appData?.organizationsData || []).find((item) => item.key === (session?.orgKey || '')) || null;
-  }, [appData, session]);
-  const phaseInfo = useCyclePhase(orgForPhase);
   const currentPhase = useMemo(() => {
-    if (phaseInfo.isInGoalCreation || phaseInfo.isInManagerApproval) return 'goal-setting';
-    // Evaluation windows fall through to 'between' until the clean-slate
-    // appraisal flow is built (project_appraisal_clean_slate) — re-emitting
-    // 'self-evaluation' here would re-activate the parked renderer.
-    return 'between';
-  }, [phaseInfo.isInGoalCreation, phaseInfo.isInManagerApproval]);
+    const org = (appData?.organizationsData || []).find((item) => item.key === (session?.orgKey || ''));
+    return org?.currentPhase || 'goal-setting';
+  }, [appData, session]);
   const orgBrand = useMemo(() => {
     const org = (appData?.organizationsData || []).find((item) => item.key === (session?.orgKey || ''));
     const cachedBrand = readOrgBrandCacheSync(session?.orgKey);

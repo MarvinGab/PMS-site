@@ -1243,7 +1243,7 @@ export async function syncEmployeeCredentialsForOrg({ orgKey = '', tempPassword 
 // Rotate each listed employee's OTP and persist the new hash. Returns a map
 // of code → plaintext so the caller can stuff it into the outgoing email.
 // Use this on every send so a resend always supersedes the prior OTP.
-export async function rotateEmployeeOtpsForSend({ orgKey = '', employees = [] } = {}) {
+export async function rotateEmployeeOtpsForSend({ orgKey = '', employees = [], forceResetActive = false } = {}) {
   const normalizedOrgKey = String(orgKey || '').trim();
   if (!normalizedOrgKey) return new Map();
   const list = Array.isArray(employees) ? employees : [];
@@ -1259,22 +1259,43 @@ export async function rotateEmployeeOtpsForSend({ orgKey = '', employees = [] } 
   for (const employee of list) {
     const code = normalizeCode(employee?.['Employee Code']);
     if (!code) continue;
-    const current = existing[code];
-    if (current && !current.isTemp) continue; // user already changed password — don't clobber
+    const email = resolveEmployeeEmail(employee);
+    const emailKey = String(email || '').trim().toLowerCase();
+    const matchingKeys = new Set([code]);
+    if (emailKey) matchingKeys.add(emailKey);
+    Object.entries(existing).forEach(([key, value]) => {
+      const valueCode = normalizeCode(value?.empCode || key);
+      const valueEmail = String(value?.email || '').trim().toLowerCase();
+      const valueOrgKey = String(value?.orgKey || '');
+      if (normalizedOrgKey && valueOrgKey && valueOrgKey !== normalizedOrgKey) return;
+      if ((valueCode && valueCode === code) || (emailKey && valueEmail === emailKey)) {
+        matchingKeys.add(key);
+      }
+    });
+    const current =
+      existing[code] ||
+      (emailKey ? existing[emailKey] : null) ||
+      [...matchingKeys].map((key) => existing[key]).find(Boolean);
+    const hasActivePassword = [...matchingKeys].some((key) => existing[key] && !existing[key].isTemp);
+    if (hasActivePassword && !forceResetActive) continue; // user already changed password — don't clobber
     const otp = generateEmployeeOtp();
     const passwordHash = await hashPasswordValue(otp);
-    existing[code] = {
+    const nextCredential = {
       ...(current || {}),
       passwordHash,
       pendingTempPassword: otp,
       name: String(employee?.['Employee Name'] || current?.name || '').trim(),
-      email: resolveEmployeeEmail(employee) || current?.email || '',
+      email: email || current?.email || '',
       empCode: code,
       designation: String(employee?.Designation || employee?.Role || current?.designation || '').trim(),
       managerCode: normalizeCode(employee?.['Reporting Manager Code'] || current?.managerCode || ''),
       orgKey: normalizedOrgKey,
       isTemp: true,
     };
+    matchingKeys.forEach((key) => {
+      existing[key] = { ...(existing[key] || {}), ...nextCredential };
+      delete existing[key].password;
+    });
     plaintextByCode.set(code, otp);
     changed = true;
   }
@@ -1294,12 +1315,15 @@ export async function clearPendingEmployeeOtps({ orgKey = '', codes = [] } = {})
   let changed = false;
   codes.forEach((rawCode) => {
     const code = normalizeCode(rawCode);
-    const cred = existing[code];
-    if (cred && cred.pendingTempPassword) {
-      const { pendingTempPassword: _drop, ...rest } = cred;
-      existing[code] = rest;
-      changed = true;
-    }
+    Object.entries(existing).forEach(([key, cred]) => {
+      const keyMatches = normalizeCode(key) === code;
+      const codeMatches = normalizeCode(cred?.empCode) === code;
+      if ((keyMatches || codeMatches) && cred?.pendingTempPassword) {
+        const { pendingTempPassword: _drop, ...rest } = cred;
+        existing[key] = rest;
+        changed = true;
+      }
+    });
   });
   if (changed) persistEmployeeCredentials(existing);
 }

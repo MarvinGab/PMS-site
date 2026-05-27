@@ -2098,6 +2098,7 @@ function ModuleComms({ employees, groups, org, config, onUpdate, onConfigPatch, 
         otpByCode = await rotateEmployeeOtpsForSend({
           orgKey: org.key,
           employees: recipientsToSend,
+          forceResetActive: activeTemplate === 'helm-managers',
         });
         cycleLaunchOtpCodes = [...otpByCode.keys()];
         const beforeFilterCount = recipientsToSend.length;
@@ -2110,7 +2111,9 @@ function ModuleComms({ employees, groups, org, config, onUpdate, onConfigPatch, 
           setSendState({
             status: 'failed',
             message: skippedActivePasswordCount > 0
-              ? 'No temporary-password invites sent. Selected recipients already have active passwords.'
+              ? activeTemplate === 'helm-managers'
+                ? 'No Helm Manager invites could be prepared.'
+                : 'No temporary-password invites sent. Selected recipients already have active passwords.'
               : 'No temporary-password invites could be prepared.',
           });
           return;
