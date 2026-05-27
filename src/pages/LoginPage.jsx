@@ -13,7 +13,7 @@ import {
   requestPasswordReset,
   confirmPasswordReset,
 } from '../backend/serverAuth';
-import { resolveTenantContext } from '../backend/tenantResolver';
+import { getRequestedWorkspaceSlug, resolveTenantContext } from '../backend/tenantResolver';
 
 const REMEMBER_KEY = 'zaro.login.remembered';
 
@@ -55,6 +55,15 @@ function normalizeWorkspaceInput(value) {
 
 function getWorkspaceSlugFromTenant(tenant) {
   return normalizeWorkspaceInput(tenant?.workspaceSlug || '');
+}
+
+function getWorkspaceSlugFromCurrentUrl() {
+  if (typeof window === 'undefined') return '';
+  return normalizeWorkspaceInput(getRequestedWorkspaceSlug({
+    hostname: window.location.hostname,
+    pathname: window.location.pathname,
+    search: window.location.search,
+  }));
 }
 
 function getScopedRouteUrl(tenant, hash) {
@@ -485,7 +494,17 @@ export default function LoginPage() {
     setLoading(true);
 
     let loginTenant = tenant;
-    let workspaceToken = '';
+    let workspaceToken = getWorkspaceSlugFromCurrentUrl();
+
+    if (!loginTenant?.orgKey && workspaceToken) {
+      const resolved = await resolveTenantContext();
+      if (resolved?.orgKey) {
+        loginTenant = resolved;
+        setTenant(resolved);
+      } else {
+        loginTenant = { workspaceSlug: workspaceToken };
+      }
+    }
 
     // If the user has typed a workspace (either because they're already on
     // the workspace step, or they prefilled it), resolve it to an org now so
@@ -651,7 +670,8 @@ export default function LoginPage() {
       setForgotOpen(true);
       return;
     }
-    if (!workspaceInput.trim()) {
+    const urlWorkspaceToken = getWorkspaceSlugFromCurrentUrl();
+    if (!workspaceInput.trim() && !urlWorkspaceToken) {
       if (step === 'credentials') {
         setStep('workspace');
         return;
@@ -660,7 +680,9 @@ export default function LoginPage() {
       return;
     }
     setLoading(true);
-    const resolved = await resolveWorkspaceForLogin();
+    const resolved = workspaceInput.trim()
+      ? await resolveWorkspaceForLogin()
+      : await resolveTenantContext();
     setLoading(false);
     if (!resolved?.orgKey) {
       setError('Workspace not found. Check the company slug or code from your HR invite.');
@@ -702,7 +724,13 @@ export default function LoginPage() {
             orgKey: pendingEmp.orgKey || '',
           });
           clearEmployeeActiveSection(pendingEmp.orgKey, pendingEmp.empCode);
-          login('employee', { userName: pendingEmp.userName, userEmail: pendingEmail, serverSessionToken });
+          login('employee', {
+            orgKey: pendingEmp.orgKey,
+            userName: pendingEmp.userName,
+            userEmail: pendingEmail,
+            empCode: pendingEmp.empCode,
+            serverSessionToken,
+          });
           const routeUrl = getScopedRouteUrl(pendingEmp, 'employee');
           if (routeUrl.startsWith('#')) window.location.hash = '#employee';
           else window.location.assign(routeUrl);

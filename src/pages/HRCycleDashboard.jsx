@@ -25,6 +25,7 @@ import { sendCustomBroadcast } from '../backend/emailService';
 import { shouldUseSupabase } from '../backend/config';
 import { supabase } from '../backend/supabaseClient';
 import { hashPasswordValue } from '../backend/passwordCrypto';
+import { revokeEmployeeSessions } from '../backend/serverAuth';
 import { logAuditEvent } from '../backend/auditLog';
 import { uploadBrandAsset, uploadEmailLogoAsset, ensureDefaultZaroLogoUrl } from '../backend/brandAssetStorage';
 import {
@@ -67,7 +68,17 @@ function loadWorkflowState(orgKey) {
 }
 function saveWorkflowState(orgKey, wf, options = {}) {
   if (!orgKey) return;
-  persistWorkflow(orgKey, wf, options);
+  return persistWorkflow(orgKey, wf, options);
+}
+
+function generateSetupResetOtp() {
+  const bytes = new Uint8Array(4);
+  if (typeof crypto !== 'undefined' && crypto.getRandomValues) {
+    crypto.getRandomValues(bytes);
+    const value = bytes.reduce((acc, byte) => (acc * 256 + byte) >>> 0, 0);
+    return String(value % 1000000).padStart(6, '0');
+  }
+  return String(Math.floor(Math.random() * 1000000)).padStart(6, '0');
 }
 
 function resolveEmployeeEmail(emp = {}) {
@@ -3069,7 +3080,7 @@ function ModuleStageControl({ employees, onUpdate, orgKey }) {
   // (goals, KPIs, status, approvals) and put them back at Goal Creation. The
   // EmployeePage provisioning effect then rebuilds the plan from the current
   // group's library — so this also re-pre-fills the default KRAs.
-  function confirmResetSelectedPMS() {
+  async function confirmResetSelectedPMS() {
     if (!selected.size || !orgKey) return;
     const list = [...selected];
 
@@ -3089,7 +3100,49 @@ function ModuleStageControl({ employees, onUpdate, orgKey }) {
       const sub = normalizeCodeStr(n.submissionCode || '');
       return !sub || !resetCodes.has(sub);
     });
-    saveWorkflowState(orgKey, { submissions: nextSubs, notifications: nextNotifs });
+    await saveWorkflowState(orgKey, { submissions: nextSubs, notifications: nextNotifs }, { replace: true });
+
+    // Reset credentials too. This is intentionally stronger than moving an
+    // employee back to Goal creation: their current password is invalidated
+    // and the Employee Status module shows Setup pending. Communications can
+    // then resend the cycle invite, which rotates and emails a fresh OTP.
+    const creds = { ...(await hydrateEmployeeCredentials() || {}) };
+    const employeeByCode = new Map();
+    employees.forEach((emp) => {
+      const code = normalizeCodeStr(emp['Employee Code']);
+      if (code) employeeByCode.set(code, emp);
+    });
+    let credentialsChanged = false;
+    const sessionsToRevoke = [];
+    for (const code of list) {
+      const key = normalizeCodeStr(code);
+      const emp = employeeByCode.get(key);
+      if (!key || !emp || emp?._outsidePms) continue;
+      const otp = generateSetupResetOtp();
+      const current = creds[key] || {};
+      creds[key] = {
+        ...current,
+        passwordHash: await hashPasswordValue(otp),
+        name: String(emp['Employee Name'] || current.name || '').trim(),
+        email: String(resolveEmployeeEmail(emp) || current.email || '').trim().toLowerCase(),
+        empCode: String(emp['Employee Code'] || current.empCode || '').trim(),
+        designation: String(emp.Designation || emp.Role || current.designation || '').trim(),
+        managerCode: String(emp['Reporting Manager Code'] || current.managerCode || '').trim(),
+        orgKey,
+        isTemp: true,
+      };
+      delete creds[key].password;
+      delete creds[key].pendingTempPassword;
+      sessionsToRevoke.push({
+        empCode: String(emp['Employee Code'] || '').trim(),
+        email: String(resolveEmployeeEmail(emp) || current.email || '').trim().toLowerCase(),
+      });
+      credentialsChanged = true;
+    }
+    if (credentialsChanged) persistEmployeeCredentials(creds);
+    if (sessionsToRevoke.length > 0) {
+      void revokeEmployeeSessions({ organizationKey: orgKey, employees: sessionsToRevoke });
+    }
 
     // Reset the stage override so each employee starts at Goal Creation again.
     const updated = employees.map((e) => selected.has(e['Employee Code'])

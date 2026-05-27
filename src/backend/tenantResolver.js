@@ -33,30 +33,45 @@ function readWorkspacePathSegment(pathname = '') {
   return candidate;
 }
 
-// Tenant slug now lives entirely in the URL path (e.g. /trio-infrastructure)
-// or in the subdomain (e.g. trio.zarohr.com). The legacy `?workspace=` query
-// param is intentionally not consulted — removed during the setup-phase
-// touchups so the URL scheme stays single-form and unambiguous.
-export function getRequestedWorkspaceSlug({ hostname, pathname } = {}) {
+function readWorkspaceQueryParam(search = '') {
+  // Backward-compat: old welcome/invite emails and bookmarked links still use
+  // `?workspace=<slug>`. Path/subdomain are preferred, but if neither is
+  // present we honour the query param so those links keep resolving.
+  const raw = String(search || '');
+  if (!raw) return '';
+  try {
+    const params = new URLSearchParams(raw.startsWith('?') ? raw.slice(1) : raw);
+    return normalizeSlug(params.get('workspace') || '');
+  } catch {
+    return '';
+  }
+}
+
+// Tenant slug lives in the URL path (e.g. /trio-infrastructure) or the
+// subdomain (e.g. trio.zarohr.com). The legacy `?workspace=` query param is
+// also accepted as a fallback so older invite links keep working.
+export function getRequestedWorkspaceSlug({ hostname, pathname, search } = {}) {
   const host = normalizeHost(hostname || (typeof window !== 'undefined' ? window.location.hostname : ''));
   const path = pathname || (typeof window !== 'undefined' ? window.location.pathname : '');
+  const querySearch = search ?? (typeof window !== 'undefined' ? window.location.search : '');
   const pathSlug = readWorkspacePathSegment(path);
+  const querySlug = readWorkspaceQueryParam(querySearch);
 
   if (!host || isLocalHost(host)) {
-    return pathSlug;
+    return pathSlug || querySlug;
   }
 
   if (isPlatformHost(host)) {
-    return pathSlug;
+    return pathSlug || querySlug;
   }
 
   if (host.endsWith('.zarohr.com')) {
     const prefix = host.slice(0, -'.zarohr.com'.length);
     if (prefix && prefix !== 'www') return normalizeSlug(prefix);
-    return pathSlug;
+    return pathSlug || querySlug;
   }
 
-  return pathSlug;
+  return pathSlug || querySlug;
 }
 
 function matchOrgByWorkspace(org, { slug, hostname }) {

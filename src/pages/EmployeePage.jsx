@@ -19,6 +19,7 @@ import {
   subscribeToScopedState,
 } from '../backend/stateStore';
 import { sendCustomBroadcast } from '../backend/emailService';
+import { useCyclePhase } from '../hooks/useCyclePhase';
 
 const EMP_SESSION_KEY = 'zarohr_emp_session';
 const WIZARD_STATE_KEY = 'zarohr_pms_wizard_state_v1';
@@ -268,21 +269,6 @@ function loadSession() {
     return readEmployeeSessionSync();
   } catch {
     return null;
-  }
-}
-
-function loadCurrentPhase(orgKey) {
-  try {
-    const data = readAppDataSync();
-    if (!data) return 'goal-setting';
-    const org = (data.organizationsData || []).find((item) => item.key === orgKey);
-    const stored = org?.currentPhase || 'goal-setting';
-    // With rating disabled, rating-only phases collapse back to goal-setting so the employee
-    // page never tries to render rating surfaces even if the admin flipped the phase earlier.
-    if (!RATING_ENABLED && stored !== 'goal-setting' && stored !== 'mid-year-review') return 'goal-setting';
-    return stored;
-  } catch {
-    return 'goal-setting';
   }
 }
 
@@ -1955,12 +1941,21 @@ export default function EmployeePage() {
         : [cachedBrand, ...existing],
     };
   });
-  const currentPhase = useMemo(() => {
-    const org = (appData?.organizationsData || []).find((item) => item.key === (session?.orgKey || ''));
-    const stored = org?.currentPhase || 'goal-setting';
-    if (!RATING_ENABLED && stored !== 'goal-setting' && stored !== 'mid-year-review') return 'goal-setting';
-    return stored;
+  // The calendar is the source of truth for phases (per
+  // feedback_calendar_is_source_of_truth): derive currentPhase from the
+  // org's stored cycle windows + now() rather than reading a persisted flag
+  // that drifts the moment HR moves a window.
+  const orgForPhase = useMemo(() => {
+    return (appData?.organizationsData || []).find((item) => item.key === (session?.orgKey || '')) || null;
   }, [appData, session]);
+  const phaseInfo = useCyclePhase(orgForPhase);
+  const currentPhase = useMemo(() => {
+    if (phaseInfo.isInGoalCreation || phaseInfo.isInManagerApproval) return 'goal-setting';
+    // Evaluation windows fall through to 'between' until the clean-slate
+    // appraisal flow is built (project_appraisal_clean_slate) — re-emitting
+    // 'self-evaluation' here would re-activate the parked renderer.
+    return 'between';
+  }, [phaseInfo.isInGoalCreation, phaseInfo.isInManagerApproval]);
   const orgBrand = useMemo(() => {
     const org = (appData?.organizationsData || []).find((item) => item.key === (session?.orgKey || ''));
     const cachedBrand = readOrgBrandCacheSync(session?.orgKey);

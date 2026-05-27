@@ -466,10 +466,11 @@ async function requireAuthorizedSession(
     return { ok: false, error: 'Server session has expired.' }
   }
   const role = String(payload.role || '')
-  if (role !== 'super-admin' && role !== 'hr-admin' && role !== 'employee') {
+  const isEmployeeSession = role === 'employee' || role === 'manager'
+  if (role !== 'super-admin' && role !== 'hr-admin' && !isEmployeeSession) {
     return { ok: false, error: 'This session is not allowed to send email.' }
   }
-  if (role === 'employee') {
+  if (isEmployeeSession) {
     if (String(payload.orgKey || '') !== organizationKey) {
       return { ok: false, error: 'This session is not allowed to send mail for another organization.' }
     }
@@ -894,7 +895,7 @@ async function isAllowedRecipientForActor(
   actor: Record<string, unknown> | null,
 ) {
   const role = String(actor?.role || '')
-  if (role !== 'employee') return await isAllowedRecipient(client, org, message)
+  if (role !== 'employee' && role !== 'manager') return await isAllowedRecipient(client, org, message)
 
   if (message.type !== 'custom-broadcast') return false
   const recipientEmail = normalizeEmail(message.recipientEmail)
