@@ -1319,7 +1319,7 @@ export async function hydrateEmployeeCredentials() {
 export function persistEmployeeCredentials(payload) {
   const next = payload && typeof payload === 'object' ? payload : {};
   writeLocalJson(EMP_CREDENTIALS_KEY, next);
-  void writeRemoteState('employee_credentials', '', next);
+  return writeRemoteState('employee_credentials', '', next);
 }
 
 export function readAuthSessionSync() {
