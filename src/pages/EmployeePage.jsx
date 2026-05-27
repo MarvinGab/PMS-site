@@ -334,10 +334,6 @@ function mergeWorkflowForEmployeeEditor(incoming, current, ownKey, protectOwn = 
       ? currentSubs[key]
       : incomingSubs[key];
   });
-  Object.keys(currentSubs).forEach((key) => {
-    if (currentSubs[key] && !submissions[key]) submissions[key] = currentSubs[key];
-  });
-
   const notifications = new Map();
   [...(currentObj.notifications || []), ...(incomingObj.notifications || [])].forEach((notification) => {
     if (!notification?.id) return;
@@ -2057,6 +2053,7 @@ export default function EmployeePage() {
   const syncedWorkflowRawRef = useRef(workflowRaw(loadWorkflow(session?.orgKey || '')));
   const workflowDirtyRef = useRef(false);
   const latestWorkflowRawRef = useRef(syncedWorkflowRawRef.current);
+  const latestWorkflowRef = useRef(loadWorkflow(session?.orgKey || ''));
   const pendingSaveRawRef = useRef('');
   // Save indicator state. 'idle' = no recent edits; 'saving' = a remote
   // write is in flight; 'saved' = last write succeeded (with timestamp);
@@ -2224,6 +2221,7 @@ export default function EmployeePage() {
 
   useEffect(() => {
     latestWorkflowRawRef.current = workflowRaw(workflow);
+    latestWorkflowRef.current = workflow;
   }, [workflow]);
 
   // Step 1 — IMMEDIATE localStorage cache write on every edit. Sync,
@@ -2372,10 +2370,10 @@ export default function EmployeePage() {
     return () => window.removeEventListener('storage', onStorage);
   }, [session?.orgKey]);
 
-  // Cross-device realtime: keep notifications and other users' submissions fresh
-  // without ever replacing the active employee's own draft. Goal editing must
-  // feel local and stable; this screen saves its own submission outward, but
-  // does not let remote workflow snapshots pull that submission backward.
+  // Cross-device realtime: keep notifications and other users' submissions fresh.
+  // If HR resets this employee, the remote workflow intentionally deletes this
+  // submission. Treat that as a forced re-onboarding signal instead of merging
+  // the stale local draft back into remote storage.
   useEffect(() => {
     if (!session?.orgKey) return undefined;
     const orgKey = session.orgKey;
@@ -2387,12 +2385,26 @@ export default function EmployeePage() {
         const incomingRaw = workflowRaw(wf);
         if (incomingRaw === syncedWorkflowRawRef.current) return;
 
+        const currentWorkflow = latestWorkflowRef.current || {};
+        const currentOwnSubmission = currentWorkflow?.submissions?.[employeeCodeKey];
+        const incomingOwnSubmission = wf?.submissions?.[employeeCodeKey];
+        if (employeeCodeKey && currentOwnSubmission && !incomingOwnSubmission) {
+          workflowDirtyRef.current = false;
+          syncedWorkflowRawRef.current = incomingRaw;
+          latestWorkflowRawRef.current = incomingRaw;
+          latestWorkflowRef.current = wf;
+          setWorkflow(wf);
+          logout();
+          return;
+        }
+
         setWorkflow((prev) => {
           const protectOwnSubmission = workflowDirtyRef.current;
           const merged = mergeWorkflowForEmployeeEditor(wf, prev, employeeCodeKey, protectOwnSubmission);
           const mergedRaw = workflowRaw(merged);
           if (mergedRaw === syncedWorkflowRawRef.current) return prev;
           syncedWorkflowRawRef.current = mergedRaw;
+          latestWorkflowRef.current = merged;
           return merged;
         });
       });
@@ -2412,7 +2424,7 @@ export default function EmployeePage() {
       unsubMessages();
       unsubWizard();
     };
-  }, [session?.orgKey]);
+  }, [session?.orgKey, employeeCodeKey]);
 
   // Close the goal-edit modal on Esc.
   useEffect(() => {
