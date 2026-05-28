@@ -240,19 +240,12 @@ export default function CreateOrgPage() {
     const nameOk = Boolean((form.organization_name || '').trim());
     const codeCheck = validateCode(form.organization_code || '');
     const slugCheck = validateSlug(form.workspace_slug || '');
-    const fyOk = Boolean((form.financial_year || '').trim());
-    const isCustom = form.financial_year === 'Custom';
-    const customOk = !isCustom || (form.custom_pms_start_date && form.custom_pms_end_date);
-    const rangeOk  = !isCustom || (form.custom_pms_end_date >= form.custom_pms_start_date);
     if (showErr) {
       if (!nameOk) { setFeedback('Organization name is required.'); return false; }
       if (!codeCheck.ok) { setFeedback(codeCheck.msg); return false; }
       if (!slugCheck.ok) { setFeedback(slugCheck.msg); return false; }
-      if (!fyOk) { setFeedback('Select a PMS calendar option.'); return false; }
-      if (!customOk) { setFeedback('Custom calendar requires both start and end dates.'); return false; }
-      if (!rangeOk)  { setFeedback('End date must be on or after start date.'); return false; }
     }
-    return nameOk && codeCheck.ok && slugCheck.ok && fyOk && customOk && rangeOk;
+    return nameOk && codeCheck.ok && slugCheck.ok;
   }
 
   function validateCalendarStep(showErr = false) {
@@ -512,21 +505,6 @@ export default function CreateOrgPage() {
 }
 
 function StepWorkspace({ isEdit, form, onNameInput, onCodeInput, setField, codeCheck, onSlugInput, slugCheck }) {
-  const isCustom = form.financial_year === 'Custom';
-
-  function formatDatePreview(v) {
-    if (!v) return '';
-    const d = new Date(`${v}T00:00:00`);
-    if (isNaN(d.getTime())) return v;
-    return d.toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' });
-  }
-
-  const calendarOptions = [
-    { id: 'April–March',       icon: '📅', title: 'April – March', desc: 'Indian financial year (Apr 1 – Mar 31)' },
-    { id: 'January–December',  icon: '🗓', title: 'January – December', desc: 'Calendar year (Jan 1 – Dec 31)' },
-    { id: 'Custom',            icon: '⚙️', title: 'Custom', desc: 'Define a custom start and end date' },
-  ];
-
   return (
     <div>
       <div className="ws-card">
@@ -584,48 +562,6 @@ function StepWorkspace({ isEdit, form, onNameInput, onCodeInput, setField, codeC
             Only lowercase letters, numbers, and hyphens. This identifies the organization inside your PMS site.
           </div>
         </div>
-      </div>
-
-      <div className="ws-card">
-        <div className="ws-card-title">PMS Calendar</div>
-        <div className="calendar-choice-grid">
-          {calendarOptions.map(opt => (
-            <div
-              key={opt.id}
-              className={`calendar-choice${form.financial_year === opt.id ? ' selected' : ''}`}
-              onClick={() => setField('financial_year', opt.id)}
-            >
-              <div className="calendar-choice-badge">{opt.icon}</div>
-              <div className="calendar-choice-title">{opt.title}</div>
-              <div className="calendar-choice-desc">{opt.desc}</div>
-              <div className="calendar-choice-check">✓</div>
-            </div>
-          ))}
-        </div>
-
-        {isCustom && (
-          <div className="calendar-custom-panel">
-            <div className="calendar-custom-head">Custom Date Range</div>
-            <div className="calendar-custom-sub">Set your organization's fiscal year start and end dates.</div>
-            <div className="wiz-grid">
-              <div className="form-group">
-                <label className="lbl">Start Date</label>
-                <input type="date" value={form.custom_pms_start_date || ''}
-                  onChange={e => setField('custom_pms_start_date', e.target.value)} />
-              </div>
-              <div className="form-group">
-                <label className="lbl">End Date</label>
-                <input type="date" value={form.custom_pms_end_date || ''}
-                  onChange={e => setField('custom_pms_end_date', e.target.value)} />
-              </div>
-            </div>
-            {form.custom_pms_start_date && form.custom_pms_end_date && (
-              <div className="calendar-range-preview">
-                📆 {formatDatePreview(form.custom_pms_start_date)} → {formatDatePreview(form.custom_pms_end_date)}
-              </div>
-            )}
-          </div>
-        )}
       </div>
 
     </div>
