@@ -21,7 +21,7 @@ function getNavSteps(config) {
       ...(hasBscPrefill ? [{ id: 'prefill_data', label: 'Pre-fill Data', desc: 'Upload pre-assigned KRAs/KPIs' }] : []),
       ...(hasBscLibraries ? [{ id: 'goal_libraries', label: 'Goal Libraries', desc: 'Build or upload KRA libraries' }] : []),
       { id: 'limits',         label: 'Goal Limits',           desc: 'KRA/KPI count & weight rules' },
-      { id: 'targets',        label: 'Targets & Auto-Rating', desc: 'Achievement mapping' },
+      { id: 'targets',        label: 'Targets', desc: 'Types, level & caps' },
       { id: 'emp_settings',   label: 'Employee Settings',     desc: 'Manager hierarchy & email rules' },
       { id: 'upload',         label: 'Employee Upload',       desc: 'Upload employees, managers & routing' },
       { id: 'summary',        label: 'Summary & Launch',      desc: 'Review & go live' },
@@ -35,7 +35,7 @@ function getNavSteps(config) {
       ...(hasBscPrefill ? [{ id: 'prefill_data', label: 'Pre-fill Data', desc: 'Upload pre-assigned KRAs/KPIs' }] : []),
       ...(hasBscLibraries ? [{ id: 'goal_libraries', label: 'Goal Libraries', desc: 'Build or upload KRA libraries' }] : []),
       { id: 'limits',         label: 'Goal Limits',           desc: 'KRA/KPI count & weight rules' },
-      { id: 'targets',        label: 'Targets & Auto-Rating', desc: 'Achievement mapping' },
+      { id: 'targets',        label: 'Targets', desc: 'Types, level & caps' },
       { id: 'emp_settings',   label: 'Employee Settings',     desc: 'Manager hierarchy & email rules' },
       { id: 'upload',         label: 'Employee Upload',       desc: 'Upload employees, managers & routing' },
       { id: 'summary',        label: 'Summary & Launch',      desc: 'Review & go live' },
@@ -3416,7 +3416,7 @@ function getGroupResult(group) {
   return null;
 }
 
-function GroupStrategyCard({ group, index, totalGroups, onUpdate, onDelete, libraries = [], frameworkId = 'bsc' }) {
+function GroupStrategyCard({ group, index, totalGroups, onUpdate, onDelete, libraries = [], frameworkId = 'bsc', orgTargetsEnabled = false, orgTargetLevel = 'KPI' }) {
   const isOnly = totalGroups === 1;
   const hasNoFilter = !group.segmentAttr && !(group.segmentValues || []).length;
   const canUseGoalLibrary = canUseGroupLibrary(group);
@@ -3669,6 +3669,64 @@ function GroupStrategyCard({ group, index, totalGroups, onUpdate, onDelete, libr
           </div>
         )}
 
+        {/* Target level override — appears when targets are enabled org-wide */}
+        {orgTargetsEnabled && (
+          <div style={{ margin: '0 16px 16px' }}>
+            <div style={S.sectionLabel}>Where does the target live for this group?</div>
+            <div style={{
+              display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12,
+              padding: '10px 14px', borderRadius: 12,
+              border: '1px solid #BFCFFE',
+              background: 'linear-gradient(135deg, #EFF6FF 0%, #DBEAFE 100%)',
+              flexWrap: 'wrap',
+            }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 220 }}>
+                <span style={{ width: 6, height: 22, borderRadius: 3, background: 'linear-gradient(180deg,#3B82F6,#2563EB)', flexShrink: 0 }} />
+                <span style={{ fontSize: 12.5, color: '#1E3A8A', fontWeight: 600 }}>Target level</span>
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                {[
+                  { id: 'inherit', title: `Inherit (${orgTargetLevel})`, hint: 'Use org default' },
+                  { id: 'KPI', title: 'KPI level', hint: 'Per KPI' },
+                  { id: 'KRA', title: 'KRA level', hint: 'Per KRA' },
+                ].map(opt => {
+                  const current = group.targetLevel || 'inherit';
+                  const active = current === opt.id;
+                  return (
+                    <button
+                      key={opt.id}
+                      type="button"
+                      onClick={() => onUpdate({ targetLevel: opt.id })}
+                      style={{
+                        display: 'inline-flex', alignItems: 'center', gap: 8,
+                        padding: '8px 12px', borderRadius: 999, cursor: 'pointer', fontFamily: 'inherit',
+                        border: `1px solid ${active ? '#2563EB' : '#BFCFFE'}`,
+                        background: active ? '#FFFFFF' : 'rgba(255,255,255,0.6)',
+                        color: active ? '#1D4ED8' : '#475569',
+                        boxShadow: active ? '0 1px 3px rgba(37,99,235,0.2)' : 'none',
+                        minHeight: 36, transition: 'all .15s',
+                      }}
+                    >
+                      <span style={{
+                        width: 18, height: 18, borderRadius: '50%',
+                        border: `1.5px solid ${active ? '#2563EB' : '#CBD5E1'}`,
+                        background: active ? '#2563EB' : '#FFFFFF',
+                        color: '#FFFFFF',
+                        display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                        fontSize: 11, fontWeight: 800, flexShrink: 0,
+                      }}>{active ? '✓' : ''}</span>
+                      <span style={{ display: 'flex', alignItems: 'baseline', gap: 6, flexWrap: 'wrap' }}>
+                        <span style={{ fontSize: 12.5, fontWeight: 700 }}>{opt.title}</span>
+                        <span style={{ fontSize: 11.5, color: active ? '#2563EB' : '#94A3B8', fontWeight: 500 }}>{opt.hint}</span>
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* ── Animated Result Strip ── */}
         <style>{`@keyframes grpResultIn{from{opacity:0;transform:translateY(5px)}to{opacity:1;transform:translateY(0)}}`}</style>
         {result && (
@@ -3750,6 +3808,8 @@ function StepGroups({ config, update }) {
           onDelete={() => removeGroup(group.id)}
           libraries={libraries}
           frameworkId={config.frameworkId}
+          orgTargetsEnabled={config.targetsEnabled !== false}
+          orgTargetLevel={config.targetLevel || 'KPI'}
         />
       ))}
 
@@ -7885,101 +7945,251 @@ function StepLimitsRules({ config, update }) {
 }
 
 /* ── STEP 6: TARGETS ───────────────────────────────────────────────────── */
-function StepTargets({ config, update }) {
-  const exampleKPIs = [
-    { name: 'Revenue generated',   direction: '↑ Higher is better', target: '₹50L',  achievement: '₹58L', score: '5 — Outstanding (116%)' },
-    { name: 'Customer complaints', direction: '↓ Lower is better',  target: '≤5',    achievement: '3',    score: '5 — Outstanding (40% below)' },
-    { name: 'Code defect rate',    direction: '↓ Lower is better',  target: '≤2%',   achievement: '4%',   score: '2 — Below Expectations' },
-  ];
+const DEFAULT_TARGET_TYPES = [
+  { id: 'tt_default_number',     name: 'Number',     unit: '',  isNumeric: true,  hasMin: false, min: null, hasMax: false, max: null,  isDefault: true, hidden: false },
+  { id: 'tt_default_percentage', name: 'Percentage', unit: '%', isNumeric: true,  hasMin: true,  min: 0,    hasMax: true,  max: 100,   isDefault: true, hidden: false },
+  { id: 'tt_default_currency',   name: 'Currency',   unit: '₹', isNumeric: true,  hasMin: false, min: null, hasMax: false, max: null,  isDefault: true, hidden: false },
+  { id: 'tt_default_yesno',      name: 'Yes / No',   unit: '',  isNumeric: false, hasMin: false, min: null, hasMax: false, max: null,  isDefault: true, hidden: false },
+  { id: 'tt_default_text',       name: 'Text',       unit: '',  isNumeric: false, hasMin: false, min: null, hasMax: false, max: null,  isDefault: true, hidden: false },
+];
+
+function StepTargets({ config, update, onOpenGroups }) {
   const targetsOn = config.targetsEnabled !== false;
+  const targetLevel = config.targetLevel || 'KPI';
+
+  // Merge stored types with code defaults — keeps newly added defaults visible
+  // for orgs that customised the list before this default existed.
+  const stored = Array.isArray(config.targetTypes) ? config.targetTypes : [];
+  const storedById = Object.fromEntries(stored.map(t => [t.id, t]));
+  const mergedDefaults = DEFAULT_TARGET_TYPES.map(d => storedById[d.id] ? { ...d, ...storedById[d.id], isDefault: true } : d);
+  const customs = stored.filter(t => !DEFAULT_TARGET_TYPES.some(d => d.id === t.id));
+  const types = [...mergedDefaults, ...customs];
+
+  const setTypes = (next) => update('targetTypes', next);
+  const patchType = (id, patch) => setTypes(types.map(t => t.id === id ? { ...t, ...patch } : t));
+  const toggleHidden = (id) => patchType(id, { hidden: !types.find(t => t.id === id)?.hidden });
+  const removeCustom = (id) => {
+    const t = types.find(x => x.id === id);
+    if (!t || t.isDefault) return;
+    if (!window.confirm(`Remove "${t.name || 'this type'}"? Targets currently using it will need to be reassigned.`)) return;
+    setTypes(types.filter(x => x.id !== id));
+  };
+  const addType = () => setTypes([...types, {
+    id: `tt_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`,
+    name: '', unit: '', isNumeric: true,
+    hasMin: false, min: null, hasMax: false, max: null,
+    isDefault: false, hidden: false,
+  }]);
+
   return (
     <div>
-      <SectionHead title="Target setting & auto-rating" sub="Define how targets work and how achievement maps to ratings." />
+      <SectionHead title="Targets" sub="Enable targets and define the types employees can pick." />
+
       <Card>
         <CardHead title="Targets module" />
         <CardBody>
           <TogRow
-            label="Use targets & auto-rating for this organization"
-            desc="When off, target/achievement fields are hidden across the app and ratings stay fully manual. Existing target data is preserved."
+            label="Use targets for this organization"
+            desc="When off, target / achievement fields hide everywhere. Existing target data is preserved."
             last
             on={targetsOn}
             onChange={(v) => update('targetsEnabled', v)}
           />
         </CardBody>
       </Card>
+
       {!targetsOn && (
         <Banner type="blue">
           <span>ℹ️</span>
-          <span>Targets are turned off. Goal cards and reports will not show target / achievement / auto-rating fields. Turn the toggle above back on to use them again.</span>
+          <span>Targets are off. Goal cards and reports will hide all target / achievement fields. Turn the toggle above back on to use them again.</span>
         </Banner>
       )}
+
       {targetsOn && (
-      <>
-        <Banner type="blue">
-          <span>🔧</span>
-          <span>The detailed target / auto-rating configuration below is a preview — these fields aren't wired up yet. The master toggle above is the only setting that actually takes effect right now.</span>
-        </Banner>
-        {/* Preview-only section: visually present so the eventual shape is
-            clear, but rendered with reduced opacity and pointer-events:none
-            so nothing inside can be clicked or edited until it's wired. */}
-        <div style={{ opacity: 0.5, pointerEvents: 'none', userSelect: 'none', filter: 'grayscale(35%)' }} aria-disabled="true">
-        <Card>
-          <CardHead title="Target configuration (coming soon)" />
-          <CardBody>
-            <Grid3>
-              <Field label="Target entry by">
-                <select style={selectStyle} disabled><option>Manager sets targets</option><option>Employee proposes, manager approves</option><option>HR pre-loads targets</option><option>Auto-fetched from system</option></select>
-              </Field>
-              <Field label="Target type allowed">
-                <select style={selectStyle} disabled><option>Numeric only</option><option>Percentage only</option><option>Numeric + Percentage</option><option>All — numeric, %, currency, text</option></select>
-              </Field>
-              <Field label="Achievement entry by">
-                <select style={selectStyle} disabled><option>Employee enters achievement</option><option>Manager enters achievement</option><option>Auto-fetched from system</option><option>Both — employee + manager verify</option></select>
-              </Field>
-            </Grid3>
-            <Banner type="blue"><span>ℹ️</span><span>For each KPI, define whether higher achievement = better (revenue) or lower = better (error rate, attrition). This drives auto-rating calculation.</span></Banner>
-            <div style={{ overflowX: 'auto', marginBottom: 16 }}>
-              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12.5 }}>
-                <thead>
-                  <tr style={{ color: '#9CA3AF', textTransform: 'uppercase', fontSize: 10.5, letterSpacing: '0.05em' }}>
-                    {['KPI Example', 'Direction', 'Target', 'Achievement', 'Auto-rating'].map(h => (
-                      <td key={h} style={{ padding: '6px 10px', borderBottom: '1px solid #F1F3F5', fontWeight: 600 }}>{h}</td>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {exampleKPIs.map((k, i) => (
-                    <tr key={i}>
-                      <td style={{ padding: '8px 10px', borderBottom: '1px solid #F1F3F5', fontWeight: 500 }}>{k.name}</td>
-                      <td style={{ padding: '8px 10px', borderBottom: '1px solid #F1F3F5' }}>
-                        <select style={{ ...selectStyle, width: 'auto', fontSize: 11.5, padding: '3px 7px' }} defaultValue={k.direction} disabled>
-                          <option>↑ Higher is better</option><option>↓ Lower is better</option><option>= Exact target</option>
-                        </select>
-                      </td>
-                      <td style={{ padding: '8px 10px', borderBottom: '1px solid #F1F3F5' }}><input style={{ ...inputStyle, width: 70 }} defaultValue={k.target} disabled /></td>
-                      <td style={{ padding: '8px 10px', borderBottom: '1px solid #F1F3F5' }}><input style={{ ...inputStyle, width: 70 }} defaultValue={k.achievement} disabled /></td>
-                      <td style={{ padding: '8px 10px', borderBottom: '1px solid #F1F3F5' }}>
-                        <span style={{ fontSize: 11, padding: '2px 8px', borderRadius: 20, background: '#F0FDF4', color: '#16A34A', fontWeight: 500 }}>{k.score}</span>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+        <>
+          <Card>
+            <div style={{ padding: '13px 20px', borderBottom: '1px solid #E9EDF2', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+              <div style={{ fontSize: 13.5, fontWeight: 600, color: '#0D1117' }}>Target level</div>
+              {onOpenGroups && (
+                <button
+                  type="button"
+                  onClick={onOpenGroups}
+                  style={{ background: '#fff', border: '1px solid #BFCFFE', color: '#2563EB', borderRadius: 7, padding: '5px 12px', fontSize: 12, fontWeight: 600, cursor: 'pointer', fontFamily: 'inherit' }}
+                >
+                  Advanced: set per group ↗
+                </button>
+              )}
             </div>
-            <div style={{ borderTop: '1px solid #F1F3F5', paddingTop: 14 }}>
-              <div style={{ fontSize: 12, fontWeight: 600, color: '#374151', textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: 12 }}>Auto-rating thresholds (achievement % → score mapping)</div>
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: 12, marginBottom: 14 }}>
-                {[{ label: 'Score 5 — Outstanding', val: '≥ 110%' }, { label: 'Score 4 — Exceeds', val: '90–109%' }, { label: 'Score 3 — Meets', val: '70–89%' }, { label: 'Score 2 — Below', val: '50–69%' }].map(t => (
-                  <Field key={t.label} label={t.label}><input style={inputStyle} defaultValue={t.val} disabled /></Field>
-                ))}
+            <CardBody>
+              <div style={{ fontSize: 12.5, color: '#6B7280', marginBottom: 12 }}>
+                Org-wide default. Groups inherit unless overridden in <strong>Groups &amp; Strategy</strong>.
               </div>
-              <TogRow label="Enable auto-rating from achievement" desc="System auto-suggests rating based on achievement %. Manager can override." on={config.autoRating} onChange={() => {}} />
-              <TogRow label="Allow manager to override auto-rating" desc="Manager can change the system-suggested score with a mandatory comment." last on={config.managerOverrideAuto} onChange={() => {}} />
-            </div>
-          </CardBody>
-        </Card>
-        </div>
-      </>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+                {[
+                  { id: 'KPI', title: 'KPI level', desc: 'One target per KPI inside a KRA. Finer-grained reporting.' },
+                  { id: 'KRA', title: 'KRA level', desc: 'One target per KRA. KPIs stay descriptive. Coarser, simpler.' },
+                ].map(opt => {
+                  const active = targetLevel === opt.id;
+                  return (
+                    <button
+                      key={opt.id}
+                      type="button"
+                      onClick={() => update('targetLevel', opt.id)}
+                      style={{
+                        textAlign: 'left',
+                        padding: '12px 14px',
+                        borderRadius: 10,
+                        border: `1.5px solid ${active ? '#2563EB' : '#E2E8F0'}`,
+                        background: active ? '#EFF6FF' : '#fff',
+                        cursor: 'pointer', fontFamily: 'inherit',
+                        boxShadow: active ? '0 0 0 1px rgba(37,99,235,0.08)' : 'none',
+                        transition: 'border-color .14s ease, background .14s ease, box-shadow .14s ease',
+                      }}
+                    >
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+                        <span style={{
+                          width: 16, height: 16, borderRadius: '50%',
+                          border: `2px solid ${active ? '#2563EB' : '#CBD5E1'}`,
+                          background: active ? '#2563EB' : '#fff',
+                          display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                          color: '#fff', fontSize: 9, fontWeight: 700,
+                        }}>{active ? '✓' : ''}</span>
+                        <div style={{ fontSize: 13, fontWeight: 700, color: active ? '#1D4ED8' : '#0D1117' }}>{opt.title}</div>
+                      </div>
+                      <div style={{ fontSize: 12, color: '#6B7280', lineHeight: 1.45, paddingLeft: 24 }}>{opt.desc}</div>
+                    </button>
+                  );
+                })}
+              </div>
+            </CardBody>
+          </Card>
+
+          <Card>
+            <CardHead title="Target types" />
+            <CardBody>
+              <div style={{ fontSize: 12.5, color: '#6B7280', marginBottom: 12 }}>
+                Shown in the target dropdown when a target is set. Min / max caps apply when that type is chosen.
+              </div>
+
+              <div style={{ overflowX: 'auto' }}>
+                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+                  <thead>
+                    <tr style={{ color: '#9CA3AF', textTransform: 'uppercase', fontSize: 10.5, letterSpacing: '0.05em' }}>
+                      <td style={{ padding: '6px 10px', borderBottom: '1px solid #F1F3F5', fontWeight: 600, width: '28%' }}>Type</td>
+                      <td style={{ padding: '6px 10px', borderBottom: '1px solid #F1F3F5', fontWeight: 600, width: '12%' }}>Unit</td>
+                      <td style={{ padding: '6px 10px', borderBottom: '1px solid #F1F3F5', fontWeight: 600, width: '22%' }}>Min</td>
+                      <td style={{ padding: '6px 10px', borderBottom: '1px solid #F1F3F5', fontWeight: 600, width: '22%' }}>Max</td>
+                      <td style={{ padding: '6px 10px', borderBottom: '1px solid #F1F3F5', fontWeight: 600, width: '16%', textAlign: 'right' }}>Actions</td>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {types.map(t => {
+                      const isHidden = !!t.hidden;
+                      return (
+                        <tr key={t.id} style={{ opacity: isHidden ? 0.45 : 1, transition: 'opacity .15s' }}>
+                          <td style={{ padding: '8px 10px', borderBottom: '1px solid #F1F3F5' }}>
+                            <input
+                              style={{ ...inputStyle, padding: '5px 8px' }}
+                              value={t.name}
+                              placeholder={t.isDefault ? t.name : 'e.g. Units sold'}
+                              onChange={e => patchType(t.id, { name: e.target.value })}
+                            />
+                          </td>
+                          <td style={{ padding: '8px 10px', borderBottom: '1px solid #F1F3F5' }}>
+                            <input
+                              style={{ ...inputStyle, padding: '5px 8px', textAlign: 'center' }}
+                              value={t.unit || ''}
+                              placeholder={t.isNumeric ? '—' : ''}
+                              maxLength={6}
+                              onChange={e => patchType(t.id, { unit: e.target.value })}
+                              disabled={!t.isNumeric}
+                            />
+                          </td>
+                          <td style={{ padding: '8px 10px', borderBottom: '1px solid #F1F3F5' }}>
+                            {t.isNumeric ? (
+                              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                                <input
+                                  type="checkbox"
+                                  checked={!!t.hasMin}
+                                  onChange={e => patchType(t.id, { hasMin: e.target.checked, min: e.target.checked ? (t.min ?? 0) : null })}
+                                />
+                                <input
+                                  type="number"
+                                  style={{ ...inputStyle, padding: '5px 8px', width: 90 }}
+                                  value={t.hasMin && t.min !== null && t.min !== undefined ? t.min : ''}
+                                  placeholder="—"
+                                  disabled={!t.hasMin}
+                                  onChange={e => patchType(t.id, { min: e.target.value === '' ? null : Number(e.target.value) })}
+                                />
+                              </div>
+                            ) : (
+                              <span style={{ color: '#9CA3AF', fontSize: 12 }}>—</span>
+                            )}
+                          </td>
+                          <td style={{ padding: '8px 10px', borderBottom: '1px solid #F1F3F5' }}>
+                            {t.isNumeric ? (
+                              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                                <input
+                                  type="checkbox"
+                                  checked={!!t.hasMax}
+                                  onChange={e => patchType(t.id, { hasMax: e.target.checked, max: e.target.checked ? (t.max ?? 100) : null })}
+                                />
+                                <input
+                                  type="number"
+                                  style={{ ...inputStyle, padding: '5px 8px', width: 90 }}
+                                  value={t.hasMax && t.max !== null && t.max !== undefined ? t.max : ''}
+                                  placeholder="—"
+                                  disabled={!t.hasMax}
+                                  onChange={e => patchType(t.id, { max: e.target.value === '' ? null : Number(e.target.value) })}
+                                />
+                              </div>
+                            ) : (
+                              <span style={{ color: '#9CA3AF', fontSize: 12 }}>—</span>
+                            )}
+                          </td>
+                          <td style={{ padding: '8px 10px', borderBottom: '1px solid #F1F3F5', textAlign: 'right' }}>
+                            {t.isDefault ? (
+                              <button
+                                type="button"
+                                onClick={() => toggleHidden(t.id)}
+                                title={isHidden ? 'Show this type in the dropdown' : 'Hide from the dropdown (keeps the type for existing targets)'}
+                                style={{ background: '#fff', border: '1px solid #E2E8F0', color: isHidden ? '#2563EB' : '#64748B', borderRadius: 7, padding: '4px 10px', fontSize: 12, fontWeight: 600, cursor: 'pointer', fontFamily: 'inherit' }}
+                              >
+                                {isHidden ? 'Show' : 'Hide'}
+                              </button>
+                            ) : (
+                              <button
+                                type="button"
+                                onClick={() => removeCustom(t.id)}
+                                title="Remove custom type"
+                                style={{ background: '#fff', border: '1px solid #FCA5A5', color: '#DC2626', borderRadius: 7, padding: '4px 10px', fontSize: 12, fontWeight: 600, cursor: 'pointer', fontFamily: 'inherit' }}
+                              >
+                                Remove
+                              </button>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+
+              <button
+                type="button"
+                onClick={addType}
+                style={{
+                  marginTop: 12, display: 'inline-flex', alignItems: 'center', gap: 6,
+                  padding: '9px 16px', border: '1.5px dashed #93C5FD', borderRadius: 9,
+                  background: '#F0F7FF', color: '#2563EB', fontWeight: 600, fontSize: 12.5,
+                  cursor: 'pointer', fontFamily: 'inherit',
+                }}
+              >
+                + Add type
+              </button>
+            </CardBody>
+          </Card>
+        </>
       )}
     </div>
   );
@@ -9339,6 +9549,7 @@ export default function PMSWizard({ onLaunched, orgKeyOverride, orgNameOverride 
   const [config, setConfig]   = useState(() => persistedState?.config ? normalizeConfig(persistedState.config) : INITIAL);
   const [visited, setVisited] = useState(() => new Set(Array.isArray(persistedState?.visited) ? persistedState.visited : []));
   const [stepNotice, setStepNotice] = useState(null); // { message, type: 'warn'|'info' }
+  const [remoteHydrated, setRemoteHydrated] = useState(false);
   const workspace = useMemo(() => {
     if (orgKeyOverride != null) {
       return { orgKey: orgKeyOverride, orgName: orgNameOverride || orgKeyOverride };
@@ -9347,13 +9558,20 @@ export default function PMSWizard({ onLaunched, orgKeyOverride, orgNameOverride 
   }, [orgKeyOverride, orgNameOverride]);
 
   useEffect(() => {
-    if (!workspace.orgKey) return;
+    setRemoteHydrated(false);
+    if (!workspace.orgKey) {
+      setRemoteHydrated(true);
+      return undefined;
+    }
     let cancelled = false;
     hydrateWizardState(workspace.orgKey).then((remoteState) => {
-      if (cancelled || !remoteState) return;
-      if (typeof remoteState.step === 'number') setStep(remoteState.step);
-      if (remoteState.config) setConfig(normalizeConfig(remoteState.config));
-      if (Array.isArray(remoteState.visited)) setVisited(new Set(remoteState.visited));
+      if (cancelled) return;
+      if (remoteState) {
+        if (typeof remoteState.step === 'number') setStep(remoteState.step);
+        if (remoteState.config) setConfig(normalizeConfig(remoteState.config));
+        if (Array.isArray(remoteState.visited)) setVisited(new Set(remoteState.visited));
+      }
+      setRemoteHydrated(true);
     });
     return () => {
       cancelled = true;
@@ -9565,8 +9783,10 @@ export default function PMSWizard({ onLaunched, orgKeyOverride, orgNameOverride 
         return <StepHierarchy key="hierarchy" config={config} update={update} />;
       case 'scale':
         return <StepScale key="scale" config={config} update={update} />;
-      case 'targets':
-        return <StepTargets key="targets" config={config} update={update} />;
+      case 'targets': {
+        const groupsStepIdx = navSteps.findIndex(s => s.id === 'groups');
+        return <StepTargets key="targets" config={config} update={update} onOpenGroups={groupsStepIdx >= 0 ? () => setStep(groupsStepIdx) : null} />;
+      }
       case 'competencies':
         return <StepCompetencies key="competencies" config={config} update={update} />;
       case 'bellcurve':
@@ -9611,6 +9831,7 @@ export default function PMSWizard({ onLaunched, orgKeyOverride, orgNameOverride 
   }, [config, navSteps, safeStep]);
 
   useEffect(() => {
+    if (!remoteHydrated) return;
     const normalizedStep = Math.min(step, Math.max(navSteps.length - 1, 0));
     if (normalizedStep !== step) {
       setStep(normalizedStep);
@@ -9623,7 +9844,7 @@ export default function PMSWizard({ onLaunched, orgKeyOverride, orgNameOverride 
       visited: [...visited],
       setupProgress: { pct, completedCount, totalSteps },
     });
-  }, [config, navSteps.length, step, visited, workspace.orgKey, pct, completedCount, totalSteps]);
+  }, [config, navSteps.length, step, visited, workspace.orgKey, pct, completedCount, totalSteps, remoteHydrated]);
 
   return (
     <div style={{ display: 'flex', height: '100vh', fontFamily: "'Geist','Inter','Segoe UI',Arial,sans-serif", fontSize: 14, color: '#0D1117', background: '#F8FAFC' }}>
