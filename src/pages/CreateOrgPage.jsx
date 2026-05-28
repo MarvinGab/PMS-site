@@ -403,10 +403,8 @@ export default function CreateOrgPage() {
 
   return (
     <AdminShell title={title} page="organizations">
-      <div className="create-org-shell">
-        <h1 className="create-org-title">{title}</h1>
-        <p className="create-org-sub">{subtitle}</p>
-
+      <div className="create-org-canvas">
+       <div className="create-org-shell">
         {/* Step indicators */}
         <div className="create-org-steps">
           {STEPS.map((label, i) => {
@@ -474,6 +472,7 @@ export default function CreateOrgPage() {
             </button>
           </div>
         </div>
+       </div>
       </div>
     </AdminShell>
   );

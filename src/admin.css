@@ -1000,9 +1000,20 @@ select { cursor: pointer; appearance: none; background-image: url("data:image/sv
 .org-credential code { font-family:'Geist Mono','SFMono-Regular',Consolas,monospace; font-size:13px; color:var(--ink); }
 
 /* ── CREATE ORG ───────────────────────────────────────────────────────────── */
-.create-org-shell { max-width:900px; margin:36px auto 96px; }
-.create-org-title { font-family:'Geist','Segoe UI','Inter',Arial,sans-serif; font-size:34px; line-height:1.1; color:var(--ink); margin:0 0 8px; }
-.create-org-sub { margin:0 0 24px; color:var(--ink-3); font-size:14px; line-height:1.6; }
+/* Dark canvas spans the full page-body, escaping its padding via negative
+   margins. The shell stays at 900px width but the dark background bleeds
+   edge-to-edge for the "cool dark page" feel. */
+.create-org-canvas {
+  margin: -20px -24px -28px;
+  padding: 28px 24px 80px;
+  min-height: calc(100vh - 68px);
+  background:
+    radial-gradient(1200px 600px at 18% -10%, rgba(56, 189, 248, 0.10), transparent 60%),
+    radial-gradient(900px 500px at 100% 0%, rgba(139, 92, 246, 0.10), transparent 60%),
+    linear-gradient(180deg, #0B1220 0%, #0E1A33 100%);
+  color: #E5E7EB;
+}
+.create-org-shell { max-width:900px; margin:0 auto; }
 .create-org-steps { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:10px; margin-bottom:18px; }
 .create-org-step {
   border:1px solid var(--border); background:#fff; border-radius:10px; padding:10px 12px; font-size:12.5px;
@@ -1018,6 +1029,42 @@ select { cursor: pointer; appearance: none; background-image: url("data:image/sv
 .create-org-step.active .num { background:var(--blue); color:#fff; }
 .create-org-step.done { border-color:#BBF7D0; background:#F0FDF4; color:#15803D; }
 .create-org-step.done .num { background:#16A34A; color:#fff; }
+
+/* Dark-canvas overrides — step pills, feedback, and card framing pop against
+   the slate background. Card stays light so all existing form/input styles
+   render correctly inside. */
+.create-org-canvas .create-org-step {
+  background: rgba(255, 255, 255, 0.04);
+  border-color: rgba(255, 255, 255, 0.08);
+  color: #94A3B8;
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+}
+.create-org-canvas .create-org-step:hover {
+  background: rgba(255, 255, 255, 0.06);
+  border-color: rgba(96, 165, 250, 0.4);
+}
+.create-org-canvas .create-org-step .num {
+  background: rgba(255, 255, 255, 0.1);
+  color: #CBD5E1;
+}
+.create-org-canvas .create-org-step.active {
+  background: rgba(59, 130, 246, 0.14);
+  border-color: rgba(96, 165, 250, 0.55);
+  color: #BFDBFE;
+}
+.create-org-canvas .create-org-step.active .num { background: #3B82F6; color: #fff; }
+.create-org-canvas .create-org-step.done {
+  background: rgba(22, 163, 74, 0.12);
+  border-color: rgba(74, 222, 128, 0.45);
+  color: #86EFAC;
+}
+.create-org-canvas .create-org-step.done .num { background: #16A34A; color: #fff; }
+.create-org-canvas .create-org-feedback { color: #FBBF24; }
+.create-org-canvas .create-org-card {
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.35), 0 4px 12px rgba(0, 0, 0, 0.2);
+  border-color: rgba(255, 255, 255, 0.08);
+}
 .create-org-feedback {
   min-height: 20px;
   margin: -6px 0 14px;
