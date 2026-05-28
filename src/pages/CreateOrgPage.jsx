@@ -449,6 +449,7 @@ export default function CreateOrgPage() {
               <StepCalendar
                 form={form}
                 setField={setField}
+                isEdit={isEdit}
               />
             )}
             {step === 2 && (
@@ -542,7 +543,7 @@ function StepWorkspace({ isEdit, form, onNameInput, onCodeInput, setField, codeC
   );
 }
 
-function StepCalendar({ form, setField }) {
+function StepCalendar({ form, setField, isEdit = false }) {
   const fiscalRange = resolveFiscalRange();
   return (
     <div className="step-pane">
@@ -557,6 +558,7 @@ function StepCalendar({ form, setField }) {
         onChange={(next) => setField('cycle_phase_windows', next)}
         fiscalYearStartsOn={fiscalRange.startsOn}
         fiscalYearEndsOn={fiscalRange.endsOn}
+        skipLiveNotices={!isEdit}
       />
     </div>
   );

@@ -15,6 +15,7 @@ export default function PhaseSettingsEditor({
   fiscalYearStartsOn = '',
   fiscalYearEndsOn   = '',
   disabled = false,
+  skipLiveNotices = false,
 }) {
   const [draft, setDraft] = useState(value || null);
   const [savedSig, setSavedSig] = useState(() => signature(value));
@@ -32,7 +33,10 @@ export default function PhaseSettingsEditor({
 
   const dirty = signature(draft) !== savedSig;
   const validation = useMemo(() => validateCycleWindows(draft), [draft]);
-  const review = useMemo(() => reviewCycleWindows(draft, new Date()), [draft]);
+  const review = useMemo(
+    () => reviewCycleWindows(draft, new Date(), { skipLiveNotices }),
+    [draft, skipLiveNotices],
+  );
 
   function patch(updater) {
     setDraft((current) => updater(JSON.parse(JSON.stringify(current || {}))));

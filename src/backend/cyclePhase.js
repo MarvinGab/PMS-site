@@ -158,9 +158,13 @@ export function validateCycleWindows(windows) {
 
 // Pre-save sanity notices — non-blocking. Surface to the editor as a hint
 // strip so HR can confirm the choice rather than be silently surprised.
-export function reviewCycleWindows(windows, now) {
+// `options.skipLiveNotices` hides the today-relative warnings (already
+// open / already closed) — useful in the create-org wizard where defaults
+// are seeded and the org isn't even saved yet, so "already open" is noise.
+export function reviewCycleWindows(windows, now, options = {}) {
   const warnings = [];
   if (!windows) return { warnings };
+  const skipLive = !!options.skipLiveNotices;
   const t = asNow(now);
   const today = startOfDay(t.toISOString().slice(0, 10));
 
@@ -169,16 +173,16 @@ export function reviewCycleWindows(windows, now) {
   const evalStart = parseDate(windows.evaluation?.startsOn);
   const evalEnd   = parseDate(windows.evaluation?.endsOn);
 
-  if (goalStart && today && goalStart < today && goalEnd && goalEnd >= today) {
+  if (!skipLive && goalStart && today && goalStart < today && goalEnd && goalEnd >= today) {
     warnings.push('Goal-setting window is already open.');
   }
-  if (goalEnd && today && goalEnd < today) {
+  if (!skipLive && goalEnd && today && goalEnd < today) {
     warnings.push('Goal-setting window has already closed.');
   }
-  if (evalStart && today && evalStart < today && evalEnd && evalEnd >= today) {
+  if (!skipLive && evalStart && today && evalStart < today && evalEnd && evalEnd >= today) {
     warnings.push('Evaluation window is already open.');
   }
-  if (evalEnd && today && evalEnd < today) {
+  if (!skipLive && evalEnd && today && evalEnd < today) {
     warnings.push('Evaluation window has already closed.');
   }
   if (goalEnd && evalStart && evalStart < goalEnd) {
