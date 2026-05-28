@@ -11,26 +11,11 @@ const PMS_MODULES = ['Performance Management'];
 
 const STEPS = ['Workspace Setup', 'Cycle Calendar', 'Admin Access'];
 
-// Resolve the absolute fiscal-year date range from the form's pmsCalendar
-// choice. April-March / January-December map to the next upcoming year so the
-// calendar editor has sensible defaults to work from. Custom uses the user's
-// explicit dates.
-function resolveFiscalRange(form) {
-  const choice = String(form?.financial_year || '').trim();
-  if (choice === 'Custom') {
-    return {
-      startsOn: String(form?.custom_pms_start_date || ''),
-      endsOn:   String(form?.custom_pms_end_date   || ''),
-    };
-  }
+// Seed range for the cycle calendar editor — Indian fiscal year of the current
+// calendar year. The admin then drags windows to whatever real dates they want.
+function resolveFiscalRange() {
   const year = new Date().getUTCFullYear();
-  if (/^April[-–]March$/i.test(choice)) {
-    return { startsOn: `${year}-04-01`, endsOn: `${year + 1}-03-31` };
-  }
-  if (/^January[-–]December$/i.test(choice) || /^Jan[-–]Dec$/i.test(choice)) {
-    return { startsOn: `${year}-01-01`, endsOn: `${year}-12-31` };
-  }
-  return { startsOn: '', endsOn: '' };
+  return { startsOn: `${year}-04-01`, endsOn: `${year + 1}-03-31` };
 }
 
 function buildEditSnapshot(form, modules) {
@@ -42,9 +27,6 @@ function buildEditSnapshot(form, modules) {
     organization_name: String(form?.organization_name || '').trim(),
     organization_code: normalizeCode(form?.organization_code || ''),
     workspace_slug: normalizeSlug(form?.workspace_slug || ''),
-    financial_year: String(form?.financial_year || '').trim(),
-    custom_pms_start_date: String(form?.custom_pms_start_date || '').trim(),
-    custom_pms_end_date: String(form?.custom_pms_end_date || '').trim(),
     cycle_phase_windows: form?.cycle_phase_windows || null,
     hr_admin_name: String(form?.hr_admin_name || '').trim(),
     hr_admin_email: String(form?.hr_admin_email || '').trim().toLowerCase(),
@@ -146,15 +128,12 @@ export default function CreateOrgPage() {
   }, [step, form, slugManual, codeManual, isEdit]);
 
   function initForm(org) {
-    if (!org) return { financial_year: 'April–March' };
+    if (!org) return {};
     const s = org.setupFormSnapshot || {};
     return {
       organization_name: s.organization_name || org.name || '',
       organization_code: s.organization_code || normalizeCode(org.orgCode || ''),
       workspace_slug: s.workspace_slug || org.workspaceSlug || '',
-      financial_year: s.financial_year || org.pmsCalendar || 'April–March',
-      custom_pms_start_date: s.custom_pms_start_date || org.customPmsStartDate || '',
-      custom_pms_end_date: s.custom_pms_end_date || org.customPmsEndDate || '',
       // Live `org.cyclePhaseWindows` wins over `setupFormSnapshot` so that
       // HR-admin edits made via HRCycleDashboard show up here instead of being
       // shadowed by the (now-stale) snapshot captured at create-time.
@@ -272,17 +251,15 @@ export default function CreateOrgPage() {
     return adminNameOk && adminEmailOk;
   }
 
-  // Auto-seed the calendar with smart defaults whenever the user reaches the
-  // calendar step without having configured anything yet. Re-seeds if the
-  // fiscal-year choice changes while the calendar is untouched.
+  // Auto-seed the calendar with smart defaults the first time the user
+  // reaches the calendar step. They drag the windows from there.
   useEffect(() => {
     if (step !== 1) return;
     if (form.cycle_phase_windows) return;
-    const range = resolveFiscalRange(form);
-    const defaults = defaultWindowsForFiscalYear(range);
+    const defaults = defaultWindowsForFiscalYear(resolveFiscalRange());
     if (defaults) setForm((prev) => ({ ...prev, cycle_phase_windows: defaults }));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [step, form.financial_year, form.custom_pms_start_date, form.custom_pms_end_date]);
+  }, [step]);
 
   function buildOrg() {
     const orgName = (form.organization_name || '').trim() || 'New Organization';
@@ -316,9 +293,6 @@ export default function CreateOrgPage() {
       statusBadgeClass: existingOrg ? existingOrg.statusBadgeClass : 'badge-amber',
       actionLabel: existingOrg ? existingOrg.actionLabel : 'Continue',
       workspaceSlug: slugRaw,
-      pmsCalendar: form.financial_year || '',
-      customPmsStartDate: form.custom_pms_start_date || '',
-      customPmsEndDate: form.custom_pms_end_date || '',
       cyclePhaseWindows: form.cycle_phase_windows || null,
       // Stamp the last-edit only when the calendar actually changed; preserves
       // an existing stamp when the user just opens edit-mode and clicks Save.
@@ -569,7 +543,7 @@ function StepWorkspace({ isEdit, form, onNameInput, onCodeInput, setField, codeC
 }
 
 function StepCalendar({ form, setField }) {
-  const fiscalRange = resolveFiscalRange(form);
+  const fiscalRange = resolveFiscalRange();
   return (
     <div className="step-pane">
       <div className="step-pane-head" style={{ marginBottom: 16 }}>

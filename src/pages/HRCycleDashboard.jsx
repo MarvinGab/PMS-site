@@ -6440,7 +6440,6 @@ function ModuleConfig({ config, org, onEditSetup, onBrandChange, onConfigPatch }
         <ConfigRow label="Name" value={org.name} />
         <ConfigRow label="Industry" value={org.industry} />
         <ConfigRow label="HR Admin" value={org.hrAdminName} />
-        <ConfigRow label="PMS Calendar" value={org.pmsCalendar} />
         <ConfigRow label="Employees in PMS" value={employees.length} />
       </ConfigSection>
 

@@ -234,28 +234,13 @@ export function findStrandedOverrides(employees, windows, now) {
   return stranded;
 }
 
-// Resolve the absolute fiscal-year date range from the org's pmsCalendar
-// choice. April-March / January-December map to the upcoming year using the
-// current date; Custom uses the explicit dates. Used by both CreateOrgPage
-// (Super Admin wizard) and HRCycleDashboard so the Cycle Calendar editor
-// surfaces the same axis on both sides.
-export function resolveOrgFiscalRange(org) {
-  if (!org || typeof org !== 'object') return { startsOn: '', endsOn: '' };
-  const choice = String(org.pmsCalendar || '').trim();
-  const customStart = String(org.customPmsStartDate || '').trim();
-  const customEnd   = String(org.customPmsEndDate   || '').trim();
-  if (choice === 'Custom' || (customStart && customEnd)) {
-    return { startsOn: customStart, endsOn: customEnd };
-  }
-  const now = new Date();
-  const y = now.getUTCFullYear();
-  if (/^April[-–]March$/i.test(choice)) {
-    return { startsOn: `${y}-04-01`, endsOn: `${y + 1}-03-31` };
-  }
-  if (/^January[-–]December$/i.test(choice) || /^Jan[-–]Dec$/i.test(choice)) {
-    return { startsOn: `${y}-01-01`, endsOn: `${y}-12-31` };
-  }
-  return { startsOn: customStart, endsOn: customEnd };
+// Default fiscal axis the Cycle Calendar editor seeds itself with — Indian
+// April-March of the current calendar year. The admin can drag the windows
+// to whatever real dates they want from there. Kept exported so HRCycleDashboard
+// can render the same axis.
+export function resolveOrgFiscalRange(/* org */) {
+  const y = new Date().getUTCFullYear();
+  return { startsOn: `${y}-04-01`, endsOn: `${y + 1}-03-31` };
 }
 
 // Build sensible defaults from a fiscal-year date range. Goal-setting takes
