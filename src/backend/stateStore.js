@@ -37,6 +37,22 @@ const ORGANIZATION_SELECT = `
   setup_payload,
   updated_at
 `;
+const BRAND_ASSET_BUCKET = 'brand-assets';
+const ORG_ASSET_FOLDERS = ['org-logos', 'org-hero', 'email-logos', 'misc'];
+const ORG_SCOPED_TABLES = [
+  'goal_library_assignments',
+  'prefill_datasets',
+  'goal_libraries',
+  'goal_workflows',
+  'messages',
+  'notifications',
+  'email_deliveries',
+  'email_smtp_settings',
+  'email_templates',
+  'employees',
+  'pms_configs',
+  'organization_branding',
+];
 
 function warnOnce(scope, error) {
   const key = `${scope}:${error?.message || 'unknown'}`;
@@ -91,6 +107,16 @@ function writeOrgBrandCacheFromOrganizations(organizations) {
     const brand = extractOrgBrand(org);
     if (brand.key) next[brand.key] = brand;
   });
+  writeLocalJson(ORG_BRAND_CACHE_KEY, next);
+}
+
+function removeOrgBrandCache(orgKey = '') {
+  const key = String(orgKey || '').trim();
+  if (!key) return;
+  const current = readLocalJson(ORG_BRAND_CACHE_KEY, {}) || {};
+  if (!Object.prototype.hasOwnProperty.call(current, key)) return;
+  const next = { ...current };
+  delete next[key];
   writeLocalJson(ORG_BRAND_CACHE_KEY, next);
 }
 
@@ -481,6 +507,52 @@ async function replacePrefillDatasets(organizationId, config, libraryRows) {
   }
 }
 
+// Fallback roster hydration: when wizard_state doesn't carry
+// employeeUploadData.employees (e.g. an old row that was persisted before the
+// upload step, or a row that was overwritten by a partial save), read directly
+// from the canonical `employees` table. `raw_payload` round-trips the original
+// employee object that was stored at upload time.
+export async function hydrateEmployeesFromTable(orgKey = '') {
+  if (!shouldUseSupabase || !supabase || !orgKey) return null;
+  try {
+    const orgIdentity = await resolveOrganizationIdentity(orgKey);
+    if (!orgIdentity?.id) return null;
+    const { data, error } = await supabase
+      .from('employees')
+      .select('raw_payload')
+      .eq('organization_id', orgIdentity.id);
+    if (error) throw error;
+    if (!Array.isArray(data)) return null;
+    return data.map((row) => row?.raw_payload).filter(Boolean);
+  } catch (error) {
+    warnOnce(`remote-read:employees-table:${orgKey}`, error);
+    return null;
+  }
+}
+
+// Canonical post-launch config lives in `pms_configs.config` — written on every
+// wizard save via syncNormalizedWizardState. Read it back when the
+// `app_state.wizard_state` row is missing or partial (e.g. a fresh machine,
+// a partial save, or a stale shell), so the wizard / dashboard don't render
+// as a blank shell when the data is actually intact one row over.
+export async function hydratePmsConfigFromTable(orgKey = '') {
+  if (!shouldUseSupabase || !supabase || !orgKey) return null;
+  try {
+    const orgIdentity = await resolveOrganizationIdentity(orgKey);
+    if (!orgIdentity?.id) return null;
+    const { data, error } = await supabase
+      .from('pms_configs')
+      .select('config')
+      .eq('organization_id', orgIdentity.id)
+      .maybeSingle();
+    if (error) throw error;
+    return data?.config || null;
+  } catch (error) {
+    warnOnce(`remote-read:pms-configs:${orgKey}`, error);
+    return null;
+  }
+}
+
 async function replaceEmployees(organizationId, config) {
   if (!shouldUseSupabase || !supabase || !organizationId) return true;
   const rows = buildEmployeeRows(organizationId, config);
@@ -840,6 +912,70 @@ async function deleteOrganizationsRemote(orgKeys = []) {
   }
 }
 
+function getSafeStorageOrgKey(orgKey = '') {
+  return String(orgKey || 'global').replace(/[^a-zA-Z0-9_-]/g, '_') || 'global';
+}
+
+async function deleteStorageFolder(prefix = '') {
+  if (!shouldUseSupabase || !supabase || !prefix) return true;
+  try {
+    const { data, error } = await supabase.storage.from(BRAND_ASSET_BUCKET).list(prefix, { limit: 1000 });
+    if (error) throw error;
+    const paths = (Array.isArray(data) ? data : [])
+      .map((item) => item?.name ? `${prefix}/${item.name}` : '')
+      .filter(Boolean);
+    if (paths.length === 0) return true;
+    const { error: removeError } = await supabase.storage.from(BRAND_ASSET_BUCKET).remove(paths);
+    if (removeError) throw removeError;
+    return true;
+  } catch (error) {
+    warnOnce(`storage-delete:${prefix}`, error);
+    return false;
+  }
+}
+
+async function deleteOrgStorageAssetsRemote(orgKey = '') {
+  const safeOrg = getSafeStorageOrgKey(orgKey);
+  if (!safeOrg) return true;
+  const results = await Promise.all(
+    ORG_ASSET_FOLDERS.map((folder) => deleteStorageFolder(`${folder}/${safeOrg}`))
+  );
+  return results.every(Boolean);
+}
+
+async function deleteOrgScopedRowsRemote(organizationId = '', orgKey = '') {
+  if (!shouldUseSupabase || !supabase) return true;
+  try {
+    if (organizationId) {
+      for (const table of ORG_SCOPED_TABLES) {
+        const { error } = await supabase
+          .from(table)
+          .delete()
+          .eq('organization_id', organizationId);
+        if (error) throw error;
+      }
+    }
+
+    if (orgKey) {
+      const { error: auditError } = await supabase
+        .from('app_audit_logs')
+        .delete()
+        .eq('org_key', orgKey);
+      if (auditError) throw auditError;
+
+      const { error: ownerTemplateError } = await supabase
+        .from('email_templates')
+        .delete()
+        .eq('owner_key', orgKey);
+      if (ownerTemplateError) throw ownerTemplateError;
+    }
+    return true;
+  } catch (error) {
+    warnOnce(`remote-delete:org-scoped-rows:${orgKey || organizationId}`, error);
+    return false;
+  }
+}
+
 async function deleteOrgScopedStateRemote(orgKeys = []) {
   if (!shouldUseSupabase || !supabase) return true;
   const keys = (Array.isArray(orgKeys) ? orgKeys : []).map((key) => String(key || '').trim()).filter(Boolean);
@@ -853,6 +989,32 @@ async function deleteOrgScopedStateRemote(orgKeys = []) {
     return true;
   } catch (error) {
     warnOnce('remote-delete:app_state', error);
+    return false;
+  }
+}
+
+async function deleteOrgGlobalStateRemote(orgKey = '') {
+  const key = String(orgKey || '').trim();
+  if (!shouldUseSupabase || !supabase || !key) return true;
+  try {
+    const credentials = await hydrateEmployeeCredentials();
+    if (credentials && typeof credentials === 'object') {
+      const nextCredentials = Object.fromEntries(
+        Object.entries(credentials).filter(([, value]) => value?.orgKey !== key)
+      );
+      if (Object.keys(nextCredentials).length !== Object.keys(credentials).length) {
+        persistEmployeeCredentials(nextCredentials);
+      }
+    }
+
+    const { error } = await supabase
+      .from('app_state')
+      .delete()
+      .contains('payload', { orgKey: key });
+    if (error) throw error;
+    return true;
+  } catch (error) {
+    warnOnce(`remote-delete:global-state:${key}`, error);
     return false;
   }
 }
@@ -983,8 +1145,20 @@ export async function deleteOrganizationRecord(orgKey = '') {
 
   if (!shouldUseSupabase) {
     writeOrganizationsToLocalCache(nextOrgs);
+    removeOrgBrandCache(key);
     return { ok: true };
   }
+
+  const organization = await resolveOrganizationIdentity(key);
+
+  const storageOk = await deleteOrgStorageAssetsRemote(key);
+  if (!storageOk) return { ok: false, error: 'Failed to delete organization assets from storage.' };
+
+  const scopedRowsOk = await deleteOrgScopedRowsRemote(organization?.id || '', key);
+  if (!scopedRowsOk) return { ok: false, error: 'Failed to delete organization data from backend.' };
+
+  const globalStateOk = await deleteOrgGlobalStateRemote(key);
+  if (!globalStateOk) return { ok: false, error: 'Failed to delete organization sessions or credentials from backend.' };
 
   const stateOk = await deleteOrgScopedStateRemote([key]);
   if (!stateOk) return { ok: false, error: 'Failed to delete organization state from backend.' };
@@ -992,6 +1166,7 @@ export async function deleteOrganizationRecord(orgKey = '') {
   const ok = await deleteOrganizationsRemote([key]);
   if (!ok) return { ok: false, error: 'Failed to delete organization from backend.' };
   writeOrganizationsToLocalCache(nextOrgs);
+  removeOrgBrandCache(key);
   return { ok: true };
 }
 
@@ -1002,6 +1177,7 @@ export async function clearOrganizationState(orgKey = '') {
   removeLocalKey(`${GOAL_WORKFLOW_KEY}:${scope}`);
   removeLocalKey(`${MESSAGES_KEY}:${scope}`);
   removeLocalKey(getNormalizedSyncKey(scope));
+  removeOrgBrandCache(orgKey);
 
   // Hydrate before mutating: the local cache may be stale relative to the
   // remote credentials blob (e.g. someone else changed their password since
@@ -1085,6 +1261,26 @@ export async function hydrateWizardState(orgKey = '') {
   const local = readWizardStateSync(orgKey);
   if (!shouldUseSupabase) return local;
   const remote = await readRemoteStateScoped('wizard_state', orgKey);
+
+  // If wizard_state on Supabase lacks a real config (empty row, partial save,
+  // or shell with just `step`), reconstruct from the canonical `pms_configs`
+  // table. The wizard writes here on every save, so it's the most reliable
+  // post-launch source of truth.
+  if (!remote?.config) {
+    const fallbackConfig = await hydratePmsConfigFromTable(orgKey);
+    if (fallbackConfig) {
+      const reconstructed = {
+        step: typeof remote?.step === 'number' ? remote.step : 0,
+        config: fallbackConfig,
+        visited: Array.isArray(remote?.visited) ? remote.visited : [],
+        setupProgress: remote?.setupProgress ?? null,
+      };
+      writeLocalJson(`${WIZARD_STATE_KEY}:${orgKey || 'default'}`, reconstructed);
+      writeLocalJson(`${WIZARD_STATE_KEY}:${orgKey || 'default'}`, reconstructed, { session: true });
+      return reconstructed;
+    }
+  }
+
   if (remote) {
     writeLocalJson(`${WIZARD_STATE_KEY}:${orgKey || 'default'}`, remote);
     writeLocalJson(`${WIZARD_STATE_KEY}:${orgKey || 'default'}`, remote, { session: true });

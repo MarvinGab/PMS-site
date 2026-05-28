@@ -11,6 +11,7 @@ import {
   readWizardStateSync,
   persistWizardState,
   hydrateWizardState,
+  hydrateEmployeesFromTable,
   readEmployeeCredentialsSync,
   hydrateEmployeeCredentials,
   persistEmployeeCredentials,
@@ -7201,9 +7202,28 @@ export default function HRCycleDashboard() {
   useEffect(() => {
     let cancelled = false;
     if (!orgKey) return undefined;
-    hydrateWizardState(orgKey).then((state) => {
+    hydrateWizardState(orgKey).then(async (state) => {
       if (cancelled) return;
-      setConfig(state?.config || null);
+      let cfg = state?.config || null;
+      // If wizard_state lacks the roster (e.g. old or partially-saved row),
+      // pull from the canonical employees table so the dashboard reflects
+      // the real headcount instead of falling to 0.
+      const hasEmployees = Array.isArray(cfg?.employeeUploadData?.employees)
+        && cfg.employeeUploadData.employees.length > 0;
+      if (!hasEmployees) {
+        const tableEmployees = await hydrateEmployeesFromTable(orgKey);
+        if (cancelled) return;
+        if (Array.isArray(tableEmployees) && tableEmployees.length > 0) {
+          cfg = {
+            ...(cfg || {}),
+            employeeUploadData: {
+              ...(cfg?.employeeUploadData || {}),
+              employees: tableEmployees,
+            },
+          };
+        }
+      }
+      setConfig(cfg);
     });
     return () => {
       cancelled = true;
