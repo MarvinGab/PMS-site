@@ -588,16 +588,9 @@ function Step2({ form, setField, additionalAdmins, setAdditionalAdmins }) {
               onChange={e => setField('hr_admin_email', e.target.value)} />
           </div>
         </div>
-        <div className="wiz-full">
-          <div className="form-group">
-            <label className="lbl">Temporary Password <span style={{ fontWeight: 400, color: '#94A3B8' }}>(auto-generated if blank)</span></label>
-            <input type="text" value={form.temporary_password || ''} placeholder="leave blank to auto-generate"
-              onChange={e => setField('temporary_password', e.target.value)} />
-          </div>
-        </div>
         <div className="banner banner-blue" style={{ marginTop: 12, marginBottom: 16 }}>
           <span>ℹ️</span>
-          <span>Invite emails are not sent automatically. Use <strong>Communications</strong> to review and send admin access emails manually.</span>
+          <span>A temporary password is auto-generated. Send the invite (and password) from <strong>Communications</strong> when ready.</span>
         </div>
       </div>
 
@@ -628,13 +621,6 @@ function Step2({ form, setField, additionalAdmins, setAdditionalAdmins }) {
                 <label className="lbl">Email Address</label>
                 <input type="email" value={a.email} placeholder="coadmin@company.com"
                   onChange={(e) => updateAdmin(a.id, { email: e.target.value.toLowerCase() })} />
-              </div>
-            </div>
-            <div className="wiz-full">
-              <div className="form-group">
-                <label className="lbl">Temporary Password <span style={{ fontWeight: 400, color: '#94A3B8' }}>(auto-generated if blank)</span></label>
-                <input type="text" value={a.password} placeholder="leave blank to auto-generate"
-                  onChange={(e) => updateAdmin(a.id, { password: e.target.value })} />
               </div>
             </div>
           </div>
