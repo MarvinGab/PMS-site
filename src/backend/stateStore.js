@@ -338,6 +338,7 @@ function buildPrefillDatasetRows(organizationId, config) {
               },
               assignment,
               kpiRatingMode: String(group?.kpiRatingMode || 'rated').trim() || 'rated',
+              targetLevel: group?.targetLevel === 'KRA' ? 'KRA' : 'KPI',
             },
           };
         });
@@ -712,7 +713,7 @@ function isStaleRemoteEcho(recordKey, orgKey = '', payload) {
     recentLocalRemoteWrites.delete(queueKey);
     return false;
   }
-  return stableJson(payload) !== recent.raw;
+  return stableJson(payload) === recent.raw;
 }
 
 function workflowTimestamp(value) {
@@ -768,23 +769,6 @@ function stateRecordKey(recordKey, orgKey = '') {
     state_key: recordKey,
     org_key: orgKey || '',
   };
-}
-
-async function readRemoteState(recordKey, orgKey = '') {
-  if (!shouldUseSupabase || !supabase) return null;
-  try {
-    const { data, error } = await supabase
-      .from('app_state')
-      .select('payload')
-      .eq('state_key', recordKey)
-      .eq('org_key', orgKey || '');
-    if (error) throw error;
-    const row = (data || []).find((item) => (item.org_key || '') === (orgKey || ''));
-    return row?.payload ?? null;
-  } catch (error) {
-    warnOnce(`remote-read:${recordKey}`, error);
-    return null;
-  }
 }
 
 async function readRemoteStateScoped(recordKey, orgKey = '') {
@@ -1019,7 +1003,8 @@ async function deleteOrgGlobalStateRemote(orgKey = '') {
 function stripOrganizationsFromPayload(payload) {
   if (!payload || typeof payload !== 'object') return payload;
   if (!shouldUseSupabase) return payload;
-  const { organizationsData, ...rest } = payload;
+  const rest = { ...payload };
+  delete rest.organizationsData;
   return rest;
 }
 
@@ -1327,6 +1312,61 @@ export function persistWorkflow(orgKey, payload, options = {}) {
   return remote && typeof remote.then === 'function' ? remote : Promise.resolve(true);
 }
 
+// Super-admin Communications page state — templates + email theme. Global
+// scope (org_key=''), readable/writable only by super-admins. localStorage
+// stays as the sync first-paint cache; Supabase is authoritative across
+// browsers and sessions.
+const SUPER_COMMS_KEY = 'zarohr_super_comms_v2';
+
+export function readSuperCommsStateSync() {
+  return readLocalJson(SUPER_COMMS_KEY, null);
+}
+
+export async function hydrateSuperCommsState() {
+  const local = readSuperCommsStateSync();
+  if (!shouldUseSupabase) return local;
+  const session = readAuthSessionSync();
+  const token = session?.serverSessionToken || null;
+  if (!token) return local;
+  try {
+    const { data, error } = await supabase.functions.invoke('app-auth', {
+      body: {
+        action: 'get-super-comms',
+        serverSessionToken: token,
+      },
+    });
+    if (error) throw error;
+    if (data?.ok && data.state && typeof data.state === 'object') {
+      writeLocalJson(SUPER_COMMS_KEY, data.state);
+      return data.state;
+    }
+  } catch (error) {
+    warnOnce('remote-read:super_comms', error);
+  }
+  return local;
+}
+
+export function persistSuperCommsState(payload) {
+  writeLocalJson(SUPER_COMMS_KEY, payload);
+  if (!shouldUseSupabase || !supabase) return Promise.resolve(true);
+  const session = readAuthSessionSync();
+  const token = session?.serverSessionToken || null;
+  if (!token) return Promise.resolve(false);
+  return supabase.functions.invoke('app-auth', {
+    body: {
+      action: 'save-super-comms',
+      serverSessionToken: token,
+      state: payload && typeof payload === 'object' ? payload : {},
+    },
+  }).then(({ data, error }) => {
+    if (error) throw error;
+    return data?.ok !== false;
+  }).catch((error) => {
+    warnOnce('remote-write:super_comms', error);
+    return false;
+  });
+}
+
 export function readMessagesSync(orgKey = '') {
   return readLocalJson(`${MESSAGES_KEY}:${orgKey || 'default'}`, { conversations: {} });
 }
@@ -1364,7 +1404,7 @@ function generateEmployeeOtp() {
   return String(Math.floor(Math.random() * 1000000)).padStart(6, '0');
 }
 
-export async function syncEmployeeCredentialsForOrg({ orgKey = '', tempPassword = '', employees = [] } = {}) {
+export async function syncEmployeeCredentialsForOrg({ orgKey = '', employees = [] } = {}) {
   const normalizedOrgKey = String(orgKey || '').trim();
   if (!normalizedOrgKey) return readEmployeeCredentialsSync();
 

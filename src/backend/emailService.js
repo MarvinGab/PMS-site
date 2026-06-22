@@ -1,5 +1,6 @@
 import { shouldUseSupabase, supabaseEnv } from './config';
 import { readAuthSessionSync } from './stateStore';
+import { tryRefreshSuperAdminSession } from './serverAuth';
 import {
   renderThemedEmailHtml,
   renderThemedEmailText,
@@ -35,18 +36,6 @@ function getWorkspaceLoginUrl(org, identifier = '') {
   return `https://zarohr.com/${loginQuery}#login`;
 }
 
-function isDefaultPlatformLogo(url) {
-  const value = String(url || '').toLowerCase();
-  return (
-    !value
-    || value.includes('defaults/zaro-logo')
-    || value.includes('final%20zaro')
-    || value.includes('final zaro')
-    || value.includes('/src/')
-    || value.includes('@vite')
-  );
-}
-
 function getOrgBrandedTheme(org, theme = {}) {
   const base = theme && typeof theme === 'object' ? theme : {};
   const orgLogo = String(org?.brandEmailLogo || org?.brandLogo || org?.brandLogoUrl || '').trim();
@@ -68,47 +57,64 @@ function getOrgBrandedTheme(org, theme = {}) {
   };
 }
 
+const SESSION_EXPIRED_PATTERN = /session is missing or expired|session has expired/i;
+
+async function postSendEmail(body, sessionToken) {
+  const response = await fetch(`${supabaseEnv.url}/functions/v1/send-email`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      apikey: supabaseEnv.anonKey,
+      Authorization: `Bearer ${supabaseEnv.anonKey}`,
+    },
+    body: JSON.stringify({
+      serverSessionToken: sessionToken || null,
+      ...body,
+    }),
+  });
+  const rawText = await response.text();
+  let data = null;
+  if (rawText) {
+    try { data = JSON.parse(rawText); }
+    catch {
+      return { httpOk: response.ok, status: response.status, parseFailed: true, raw: rawText };
+    }
+  }
+  return { httpOk: response.ok, status: response.status, data };
+}
+
 async function invokeEmailFunction(body) {
   if (!shouldUseSupabase || !supabaseEnv.url || !supabaseEnv.anonKey) {
     return { ok: false, error: 'Supabase email delivery is not configured.' };
   }
 
   try {
-    const authSession = readAuthSessionSync();
-    const response = await fetch(`${supabaseEnv.url}/functions/v1/send-email`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        apikey: supabaseEnv.anonKey,
-        Authorization: `Bearer ${supabaseEnv.anonKey}`,
-      },
-      body: JSON.stringify({
-        serverSessionToken: authSession?.serverSessionToken || null,
-        ...body,
-      }),
-    });
-    const rawText = await response.text();
-    let data = null;
-    if (rawText) {
-      try {
-        data = JSON.parse(rawText);
-      } catch {
-        return {
-          ok: false,
-          error: rawText || `Email delivery backend returned HTTP ${response.status}.`,
-        };
+    const initialToken = readAuthSessionSync()?.serverSessionToken || null;
+    let res = await postSendEmail(body, initialToken);
+
+    // If the server says the session is gone, try a silent re-auth (works
+    // for local Super Admin via VITE_SUPER_ADMIN_* env vars) and retry once.
+    const errorText = res?.parseFailed
+      ? res.raw || ''
+      : res?.data?.error || res?.data?.message || '';
+    const isSessionExpired = SESSION_EXPIRED_PATTERN.test(String(errorText));
+    if (isSessionExpired) {
+      const refreshed = await tryRefreshSuperAdminSession();
+      if (refreshed?.token) {
+        res = await postSendEmail(body, refreshed.token);
       }
     }
-    if (!response.ok) {
+
+    if (res?.parseFailed) {
+      return { ok: false, error: res.raw || `Email delivery backend returned HTTP ${res.status}.` };
+    }
+    if (!res?.httpOk) {
       return {
         ok: false,
-        error:
-          data?.error
-          || data?.message
-          || `Email delivery backend returned HTTP ${response.status}.`,
+        error: res?.data?.error || res?.data?.message || `Email delivery backend returned HTTP ${res?.status}.`,
       };
     }
-    return data?.ok === false ? data : { ok: true, ...(data || {}) };
+    return res?.data?.ok === false ? res.data : { ok: true, ...(res?.data || {}) };
   } catch (error) {
     return { ok: false, error: error?.message || 'Failed to invoke email delivery function.' };
   }

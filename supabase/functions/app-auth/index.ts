@@ -13,8 +13,6 @@ const SESSION_TTL_MS = 1000 * 60 * 60 * 12
 // on the login screen. Matches the auto-sign-in feel of Gmail / Amazon
 // without leaving sessions live indefinitely.
 const SESSION_TTL_REMEMBER_MS = 1000 * 60 * 60 * 24 * 30
-const SUPER_ADMIN_EMAIL = 'admin@zarohr.com'
-const SUPER_ADMIN_PASSWORD = 'admin123'
 
 type OrgRow = {
   id: string
@@ -24,6 +22,8 @@ type OrgRow = {
   hr_admin_email: string | null
   setup_payload: Record<string, unknown> | null
 }
+
+type SupabaseAdminClient = ReturnType<typeof createClient<any, 'public', any>>
 
 function json(status: number, body: Record<string, unknown>) {
   return new Response(JSON.stringify(body), { status, headers: corsHeaders })
@@ -69,6 +69,10 @@ function toBase64(bytes: Uint8Array) {
 }
 
 async function deriveBits(password: string, saltBytes: Uint8Array, iterations: number) {
+  const salt = saltBytes.buffer.slice(
+    saltBytes.byteOffset,
+    saltBytes.byteOffset + saltBytes.byteLength,
+  ) as ArrayBuffer
   const key = await crypto.subtle.importKey(
     'raw',
     textEncoder().encode(password),
@@ -77,7 +81,7 @@ async function deriveBits(password: string, saltBytes: Uint8Array, iterations: n
     ['deriveBits'],
   )
   const bits = await crypto.subtle.deriveBits(
-    { name: 'PBKDF2', hash: 'SHA-256', salt: saltBytes, iterations },
+    { name: 'PBKDF2', hash: 'SHA-256', salt, iterations },
     key,
     256,
   )
@@ -107,17 +111,14 @@ async function matchesSuperAdminCredentials(identifier: string, password: string
   const envPasswordHash = String(Deno.env.get('APP_AUTH_SUPER_ADMIN_PASSWORD_HASH') || '')
   const normalized = normalizeLower(identifier)
 
-  if (envEmail) {
-    if (normalized !== envEmail) return false
-    if (envPasswordHash) return await verifyPasswordValue(password, envPasswordHash)
-    if (envPassword) return password === envPassword
-    return false
-  }
-
-  return normalized === SUPER_ADMIN_EMAIL && password === SUPER_ADMIN_PASSWORD
+  if (!envEmail) return false
+  if (normalized !== envEmail) return false
+  if (envPasswordHash) return await verifyPasswordValue(password, envPasswordHash)
+  if (envPassword) return password === envPassword
+  return false
 }
 
-async function getOrganizations(client: ReturnType<typeof createClient>) {
+async function getOrganizations(client: SupabaseAdminClient) {
   const { data, error } = await client
     .from('organizations')
     .select('id, org_key, name, hr_admin_name, hr_admin_email, setup_payload')
@@ -126,7 +127,7 @@ async function getOrganizations(client: ReturnType<typeof createClient>) {
 }
 
 async function resolveOrganizationKeyFromWorkspace(
-  client: ReturnType<typeof createClient>,
+  client: SupabaseAdminClient,
   organizationKey = '',
   workspace = '',
 ) {
@@ -152,7 +153,7 @@ async function resolveOrganizationKeyFromWorkspace(
   return String(row.org_key || '').trim()
 }
 
-async function getCredentialBlob(client: ReturnType<typeof createClient>) {
+async function getCredentialBlob(client: SupabaseAdminClient) {
   const { data, error } = await client
     .from('app_state')
     .select('payload')
@@ -163,7 +164,7 @@ async function getCredentialBlob(client: ReturnType<typeof createClient>) {
   return (data?.payload && typeof data.payload === 'object') ? data.payload as Record<string, Record<string, unknown>> : {}
 }
 
-async function deleteServerSession(client: ReturnType<typeof createClient>, token: string) {
+async function deleteServerSession(client: SupabaseAdminClient, token: string) {
   await client
     .from('app_state')
     .delete()
@@ -180,7 +181,7 @@ function getHrTeam(org: OrgRow) {
     : []
 }
 
-async function resolveServerLogin(client: ReturnType<typeof createClient>, identifier: string, password: string, organizationKey = '', workspace = '') {
+async function resolveServerLogin(client: SupabaseAdminClient, identifier: string, password: string, organizationKey = '', workspace = '') {
   const normalized = normalizeLower(identifier)
   const scopedOrgKey = await resolveOrganizationKeyFromWorkspace(client, organizationKey, workspace)
 
@@ -330,7 +331,7 @@ async function resolveServerLogin(client: ReturnType<typeof createClient>, ident
   }
 }
 
-async function issueSession(client: ReturnType<typeof createClient>, user: Record<string, unknown>, rememberMe = false) {
+async function issueSession(client: SupabaseAdminClient, user: Record<string, unknown>, rememberMe = false) {
   const token = crypto.randomUUID()
   const now = new Date()
   const ttl = rememberMe ? SESSION_TTL_REMEMBER_MS : SESSION_TTL_MS
@@ -348,11 +349,11 @@ async function issueSession(client: ReturnType<typeof createClient>, user: Recor
   return { token, expiresAt }
 }
 
-async function revokeSession(client: ReturnType<typeof createClient>, token: string) {
+async function revokeSession(client: SupabaseAdminClient, token: string) {
   await deleteServerSession(client, token)
 }
 
-async function inspectSession(client: ReturnType<typeof createClient>, token: string) {
+async function inspectSession(client: SupabaseAdminClient, token: string) {
   const { data, error } = await client
     .from('app_state')
     .select('payload')
@@ -368,6 +369,44 @@ async function inspectSession(client: ReturnType<typeof createClient>, token: st
     return { ok: false, error: 'Server session has expired.' }
   }
   return { ok: true, payload }
+}
+
+async function requireSuperAdminSession(client: SupabaseAdminClient, token: string) {
+  const session = await inspectSession(client, token)
+  if (!session.ok) return session
+  const role = String((session.payload as Record<string, unknown>)?.role || '')
+  if (role !== 'super-admin') {
+    return { ok: false, error: 'This session is not allowed to manage Super Admin communications.' }
+  }
+  return session
+}
+
+async function getSuperCommsState(client: SupabaseAdminClient) {
+  const { data, error } = await client
+    .from('app_state')
+    .select('payload')
+    .eq('state_key', 'super_comms')
+    .eq('org_key', '')
+    .maybeSingle()
+  if (error) throw error
+  return data?.payload && typeof data.payload === 'object'
+    ? data.payload as Record<string, unknown>
+    : null
+}
+
+async function saveSuperCommsState(client: SupabaseAdminClient, state: Record<string, unknown>) {
+  const { error } = await client
+    .from('app_state')
+    .upsert(
+      {
+        state_key: 'super_comms',
+        org_key: '',
+        payload: state,
+        updated_at: new Date().toISOString(),
+      },
+      { onConflict: 'state_key,org_key' },
+    )
+  if (error) throw error
 }
 
 async function hashPasswordValue(password: string) {
@@ -415,7 +454,7 @@ type CredentialLookup = {
 }
 
 async function locateCredentialByIdentifier(
-  client: ReturnType<typeof createClient>,
+  client: SupabaseAdminClient,
   identifier: string,
   organizationKey: string,
 ): Promise<CredentialLookup | null> {
@@ -514,7 +553,7 @@ async function locateCredentialByIdentifier(
 }
 
 async function suggestOrgsByQuery(
-  client: ReturnType<typeof createClient>,
+  client: SupabaseAdminClient,
   query: string,
 ) {
   const trimmed = String(query || '').trim()
@@ -536,7 +575,7 @@ async function suggestOrgsByQuery(
 }
 
 async function updateCredentialPassword(
-  client: ReturnType<typeof createClient>,
+  client: SupabaseAdminClient,
   credentialKey: string,
   newPasswordHash: string,
   patch: Record<string, unknown> = {},
@@ -567,7 +606,7 @@ async function updateCredentialPassword(
 }
 
 async function resetEmployeePmsCredentials(
-  client: ReturnType<typeof createClient>,
+  client: SupabaseAdminClient,
   organizationKey: string,
   employees: Array<Record<string, unknown>>,
 ) {
@@ -641,7 +680,7 @@ async function resetEmployeePmsCredentials(
 // `resolveServerLogin`, which also forces a fresh password reset every
 // time and effectively wipes the new password.
 async function clearOrgTempPasswordForCredential(
-  client: ReturnType<typeof createClient>,
+  client: SupabaseAdminClient,
   org: OrgRow,
   credentialKey: string,
 ) {
@@ -689,7 +728,7 @@ async function clearOrgTempPasswordForCredential(
 }
 
 async function locateCredentialForPasswordChange(
-  client: ReturnType<typeof createClient>,
+  client: SupabaseAdminClient,
   { identifier, organizationKey, credentialKey }: { identifier: string; organizationKey: string; credentialKey: string },
 ) {
   const normalizedCredentialKey = normalizeLower(credentialKey)
@@ -796,7 +835,7 @@ async function locateCredentialForPasswordChange(
 }
 
 async function storeResetCode(
-  client: ReturnType<typeof createClient>,
+  client: SupabaseAdminClient,
   identifierKey: string,
   payload: Record<string, unknown>,
 ) {
@@ -810,7 +849,7 @@ async function storeResetCode(
 }
 
 async function readResetCode(
-  client: ReturnType<typeof createClient>,
+  client: SupabaseAdminClient,
   identifierKey: string,
 ) {
   const { data, error } = await client
@@ -826,7 +865,7 @@ async function readResetCode(
 }
 
 async function deleteResetCode(
-  client: ReturnType<typeof createClient>,
+  client: SupabaseAdminClient,
   identifierKey: string,
 ) {
   await client
@@ -837,7 +876,7 @@ async function deleteResetCode(
 }
 
 async function revokeUserSessions(
-  client: ReturnType<typeof createClient>,
+  client: SupabaseAdminClient,
   { orgKey, email, empCode }: { orgKey: string; email?: string; empCode?: string },
 ) {
   const { data, error } = await client
@@ -870,7 +909,7 @@ async function revokeUserSessions(
 }
 
 async function logAudit(
-  client: ReturnType<typeof createClient>,
+  client: SupabaseAdminClient,
   orgKey: string,
   actionType: string,
   details: Record<string, unknown> = {},
@@ -1071,6 +1110,34 @@ Deno.serve(async (req: Request) => {
     const session = await inspectSession(adminClient, token)
     if (!session.ok) return json(403, { ok: false, error: session.error })
     return json(200, { ok: true, session: session.payload })
+  }
+
+  if (action === 'get-super-comms') {
+    const token = String(body.serverSessionToken || '').trim()
+    if (!token) return json(401, { ok: false, error: 'serverSessionToken is required.' })
+    const session = await requireSuperAdminSession(adminClient, token)
+    if (!session.ok) return json(403, { ok: false, error: session.error })
+    const state = await getSuperCommsState(adminClient)
+    return json(200, { ok: true, state })
+  }
+
+  if (action === 'save-super-comms') {
+    const token = String(body.serverSessionToken || '').trim()
+    const state = body.state && typeof body.state === 'object' && !Array.isArray(body.state)
+      ? body.state as Record<string, unknown>
+      : null
+    if (!token) return json(401, { ok: false, error: 'serverSessionToken is required.' })
+    if (!state) return json(400, { ok: false, error: 'state is required.' })
+    const session = await requireSuperAdminSession(adminClient, token)
+    if (!session.ok) return json(403, { ok: false, error: session.error })
+    await saveSuperCommsState(adminClient, state)
+    await logAudit(adminClient, '', 'super-comms-state-saved', {
+      hasTheme: !!state.theme,
+      templateCount: state.templates && typeof state.templates === 'object'
+        ? Object.keys(state.templates as Record<string, unknown>).length
+        : 0,
+    })
+    return json(200, { ok: true })
   }
 
   if (action === 'revoke-employee-sessions') {

@@ -58,6 +58,104 @@ function bannerRow(ws, numCols, text, fillArgb, textArgb, rowHeight = 18) {
   return row;
 }
 
+const FALLBACK_TARGET_TYPES = [
+  { id: 'text', name: 'Free text', unit: '', unitPosition: 'suffix', isNumeric: false },
+  { id: 'number', name: 'Number', unit: '', unitPosition: 'suffix', isNumeric: true },
+  { id: 'percentage', name: 'Percentage', unit: '%', unitPosition: 'suffix', isNumeric: true, hasMin: true, min: 0, hasMax: true, max: 100 },
+  { id: 'currency', name: 'Currency', unit: '₹', unitPosition: 'prefix', isNumeric: true },
+];
+
+export function canonicalTargetTypeId(type = {}) {
+  const rawId = String(type?.id || '').trim().toLowerCase();
+  const name = String(type?.name || '').trim().toLowerCase();
+  if (rawId === 'tt_default_number' || name === 'number') return 'number';
+  if (rawId === 'tt_default_percentage' || name === 'percentage' || name === '%' || name === 'percent') return 'percentage';
+  if (rawId === 'tt_default_currency' || name === 'currency' || name === '₹' || name === 'inr') return 'currency';
+  if (rawId === 'tt_default_yesno' || name === 'yes / no' || name === 'yes/no' || name === 'yes-no') return 'yesno';
+  if (rawId === 'tt_default_text' || name === 'text' || name === 'free text') return 'text';
+  return rawId || name.replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '') || 'text';
+}
+
+function getTargetTypeOptions(config = {}) {
+  const source = Array.isArray(config.targetTypes) && config.targetTypes.length > 0
+    ? config.targetTypes
+    : FALLBACK_TARGET_TYPES;
+  const seen = new Set();
+  const options = source
+    .filter((type) => !type?.hidden)
+    .map((type) => {
+      const label = String(type?.name || '').trim();
+      if (!label) return null;
+      const id = canonicalTargetTypeId(type);
+      const key = label.toLowerCase();
+      if (seen.has(key)) return null;
+      seen.add(key);
+      return {
+        id,
+        label,
+        unit: String(type?.unit || '').trim(),
+        unitPosition: type?.unitPosition === 'prefix' ? 'prefix' : 'suffix',
+        isNumeric: !!type?.isNumeric,
+        hasMin: !!type?.hasMin,
+        min: type?.min,
+        hasMax: !!type?.hasMax,
+        max: type?.max,
+      };
+    })
+    .filter(Boolean);
+  return options.length > 0 ? options : FALLBACK_TARGET_TYPES.map((type) => ({ ...type, label: type.name }));
+}
+
+function targetTypeLabelList(config = {}) {
+  return getTargetTypeOptions(config).map((type) => type.label);
+}
+
+function targetTypeInstruction(config = {}) {
+  const labels = targetTypeLabelList(config).join(' / ');
+  return `• Target Type: choose from ${labels}. Leave blank to default to Free text.`;
+}
+
+function applyTargetTypeValidation(row, colIndexes, config = {}) {
+  const labels = targetTypeLabelList(config);
+  if (!labels.length) return;
+  const formula = `"${labels.map((label) => String(label).replace(/"/g, '""')).join(',')}"`;
+  colIndexes.filter(Boolean).forEach((colIndex) => {
+    const cell = row.getCell(colIndex);
+    cell.dataValidation = {
+      type: 'list',
+      allowBlank: true,
+      formulae: [formula],
+      showErrorMessage: true,
+      errorTitle: 'Invalid target type',
+      error: 'Pick a target type from the dropdown, or leave it blank for Free text.',
+    };
+  });
+}
+
+function makeTargetTypeNormalizer(config = {}) {
+  const byLabel = new Map();
+  getTargetTypeOptions(config).forEach((type) => {
+    byLabel.set(type.label.toLowerCase(), type.id);
+    byLabel.set(type.id.toLowerCase(), type.id);
+  });
+  return (raw) => {
+    const t = String(raw || '').trim().toLowerCase();
+    if (!t || t === '—') return '';
+    if (t === 'no target' || t === 'none') return 'none';
+    if (byLabel.has(t)) return byLabel.get(t);
+    if (t === 'free text' || t === 'text') return 'text';
+    if (t === 'number') return 'number';
+    if (t === 'currency' || t === '₹' || t === 'inr') return 'currency';
+    if (t === 'percentage' || t === '%' || t === 'percent') return 'percentage';
+    if (t === 'yes / no' || t === 'yes/no' || t === 'yes-no') return 'yesno';
+    if (t === 'duration' || t === 'time') return 'duration';
+    if (t === 'date') return 'date';
+    if (t === 'rating') return 'rating';
+    if (t === 'milestone') return 'milestone';
+    return '';
+  };
+}
+
 function styleHeaderRow(headerRow, numCols) {
   headerRow.height = 28;
   for (let c = 1; c <= numCols; c++) {
@@ -130,33 +228,52 @@ export function goalLibraryTemplateMeta(config) {
   const attrLabel  = goalSegmentAttr || 'Department';
   const perspNames = perspectives.map(p => p.name).filter(Boolean);
   const attrValues = isByAttr ? (goalSegmentValues || []).map(v => v.name).filter(Boolean) : [];
+  // Single-library template runs at org-wide level (no per-group override here).
+  // Read the org's chosen mode; in Custom mode, fall back to KPI for the template
+  // since there's no per-group context. KRA-only (no KPIs) is auto-coerced to 'KRA'.
+  const targetsOn = config.targetsEnabled !== false;
+  const orgTargetLevel = config.targetLevelMode === 'KRA' ? 'KRA' : 'KPI';
+  const effectiveTargetLevel = hasKpis ? orgTargetLevel : 'KRA';
 
   const headers = [
     ...(isByAttr ? [attrLabel] : []),
     'Perspective', 'KRA Name', 'KRA Weight %',
     ...(hasKpis ? ['KPI Name', 'KPI Weight %'] : []),
+    ...(targetsOn ? ['Target', 'Target Type'] : []),
   ];
 
   const colWidths = [
     ...(isByAttr ? [20] : []),
     24, 36, 14,
     ...(hasKpis ? [36, 14] : []),
+    ...(targetsOn ? [22, 16] : []),
   ];
 
   const firstPersp  = perspNames[0] || 'Financial';
   const secondPersp = perspNames[1] || 'Customer';
 
+  // Helper: append (target, type) to a row when targets are on and the row is the
+  // one that should carry the target for the current level (KRA row vs KPI row).
+  const appendTgt = (row, tgt, tgtType) => targetsOn ? [...row, tgt, tgtType] : row;
+
   function kraRows(attrVal) {
     const prefix = isByAttr ? [attrVal] : [];
-    return hasKpis ? [
-      [...prefix, firstPersp,  'Revenue Growth',       '40', 'Monthly Revenue vs Target', '60'],
-      [...prefix, firstPersp,  'Revenue Growth',       '40', 'New Client Acquisition',    '40'],
-      [...prefix, secondPersp, 'Customer Satisfaction','30', 'NPS Score',                 '50'],
-      [...prefix, secondPersp, 'Customer Satisfaction','30', 'Repeat Purchase Rate',      '50'],
-    ] : [
-      [...prefix, firstPersp,  'Revenue Growth',        '40'],
-      [...prefix, firstPersp,  'Cost Optimisation',     '30'],
-      [...prefix, secondPersp, 'Customer Satisfaction', '30'],
+    if (hasKpis) {
+      // Per-row target depends on the level: KRA-level puts target on the first row of
+      // each KRA (other KPI rows leave it blank); KPI-level puts target on each KPI row.
+      const onKra = effectiveTargetLevel === 'KRA';
+      return [
+        appendTgt([...prefix, firstPersp,  'Revenue Growth',       '40', 'Monthly Revenue vs Target', '60'], onKra ? '1 Cr' : '40 L', onKra ? 'Currency' : 'Currency'),
+        appendTgt([...prefix, firstPersp,  'Revenue Growth',       '40', 'New Client Acquisition',    '40'], onKra ? '' : '10',          onKra ? '' : 'Number'),
+        appendTgt([...prefix, secondPersp, 'Customer Satisfaction','30', 'NPS Score',                 '50'], onKra ? '60' : '60',        onKra ? 'Rating' : 'Rating'),
+        appendTgt([...prefix, secondPersp, 'Customer Satisfaction','30', 'Repeat Purchase Rate',      '50'], onKra ? '' : '75',          onKra ? '' : 'Percentage'),
+      ];
+    }
+    // No KPIs in this library — target always lives on the single KRA row.
+    return [
+      appendTgt([...prefix, firstPersp,  'Revenue Growth',        '40'], '1 Cr',           'Currency'),
+      appendTgt([...prefix, firstPersp,  'Cost Optimisation',     '30'], '10',             'Percentage'),
+      appendTgt([...prefix, secondPersp, 'Customer Satisfaction', '30'], 'Phase 2 live',   'Milestone'),
     ];
   }
 
@@ -174,10 +291,19 @@ export function goalLibraryTemplateMeta(config) {
       ? '• For KRAs with multiple KPIs: repeat the KRA Name and KRA Weight % on each KPI row.'
       : '• KRA Weight % for all KRAs must add up to 100.'],
     [`• Valid Perspectives: ${perspNames.join('  |  ') || 'see Reference sheet'}`],
+    ...(targetsOn ? [
+      [effectiveTargetLevel === 'KRA' && hasKpis
+        ? '• KRA Target: fill it ONLY on the first KPI row of each KRA. Leave KRA Target blank on the remaining KPI rows of the same KRA — the first non-empty value wins. Some KRAs are subjective and may be left blank entirely.'
+        : effectiveTargetLevel === 'KRA'
+          ? '• KRA Target: one target per KRA. Leave blank for subjective KRAs.'
+          : '• KPI Target: enter on each KPI row. Leave blank for subjective KPIs.'
+      ],
+      [targetTypeInstruction(config)],
+    ] : []),
     ['• Delete the red example rows before uploading.'],
   ];
 
-  return { headers, colWidths, exampleRows, noteRows, perspNames, attrLabel, isByAttr, hasKpis, attrValues };
+  return { headers, colWidths, exampleRows, noteRows, perspNames, attrLabel, isByAttr, hasKpis, attrValues, targetsOn, effectiveTargetLevel };
 }
 
 /* ── DOWNLOAD GOAL LIBRARY TEMPLATE ─────────────────────────────────────── */
@@ -211,7 +337,11 @@ export async function downloadGoalLibraryTemplate(config) {
 
   // 20 empty entry rows
   for (let i = 0; i < 20; i++) {
-    styleDataRow(ws.addRow(meta.headers.map(() => '')), n, i);
+    const row = ws.addRow(meta.headers.map(() => ''));
+    styleDataRow(row, n, i);
+    if (meta.targetsOn) {
+      applyTargetTypeValidation(row, [meta.headers.indexOf('Target Type') + 1], config);
+    }
   }
 
   // Notes
@@ -247,6 +377,9 @@ export async function downloadGoalLibraryTemplate(config) {
   refSection('Valid Perspectives', meta.perspNames);
   if (meta.isByAttr && meta.attrValues.length) {
     refSection(`Valid ${meta.attrLabel} values`, meta.attrValues);
+  }
+  if (meta.targetsOn) {
+    refSection('Target Type dropdown values', targetTypeLabelList(config));
   }
 
   await writeAndDownload(wb, 'goal_library_template.xlsx');
@@ -337,17 +470,47 @@ export async function downloadGoalLibraryBulkTemplate(configOrPerspectives = [])
   const activeGroups = goalGroups.filter(g => g.hasLibrary);
   const hideKpiWeight = activeGroups.length > 0
     && activeGroups.every(g => g.kpiRatingMode === 'free-text');
+  const targetsOn = config.targetsEnabled !== false;
+  // Resolve a group's target level. With the new mode model, every group has an
+  // explicit 'KPI' or 'KRA'; the org-mode fallback only kicks in for legacy data.
+  const orgTargetLevel = config.targetLevelMode === 'KRA' ? 'KRA' : 'KPI';
+  const groupTargetLevel = (g) => (g?.targetLevel === 'KRA' ? 'KRA' : (g?.targetLevel === 'KPI' ? 'KPI' : orgTargetLevel));
+
+  // Only include target columns actually needed by the configured groups. If
+  // every group is KPI-level, the KRA Target columns are dropped (and vice
+  // versa). Mixed setups keep both with per-row greying. Rating level and
+  // target level are independent — KPI Target columns appear whenever any
+  // group keeps targets at KPI level, regardless of whether KPI Weight is
+  // hidden (KRA rating + KPI targets is a valid combo).
+  const groupLevels = activeGroups.length > 0
+    ? activeGroups.map((g) => groupTargetLevel(g))
+    : [orgTargetLevel];
+  const needsKraTargetCols = targetsOn && groupLevels.includes('KRA');
+  const needsKpiTargetCols = targetsOn && groupLevels.includes('KPI');
 
   const baseHeaders = isFlat
     ? ['Group Name', 'Library Name', 'KRA Name', 'KRA Description', 'KRA Weight %', 'KPI Name', 'KPI Weight %']
     : ['Group Name', 'Library Name', 'Perspective', 'KRA Name', 'KRA Description', 'KRA Weight %', 'KPI Name', 'KPI Weight %'];
   const baseColWidths = isFlat ? [24, 28, 30, 36, 14, 30, 14] : [24, 28, 22, 30, 36, 14, 30, 14];
-  const headers   = hideKpiWeight ? baseHeaders.slice(0, -1) : baseHeaders;
-  const colWidths = hideKpiWeight ? baseColWidths.slice(0, -1) : baseColWidths;
+  let headers   = hideKpiWeight ? baseHeaders.slice(0, -1) : baseHeaders;
+  let colWidths = hideKpiWeight ? baseColWidths.slice(0, -1) : baseColWidths;
+  if (targetsOn) {
+    const kraPair = needsKraTargetCols ? ['KRA Target', 'KRA Target Type'] : [];
+    const kraWidths = needsKraTargetCols ? [22, 16] : [];
+    const kpiPair = needsKpiTargetCols ? ['KPI Target', 'KPI Target Type'] : [];
+    const kpiWidths = needsKpiTargetCols ? [22, 16] : [];
+    headers   = [...headers,   ...kraPair,  ...kpiPair];
+    colWidths = [...colWidths, ...kraWidths, ...kpiWidths];
+  }
   const n          = headers.length;
   const KPI_COLS   = hideKpiWeight
     ? (isFlat ? [6] : [7])
     : (isFlat ? [6, 7] : [7, 8]);
+  const kpiPairLen = needsKpiTargetCols ? 2 : 0;
+  const KRA_TARGET_COL      = needsKraTargetCols ? n - kpiPairLen - 1 : 0;
+  const KRA_TARGET_TYPE_COL = needsKraTargetCols ? n - kpiPairLen     : 0;
+  const KPI_TARGET_COL      = needsKpiTargetCols ? n - 1 : 0;
+  const KPI_TARGET_TYPE_COL = needsKpiTargetCols ? n     : 0;
   const GREY_FILL  = 'FFE5E7EB';
   const GREY_TEXT  = 'FF9CA3AF';
 
@@ -370,6 +533,25 @@ export async function downloadGoalLibraryBulkTemplate(configOrPerspectives = [])
       font(cell, { color: { argb: GREY_TEXT }, italic: true });
       applyBorder(cell, 'thin', GREY_FILL);
     }
+  }
+  // Grey out whichever (Target + Target Type) pair doesn't apply to this group's
+  // targetLevel. Called per data/example row inside a group section.
+  function greyTargetCellsForLevel(row, level) {
+    if (!targetsOn) return;
+    const greyOne = (c) => {
+      if (!c) return;
+      const cell = row.getCell(c);
+      applyFill(cell, GREY_FILL);
+      cell.value = '—';
+      font(cell, { color: { argb: GREY_TEXT }, italic: true });
+      applyBorder(cell, 'thin', GREY_FILL);
+    };
+    if (level === 'KRA') { greyOne(KPI_TARGET_COL); greyOne(KPI_TARGET_TYPE_COL); }
+    else { greyOne(KRA_TARGET_COL); greyOne(KRA_TARGET_TYPE_COL); }
+  }
+
+  function applyRowTargetTypeValidation(row) {
+    applyTargetTypeValidation(row, [KRA_TARGET_TYPE_COL, KPI_TARGET_TYPE_COL], config);
   }
 
   // Helper: group section banner (coloured header strip per group)
@@ -408,14 +590,22 @@ export async function downloadGoalLibraryBulkTemplate(configOrPerspectives = [])
   }
 
   const trimRow = (row) => hideKpiWeight ? row.slice(0, -1) : row;
-  const kraOnlyLibRow = (group, lib, persp, kraName, kraDesc, weight) =>
-    trimRow(isFlat
+  // Pad each row with (Target value, Target Type) pairs. The matching section's
+  // grey-out hides whichever pair doesn't apply for the group's chosen level.
+  const padTargets = (row, kraTarget = '', kraTargetType = '', kpiTarget = '', kpiTargetType = '') => {
+    if (!targetsOn) return row;
+    return hideKpiWeight
+      ? [...row, kraTarget, kraTargetType]
+      : [...row, kraTarget, kraTargetType, kpiTarget, kpiTargetType];
+  };
+  const kraOnlyLibRow = (group, lib, persp, kraName, kraDesc, weight, kraTarget = '', kraTargetType = '') =>
+    padTargets(trimRow(isFlat
       ? [group, lib, kraName, kraDesc, weight, '', '']
-      : [group, lib, persp, kraName, kraDesc, weight, '', '']);
-  const kraKpiLibRow = (group, lib, persp, kraName, kraDesc, kraWeight, kpiName, kpiWeight) =>
-    trimRow(isFlat
+      : [group, lib, persp, kraName, kraDesc, weight, '', '']), kraTarget, kraTargetType, '', '');
+  const kraKpiLibRow = (group, lib, persp, kraName, kraDesc, kraWeight, kpiName, kpiWeight, kraTarget = '', kraTargetType = '', kpiTarget = '', kpiTargetType = '') =>
+    padTargets(trimRow(isFlat
       ? [group, lib, kraName, kraDesc, kraWeight, kpiName, kpiWeight]
-      : [group, lib, persp, kraName, kraDesc, kraWeight, kpiName, kpiWeight]);
+      : [group, lib, persp, kraName, kraDesc, kraWeight, kpiName, kpiWeight]), kraTarget, kraTargetType, kpiTarget, kpiTargetType);
 
   if (activeGroups.length === 0) {
     // Fallback: no groups configured with libraries — generic template
@@ -433,6 +623,8 @@ export async function downloadGoalLibraryBulkTemplate(configOrPerspectives = [])
     activeGroups.forEach((group, gi) => {
       const libType = group.libraryType || 'kra-only';
       const isKraOnly = libType === 'kra-only';
+      // KRA-only libraries always put the target on the KRA row, regardless of group preference.
+      const effectiveTargetLevel = isKraOnly ? 'KRA' : groupTargetLevel(group);
 
       // Get the library names this group expects (segment values or group name)
       const segValues = (group.segmentValues || []).map(v => String(v || '').trim()).filter(Boolean);
@@ -441,29 +633,43 @@ export async function downloadGoalLibraryBulkTemplate(configOrPerspectives = [])
       // Section banner
       if (gi > 0) ws.addRow([]); // spacer between groups
       groupBannerRow(gi, group, libType);
+      if (targetsOn) {
+        const tgtLabel = effectiveTargetLevel === 'KRA'
+          ? '🎯 Target lives on the KRA row (KPI Target greyed for this group)'
+          : '🎯 Target lives on each KPI row (KRA Target greyed for this group)';
+        bannerRow(ws, n, `     ${tgtLabel}`, 'FFF8FAFC', 'FF64748B', 16);
+      }
 
       // Example rows (first lib name only, 2-3 KRAs) — Group Name pre-filled
       const exName = libNames[0];
       bannerRow(ws, n, `  ↓  Example rows for "${exName}" — delete before uploading`, C.RED_BANNER, C.RED_TEXT);
 
+      // Example targets paired with sensible default types so admins see how the columns
+      // work together. Leaving Target Type blank in a real row means "Free text".
+      const kraTgt = (val) => effectiveTargetLevel === 'KRA' ? val : '';
+      const kraTgtType = (t) => effectiveTargetLevel === 'KRA' ? t : '';
+      const kpiTgt = (val) => effectiveTargetLevel === 'KPI' ? val : '';
+      const kpiTgtType = (t) => effectiveTargetLevel === 'KPI' ? t : '';
       const exRows = isKraOnly
         ? [
-            kraOnlyLibRow(group.name, exName, p1, 'Revenue Growth',    'Grow quarterly revenue',        '40'),
-            kraOnlyLibRow(group.name, exName, p2, 'Customer Retention','Retain existing client base',   '35'),
-            kraOnlyLibRow(group.name, exName, p3, 'Process Quality',   'Improve delivery standards',    '25'),
+            kraOnlyLibRow(group.name, exName, p1, 'Revenue Growth',    'Grow quarterly revenue',        '40', kraTgt('1 Cr'),  kraTgtType('Currency')),
+            kraOnlyLibRow(group.name, exName, p2, 'Customer Retention','Retain existing client base',   '35', kraTgt('90'),    kraTgtType('Percentage')),
+            kraOnlyLibRow(group.name, exName, p3, 'Process Quality',   'Improve delivery standards',    '25', kraTgt('Phase 2 live'), kraTgtType('Milestone')),
           ]
         : [
-            kraKpiLibRow(group.name, exName, p1, 'Revenue Growth',    'Grow quarterly revenue',        '40', 'Monthly ARR',    '60'),
-            kraKpiLibRow(group.name, exName, p1, 'Revenue Growth',    'Grow quarterly revenue',        '40', 'New Client Wins', '40'),
-            kraKpiLibRow(group.name, exName, p2, 'Customer NPS',      'Net promoter score improvement','35', 'Survey Rate',    '100'),
-            kraKpiLibRow(group.name, exName, p3, 'Process Quality',   'Improve delivery standards',    '25', 'On-time Rate',   '100'),
+            kraKpiLibRow(group.name, exName, p1, 'Revenue Growth',    'Grow quarterly revenue',        '40', 'Monthly ARR',    '60', kraTgt('1 Cr'), kraTgtType('Currency'), kpiTgt('30 L'),    kpiTgtType('Currency')),
+            kraKpiLibRow(group.name, exName, p1, 'Revenue Growth',    'Grow quarterly revenue',        '40', 'New Client Wins', '40', '', '', kpiTgt('10'),  kpiTgtType('Number')),
+            kraKpiLibRow(group.name, exName, p2, 'Customer NPS',      'Net promoter score improvement','35', 'Survey Rate',    '100', kraTgt('60'), kraTgtType('Rating'), kpiTgt('80'), kpiTgtType('Percentage')),
+            kraKpiLibRow(group.name, exName, p3, 'Process Quality',   'Improve delivery standards',    '25', 'On-time Rate',   '100', kraTgt('On-time delivery'), kraTgtType('Free text'), kpiTgt('95'), kpiTgtType('Percentage')),
           ];
 
       for (const row of exRows) {
         const r = ws.addRow(row);
         styleExampleRow(r, n);
         styleGroupNameCell(r, gi);
+        applyRowTargetTypeValidation(r);
         if (isKraOnly) greyKpiCells(r);
+        greyTargetCellsForLevel(r, effectiveTargetLevel);
       }
 
       bannerRow(ws, n, `  ↑  Delete examples above  ·  Fill your ${libNames.length} librar${libNames.length === 1 ? 'y' : 'ies'} below  ↓`, C.BLUE_FILL, C.BLUE_DARK);
@@ -481,7 +687,9 @@ export async function downloadGoalLibraryBulkTemplate(configOrPerspectives = [])
         const r = ws.addRow(blankRow);
         styleDataRow(r, n, i);
         styleGroupNameCell(r, gi);
+        applyRowTargetTypeValidation(r);
         if (isKraOnly) greyKpiCells(r);
+        greyTargetCellsForLevel(r, effectiveTargetLevel);
       }
     });
   }
@@ -496,6 +704,11 @@ export async function downloadGoalLibraryBulkTemplate(configOrPerspectives = [])
     ['• KRA Weight %: optional. If provided, the value is pre-filled as a suggestion in the employee\'s goal plan. The library is a reference catalog — employees may pick any subset of KRAs, so weights here do not need to sum to 100.'],
     ['• KPI columns (greyed): only applicable for KRA+KPI groups. Leave blank or do not fill greyed cells.'],
     ...(hideKpiWeight ? [] : [['• KPI Weight %: optional. If provided, pre-filled as a suggested starting weight in the employee\'s plan.']]),
+    ...(targetsOn ? [
+      ['• KRA Target / KPI Target: only ONE applies per group. The unused column is greyed for that section — leave it blank. Values pre-fill into the employee\'s plan.'],
+      [targetTypeInstruction(config)],
+      ['• Leave the Target value blank to skip pre-filling — the employee can still set their own target later.'],
+    ] : []),
     ['• Delete all red example rows before uploading.'],
     ['• Do not rename, reorder, or delete column headers.'],
     ...(isFlat
@@ -537,11 +750,23 @@ export async function downloadGoalLibraryBulkTemplate(configOrPerspectives = [])
   ]);
 
   if (activeGroups.length > 0) {
-    addRefSection('Configured Groups', activeGroups.map((g, i) => {
+    addRefSection('Configured Groups', activeGroups.map((g) => {
       const libType  = g.libraryType || 'kra-only';
       const segVals  = (g.segmentValues || []).filter(Boolean);
       const libNames = segVals.length > 0 ? segVals.join(', ') : g.name;
       return [g.name, `${libType === 'kra-kpi' ? 'KRA + KPI' : 'KRA only'}  |  Library cards: ${libNames}`];
+    }));
+  }
+  if (targetsOn) {
+    addRefSection('Target Type dropdown values', getTargetTypeOptions(config).map((type) => {
+      const caps = type.isNumeric
+        ? [
+            type.unit ? `unit: ${type.unit} (${type.unitPosition === 'prefix' ? 'before value' : 'after value'})` : 'unit: none',
+            type.hasMin ? `min: ${type.min}` : 'no min',
+            type.hasMax ? `max: ${type.max}` : 'no max',
+          ].join(' | ')
+        : 'text-style target';
+      return [type.label, caps];
     }));
   }
 
@@ -579,17 +804,48 @@ export async function downloadPrefillBulkTemplate(configOrPerspectives = []) {
   const activeGroups = goalGroups.filter(g => g.prefillType);
   const hideKpiWeight = activeGroups.length > 0
     && activeGroups.every(g => g.kpiRatingMode === 'free-text');
+  const targetsOn = config.targetsEnabled !== false;
+  // Org-wide target level — read from `targetLevelMode` (the Targets step).
+  // Previous code looked up `config.targetLevel` which doesn't exist, so all
+  // groups defaulted to 'KPI' regardless of HR's choice.
+  const orgTargetLevel = config.targetLevelMode === 'KRA' ? 'KRA' : 'KPI';
+  const groupTargetLevel = (g) => (g?.targetLevel === 'KRA' ? 'KRA' : (g?.targetLevel === 'KPI' ? 'KPI' : orgTargetLevel));
+
+  // Decide which target column pairs to include based on actual group target
+  // levels. KPI Target columns appear whenever any group keeps targets at
+  // KPI level, even when KPI Weight is hidden (KRA rating + KPI targets is
+  // a valid combo since rating and target level are independent).
+  const groupLevels = activeGroups.length > 0
+    ? activeGroups.map((g) => groupTargetLevel(g))
+    : [orgTargetLevel];
+  const needsKraTargetCols = targetsOn && groupLevels.includes('KRA');
+  const needsKpiTargetCols = targetsOn && groupLevels.includes('KPI');
 
   const baseHeaders = isFlat
     ? ['Group Name', 'Card Name', 'KRA Name', 'KRA Description', 'KRA Weight %', 'KPI Name', 'KPI Weight %']
     : ['Group Name', 'Card Name', 'Perspective', 'KRA Name', 'KRA Description', 'KRA Weight %', 'KPI Name', 'KPI Weight %'];
   const baseColWidths = isFlat ? [24, 28, 30, 36, 14, 30, 14] : [24, 28, 22, 30, 36, 14, 30, 14];
-  const headers = hideKpiWeight ? baseHeaders.slice(0, -1) : baseHeaders;
-  const colWidths = hideKpiWeight ? baseColWidths.slice(0, -1) : baseColWidths;
+  let headers = hideKpiWeight ? baseHeaders.slice(0, -1) : baseHeaders;
+  let colWidths = hideKpiWeight ? baseColWidths.slice(0, -1) : baseColWidths;
+  if (targetsOn) {
+    const kraPair = needsKraTargetCols ? ['KRA Target', 'KRA Target Type'] : [];
+    const kraWidths = needsKraTargetCols ? [22, 16] : [];
+    const kpiPair = needsKpiTargetCols ? ['KPI Target', 'KPI Target Type'] : [];
+    const kpiWidths = needsKpiTargetCols ? [22, 16] : [];
+    headers   = [...headers,   ...kraPair,  ...kpiPair];
+    colWidths = [...colWidths, ...kraWidths, ...kpiWidths];
+  }
   const n = headers.length;
   const KPI_COLS = hideKpiWeight
     ? (isFlat ? [6] : [7])
     : (isFlat ? [6, 7] : [7, 8]);
+  // Recompute target column indexes based on which pairs are actually present.
+  const kpiPairLen = needsKpiTargetCols ? 2 : 0;
+  const kraPairLen = needsKraTargetCols ? 2 : 0;
+  const KRA_TARGET_COL      = needsKraTargetCols ? n - kpiPairLen - 1 : 0;
+  const KRA_TARGET_TYPE_COL = needsKraTargetCols ? n - kpiPairLen     : 0;
+  const KPI_TARGET_COL      = needsKpiTargetCols ? n - 1 : 0;
+  const KPI_TARGET_TYPE_COL = needsKpiTargetCols ? n     : 0;
   const GREY_FILL = 'FFE5E7EB';
   const GREY_TEXT = 'FF9CA3AF';
 
@@ -610,6 +866,23 @@ export async function downloadPrefillBulkTemplate(configOrPerspectives = []) {
       font(cell, { color: { argb: GREY_TEXT }, italic: true });
       applyBorder(cell, 'thin', GREY_FILL);
     }
+  }
+  function greyTargetCellsForLevel(row, level) {
+    if (!targetsOn) return;
+    const greyOne = (c) => {
+      if (!c) return;
+      const cell = row.getCell(c);
+      applyFill(cell, GREY_FILL);
+      cell.value = '—';
+      font(cell, { color: { argb: GREY_TEXT }, italic: true });
+      applyBorder(cell, 'thin', GREY_FILL);
+    };
+    if (level === 'KRA') { greyOne(KPI_TARGET_COL); greyOne(KPI_TARGET_TYPE_COL); }
+    else { greyOne(KRA_TARGET_COL); greyOne(KRA_TARGET_TYPE_COL); }
+  }
+
+  function applyRowTargetTypeValidation(row) {
+    applyTargetTypeValidation(row, [KRA_TARGET_TYPE_COL, KPI_TARGET_TYPE_COL], config);
   }
 
   const GROUP_COLORS = [
@@ -646,14 +919,20 @@ export async function downloadPrefillBulkTemplate(configOrPerspectives = []) {
   }
 
   const trimRow = (row) => hideKpiWeight ? row.slice(0, -1) : row;
-  const kraOnlyRowWithPersp = (group, card, persp, kraName, kraDesc, weight) =>
-    trimRow(isFlat
+  const padTargets = (row, kraTarget = '', kraTargetType = '', kpiTarget = '', kpiTargetType = '') => {
+    if (!targetsOn) return row;
+    return hideKpiWeight
+      ? [...row, kraTarget, kraTargetType]
+      : [...row, kraTarget, kraTargetType, kpiTarget, kpiTargetType];
+  };
+  const kraOnlyRowWithPersp = (group, card, persp, kraName, kraDesc, weight, kraTarget = '', kraTargetType = '') =>
+    padTargets(trimRow(isFlat
       ? [group, card, kraName, kraDesc, weight, '', '']
-      : [group, card, persp, kraName, kraDesc, weight, '', '']);
-  const kraKpiRow = (group, card, persp, kraName, kraDesc, kraWeight, kpiName, kpiWeight) =>
-    trimRow(isFlat
+      : [group, card, persp, kraName, kraDesc, weight, '', '']), kraTarget, kraTargetType, '', '');
+  const kraKpiRow = (group, card, persp, kraName, kraDesc, kraWeight, kpiName, kpiWeight, kraTarget = '', kraTargetType = '', kpiTarget = '', kpiTargetType = '') =>
+    padTargets(trimRow(isFlat
       ? [group, card, kraName, kraDesc, kraWeight, kpiName, kpiWeight]
-      : [group, card, persp, kraName, kraDesc, kraWeight, kpiName, kpiWeight]);
+      : [group, card, persp, kraName, kraDesc, kraWeight, kpiName, kpiWeight]), kraTarget, kraTargetType, kpiTarget, kpiTargetType);
 
   if (activeGroups.length === 0) {
     bannerRow(ws, n, '  ↓  Example rows — delete before uploading your data', C.RED_BANNER, C.RED_TEXT);
@@ -673,33 +952,46 @@ export async function downloadPrefillBulkTemplate(configOrPerspectives = []) {
     activeGroups.forEach((group, gi) => {
       const prefillType = group.prefillType || 'kra-only';
       const isKraOnly = prefillType === 'kra-only';
+      const effectiveTargetLevel = isKraOnly ? 'KRA' : groupTargetLevel(group);
       const segValues = (group.segmentValues || []).map(v => String(v || '').trim()).filter(Boolean);
       const cardNames = segValues.length > 0 ? segValues : [group.name || 'All Employees'];
 
       if (gi > 0) ws.addRow([]);
       groupBannerRow(gi, group, prefillType);
+      if (targetsOn) {
+        const tgtLabel = effectiveTargetLevel === 'KRA'
+          ? '🎯 Target lives on the KRA row (KPI Target greyed for this group)'
+          : '🎯 Target lives on each KPI row (KRA Target greyed for this group)';
+        bannerRow(ws, n, `     ${tgtLabel}`, 'FFF8FAFC', 'FF64748B', 16);
+      }
 
       const exName = cardNames[0];
       bannerRow(ws, n, `  ↓  Example rows for "${exName}" — delete before uploading`, C.RED_BANNER, C.RED_TEXT);
 
+      const kraTgt = (val) => effectiveTargetLevel === 'KRA' ? val : '';
+      const kraTgtType = (t) => effectiveTargetLevel === 'KRA' ? t : '';
+      const kpiTgt = (val) => effectiveTargetLevel === 'KPI' ? val : '';
+      const kpiTgtType = (t) => effectiveTargetLevel === 'KPI' ? t : '';
       const exRows = isKraOnly
         ? [
-            kraOnlyRowWithPersp(group.name, exName, p1, 'Revenue Growth', 'Grow quarterly revenue', '40'),
-            kraOnlyRowWithPersp(group.name, exName, p2, 'Customer Retention', 'Retain existing client base', '35'),
-            kraOnlyRowWithPersp(group.name, exName, p3, 'Process Quality', 'Improve delivery standards', '25'),
+            kraOnlyRowWithPersp(group.name, exName, p1, 'Revenue Growth',     'Grow quarterly revenue',        '40', kraTgt('1 Cr'),       kraTgtType('Currency')),
+            kraOnlyRowWithPersp(group.name, exName, p2, 'Customer Retention', 'Retain existing client base',   '35', kraTgt('90'),         kraTgtType('Percentage')),
+            kraOnlyRowWithPersp(group.name, exName, p3, 'Process Quality',    'Improve delivery standards',    '25', kraTgt('Phase 2 live'), kraTgtType('Milestone')),
           ]
         : [
-            kraKpiRow(group.name, exName, p1, 'Revenue Growth', 'Grow quarterly revenue', '40', 'Monthly ARR', '60'),
-            kraKpiRow(group.name, exName, p1, 'Revenue Growth', 'Grow quarterly revenue', '40', 'New Client Wins', '40'),
-            kraKpiRow(group.name, exName, p2, 'Customer NPS', 'Net promoter score improvement', '35', 'Survey Rate', '100'),
-            kraKpiRow(group.name, exName, p3, 'Process Quality', 'Improve delivery standards', '25', 'On-time Rate', '100'),
+            kraKpiRow(group.name, exName, p1, 'Revenue Growth',  'Grow quarterly revenue',         '40', 'Monthly ARR',    '60',  kraTgt('1 Cr'), kraTgtType('Currency'),  kpiTgt('30 L'),  kpiTgtType('Currency')),
+            kraKpiRow(group.name, exName, p1, 'Revenue Growth',  'Grow quarterly revenue',         '40', 'New Client Wins','40',  '', '', kpiTgt('10'), kpiTgtType('Number')),
+            kraKpiRow(group.name, exName, p2, 'Customer NPS',    'Net promoter score improvement', '35', 'Survey Rate',    '100', kraTgt('60'), kraTgtType('Rating'), kpiTgt('80'), kpiTgtType('Percentage')),
+            kraKpiRow(group.name, exName, p3, 'Process Quality', 'Improve delivery standards',     '25', 'On-time Rate',   '100', kraTgt('On-time delivery'), kraTgtType('Free text'), kpiTgt('95'), kpiTgtType('Percentage')),
           ];
 
       for (const row of exRows) {
         const r = ws.addRow(row);
         styleExampleRow(r, n);
         styleGroupNameCell(r, gi);
+        applyRowTargetTypeValidation(r);
         if (isKraOnly) greyKpiCells(r);
+        greyTargetCellsForLevel(r, effectiveTargetLevel);
       }
 
       bannerRow(ws, n, `  ↑  Delete examples above  ·  Fill your ${cardNames.length} pre-fill card${cardNames.length === 1 ? '' : 's'} below  ↓`, C.BLUE_FILL, C.BLUE_DARK);
@@ -715,7 +1007,9 @@ export async function downloadPrefillBulkTemplate(configOrPerspectives = []) {
         const r = ws.addRow(blankRow);
         styleDataRow(r, n, i);
         styleGroupNameCell(r, gi);
+        applyRowTargetTypeValidation(r);
         if (isKraOnly) greyKpiCells(r);
+        greyTargetCellsForLevel(r, effectiveTargetLevel);
       }
     });
   }
@@ -728,6 +1022,11 @@ export async function downloadPrefillBulkTemplate(configOrPerspectives = []) {
     ...(isFlat ? [] : [['• Perspective: must match your configured BSC perspective names exactly.']]),
     ['• KRA Weight % and KPI Weight % can be left blank, but if filled they must be numeric.'],
     ['• KPI columns are only for groups configured as KRAs + KPIs. Grey KPI cells should be left blank.'],
+    ...(targetsOn ? [
+      ['• KRA Target / KPI Target: only ONE applies per group. The unused column is greyed for that section — leave it blank. Values pre-fill into the employee\'s plan.'],
+      [targetTypeInstruction(config)],
+      ['• Leave the Target value blank to skip pre-filling — the employee can still set their own target later.'],
+    ] : []),
     ['• Delete all red example rows before uploading.'],
     ['• Do not rename, reorder, or delete column headers.'],
     ...(isFlat
@@ -766,6 +1065,18 @@ export async function downloadPrefillBulkTemplate(configOrPerspectives = []) {
     ['KPI Name', 'Only for KRAs + KPIs pre-fill groups. Leave blank for KRA-only groups.'],
     ...(hideKpiWeight ? [] : [['KPI Weight %', 'Optional suggested KPI weight.']]),
   ]);
+  if (targetsOn) {
+    addRefSection('Target Type dropdown values', getTargetTypeOptions(config).map((type) => {
+      const caps = type.isNumeric
+        ? [
+            type.unit ? `unit: ${type.unit} (${type.unitPosition === 'prefix' ? 'before value' : 'after value'})` : 'unit: none',
+            type.hasMin ? `min: ${type.min}` : 'no min',
+            type.hasMax ? `max: ${type.max}` : 'no max',
+          ].join(' | ')
+        : 'text-style target';
+      return [type.label, caps];
+    }));
+  }
 
   if (activeGroups.length > 0) {
     addRefSection('Configured Pre-fill Groups', activeGroups.map((g) => {
@@ -795,6 +1106,7 @@ export async function downloadPrefillBulkTemplate(configOrPerspectives = []) {
 /* ── PARSE BULK GOAL LIBRARY UPLOAD ─────────────────────────────────────── */
 export function parseGoalLibraryBulkXlsx(file, goalGroups = [], options = {}) {
   const { requireGroupName = false } = options;
+  const config = options.config || { goalGroups };
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onerror = () => reject(new Error('Could not read file'));
@@ -821,10 +1133,64 @@ export function parseGoalLibraryBulkXlsx(file, goalGroups = [], options = {}) {
         const idxKraWeight = headers.indexOf('kra weight %');
         const idxKpiName = headers.indexOf('kpi name');
         const idxKpiWeight = headers.indexOf('kpi weight %');
+        const idxKraTarget     = headers.indexOf('kra target');
+        const idxKpiTarget     = headers.indexOf('kpi target');
+        const idxKraTargetType = headers.indexOf('kra target type');
+        const idxKpiTargetType = headers.indexOf('kpi target type');
+        const normalizeTargetType = makeTargetTypeNormalizer(config);
+        // Build a quick lookup of group → effective targetLevel so parsing knows which target
+        // column to honour per row. KRA-only groups (no KPIs at all) always coerce to 'KRA';
+        // groups with KPIs (either library 'kra-kpi' or prefill 'kra-kpi') respect targetLevel.
+        const groupTargetLevelByName = new Map();
+        for (const g of (goalGroups || [])) {
+          const gname = String(g?.name || '').trim().toLowerCase();
+          if (!gname) continue;
+          const hasKpis = g.libraryType === 'kra-kpi' || g.prefillType === 'kra-kpi';
+          const lvl = !hasKpis ? 'KRA' : (g?.targetLevel === 'KRA' ? 'KRA' : 'KPI');
+          groupTargetLevelByName.set(gname, lvl);
+        }
 
         if (idxLibrary === -1 || idxKraName === -1) {
           reject(new Error('Missing required columns in the uploaded template'));
           return;
+        }
+        // If targets are enabled, the sheet must include the target columns
+        // for the levels actually used by the groups present IN THIS sheet.
+        // Don't demand KRA Target just because some OTHER group in the org
+        // is KRA-level — the sheet might only cover KPI-level groups.
+        const targetsOn = config?.targetsEnabled !== false;
+        if (targetsOn) {
+          const levelsInSheet = new Set();
+          for (const row of allRows.slice(1)) {
+            const firstCell = String(row?.[0] || '').trim();
+            if (!firstCell || firstCell.startsWith('↓') || firstCell.startsWith('↑') ||
+                firstCell.toUpperCase().startsWith('RULES') || firstCell.startsWith('•')) continue;
+            const groupCell = idxGroupName >= 0 ? String(row[idxGroupName] || '').trim().toLowerCase() : '';
+            if (!groupCell) continue;
+            const lvl = groupTargetLevelByName.get(groupCell);
+            if (lvl) levelsInSheet.add(lvl);
+          }
+          // Fallback: if the sheet has no Group Name column or no recognizable
+          // groups, fall back to the org-wide check so we don't silently accept.
+          if (levelsInSheet.size === 0) {
+            for (const lvl of groupTargetLevelByName.values()) levelsInSheet.add(lvl);
+            if (levelsInSheet.size === 0) levelsInSheet.add('KPI');
+          }
+          const needsKraTarget = levelsInSheet.has('KRA');
+          const needsKpiTarget = levelsInSheet.has('KPI');
+          const missingTargetCols = [];
+          if (needsKraTarget && idxKraTarget === -1) missingTargetCols.push('"KRA Target"');
+          if (needsKraTarget && idxKraTargetType === -1) missingTargetCols.push('"KRA Target Type"');
+          if (needsKpiTarget && idxKpiTarget === -1) missingTargetCols.push('"KPI Target"');
+          if (needsKpiTarget && idxKpiTargetType === -1) missingTargetCols.push('"KPI Target Type"');
+          if (missingTargetCols.length > 0) {
+            reject(new Error(
+              `Targets are enabled but the uploaded sheet is missing ${missingTargetCols.join(', ')}. ` +
+              `Download a fresh template (it now includes target columns), copy your KRAs/KPIs into it, ` +
+              `add target values, and re-upload. If you don't want targets, turn them off in the Targets step first.`
+            ));
+            return;
+          }
         }
         const isFlatTemplate = idxPersp === -1;
 
@@ -941,6 +1307,20 @@ export function parseGoalLibraryBulkXlsx(file, goalGroups = [], options = {}) {
             kra.suggestedWeight = kraWeight;
           }
 
+          // Pull KRA-level / KPI-level targets according to the group's targetLevel.
+          // Greyed cells contain '—' in the downloaded template; treat that as blank.
+          const rawKraTarget = readCell(row, idxKraTarget);
+          const rawKpiTarget = readCell(row, idxKpiTarget);
+          const kraTarget = rawKraTarget && rawKraTarget !== '—' ? rawKraTarget : '';
+          const kpiTarget = rawKpiTarget && rawKpiTarget !== '—' ? rawKpiTarget : '';
+          const kraTargetType = normalizeTargetType(readCell(row, idxKraTargetType));
+          const kpiTargetType = normalizeTargetType(readCell(row, idxKpiTargetType));
+          const groupLvl = groupTargetLevelByName.get(groupName.toLowerCase()) || 'KPI';
+          if (groupLvl === 'KRA' && kraTarget && !kra.target) {
+            kra.target = kraTarget;
+            if (kraTargetType) kra.targetType = kraTargetType;
+          }
+
           if (kpiName) {
             const normalizedKpi = kpiName.toLowerCase();
             const hasExisting = (kra.kpis || []).some(kpi => kpi.name.toLowerCase() === normalizedKpi);
@@ -949,6 +1329,8 @@ export function parseGoalLibraryBulkXlsx(file, goalGroups = [], options = {}) {
                 id: `kpi_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`,
                 name: kpiName,
                 weight: kpiWeight ?? 0,
+                target: groupLvl === 'KPI' ? kpiTarget : '',
+                targetType: groupLvl === 'KPI' ? (kpiTargetType || (kpiTarget ? 'text' : 'none')) : 'none',
               });
             }
           }
@@ -1106,17 +1488,23 @@ export function parseGoalLibraryXlsx(file, config) {
 
         const isByAttr = headers[0] !== 'perspective';
         const col = name => headers.findIndex(h => h === name.toLowerCase());
-        const idxAttr    = isByAttr ? 0 : -1;
-        const idxPersp   = col('perspective');
-        const idxKraName = col('kra name');
-        const idxKraWt   = col('kra weight %');
-        const idxKpiName = col('kpi name');
-        const idxKpiWt   = col('kpi weight %');
+        const idxAttr       = isByAttr ? 0 : -1;
+        const idxPersp      = col('perspective');
+        const idxKraName    = col('kra name');
+        const idxKraWt      = col('kra weight %');
+        const idxKpiName    = col('kpi name');
+        const idxKpiWt      = col('kpi weight %');
+        const idxTarget     = col('target');
+        const idxTargetType = col('target type');
         const hasKpis    = idxKpiName !== -1;
         const isFlatFramework = config.frameworkId === 'kra-kpi' || config.frameworkId === 'kra';
+        // Org-wide level for this single-library template (no per-group override here).
+        const targetLevel = hasKpis ? (config.targetLevelMode === 'KRA' ? 'KRA' : 'KPI') : 'KRA';
 
         if (idxKraName === -1) { reject(new Error('Missing "KRA Name" column')); return; }
         if (!isFlatFramework && idxPersp === -1) { reject(new Error('Missing "Perspective" column. BSC goal libraries must use the downloaded template and include a Perspective for every KRA.')); return; }
+
+        const normalizeTargetType = makeTargetTypeNormalizer(config);
 
         const grouped = {};
         let validKraRows = 0;
@@ -1134,10 +1522,30 @@ export function parseGoalLibraryXlsx(file, config) {
           if (!grouped[attrVal][kraKey]) {
             grouped[attrVal][kraKey] = { name: kraName, weight: kraWt, perspName, kpis: [] };
           }
+          const rowTarget = get(idxTarget);
+          const rowTargetType = normalizeTargetType(get(idxTargetType));
           if (hasKpis) {
             const kpiName = get(idxKpiName);
             const kpiWt   = get(idxKpiWt);
-            if (kpiName) grouped[attrVal][kraKey].kpis.push({ id: Date.now() + Math.random(), name: kpiName, weight: kpiWt });
+            if (kpiName) {
+              grouped[attrVal][kraKey].kpis.push({
+                id: Date.now() + Math.random(),
+                name: kpiName,
+                weight: kpiWt,
+                // KRA-level mode: ignore per-KPI target; KPI-level mode: take the row's target.
+                target: targetLevel === 'KPI' ? rowTarget : '',
+                targetType: targetLevel === 'KPI' ? (rowTargetType || (rowTarget ? 'text' : 'none')) : 'none',
+              });
+            }
+            // KRA-level target: first non-empty value on any of the KRA's rows wins.
+            if (targetLevel === 'KRA' && rowTarget && !grouped[attrVal][kraKey].target) {
+              grouped[attrVal][kraKey].target = rowTarget;
+              grouped[attrVal][kraKey].targetType = rowTargetType || 'text';
+            }
+          } else if (rowTarget && !grouped[attrVal][kraKey].target) {
+            // No-KPI libraries: target always sits on the KRA row.
+            grouped[attrVal][kraKey].target = rowTarget;
+            grouped[attrVal][kraKey].targetType = rowTargetType || 'text';
           }
         }
         if (!validKraRows) { reject(new Error('No valid KRA rows found in the uploaded sheet. Fill at least one KRA Name row and delete the red example rows before uploading.')); return; }
@@ -1484,8 +1892,17 @@ export function employeeTemplateMeta(config) {
     return match?.name || goalGroups[rowIndex % goalGroups.length]?.name || '';
   };
 
+  // Role is always part of the employee master so it can drive role-based
+  // competency overrides and downstream reports. If the user picked Role as
+  // their routing attribute in Step 2 (Groups & Strategy), don't duplicate it.
+  const routingHasRole = routingColumns.some(c => {
+    const label = String(c.label || '').trim().toLowerCase();
+    return label === 'role' || label === 'designation' || label === 'designation / role';
+  });
+  const includeRoleColumn = !routingHasRole;
   const headers = [
     'Employee Code', 'Employee Name',
+    ...(includeRoleColumn ? ['Role'] : []),
     ...(needsEmail ? ['Email ID'] : []),
     ...(hasGoalGroups ? ['Group Name'] : []),
     ...routingColumns.map(column => column.label),
@@ -1495,6 +1912,7 @@ export function employeeTemplateMeta(config) {
   ];
   const colWidths = [
     16, 26,
+    ...(includeRoleColumn ? [22] : []),
     ...(needsEmail ? [30] : []),
     ...(hasGoalGroups ? [22] : []),
     ...routingColumns.map(() => 18),
@@ -1507,8 +1925,9 @@ export function employeeTemplateMeta(config) {
     column.values.length > 0 ? column.values[rowIndex % column.values.length] : `${column.label} Value ${rowIndex + 1}`
   ));
 
-  const ex = (code, name, email, groupName, routingValues, mgr, mgrName, mgrEmail, l2Code, l2Name) => [
+  const ex = (code, name, role, email, groupName, routingValues, mgr, mgrName, mgrEmail, l2Code, l2Name) => [
     code, name,
+    ...(includeRoleColumn ? [role] : []),
     ...(needsEmail ? [email] : []),
     ...(hasGoalGroups ? [groupName] : []),
     ...routingValues,
@@ -1518,11 +1937,11 @@ export function employeeTemplateMeta(config) {
   ];
   const blankRoutingValues = routingColumns.map(() => '');
   const exampleRows = [
-    ex('EMP001','Priya Sharma',  'priya@company.com',  getExampleGroupName(0), getRoutingExampleValues(0), 'MGR001','Amit Shah',  'amit@company.com',  'DIR001','Ravi Verma'),
-    ex('EMP002','Rahul Mehta',   'rahul@company.com',  getExampleGroupName(1), getRoutingExampleValues(1), 'MGR002','Neha Patel', 'neha@company.com',  'DIR001','Ravi Verma'),
-    ex('EMP003','Sneha Iyer',    'sneha@company.com',  getExampleGroupName(2), getRoutingExampleValues(2), 'MGR001','Amit Shah',  'amit@company.com',  'DIR002','Sonal Desai'),
+    ex('EMP001','Priya Sharma',  'Senior Analyst',     'priya@company.com',  getExampleGroupName(0), getRoutingExampleValues(0), 'MGR001','Amit Shah',  'amit@company.com',  'DIR001','Ravi Verma'),
+    ex('EMP002','Rahul Mehta',   'Account Executive',  'rahul@company.com',  getExampleGroupName(1), getRoutingExampleValues(1), 'MGR002','Neha Patel', 'neha@company.com',  'DIR001','Ravi Verma'),
+    ex('EMP003','Sneha Iyer',    'Operations Lead',    'sneha@company.com',  getExampleGroupName(2), getRoutingExampleValues(2), 'MGR001','Amit Shah',  'amit@company.com',  'DIR002','Sonal Desai'),
     // Outside-PMS row: available for reporting-manager references without PMS goals.
-    ex('MGR001','Amit Shah',     'amit@company.com',   'NONE',                  blankRoutingValues,         '',      '',           '',                   '',      ''),
+    ex('MGR001','Amit Shah',     'Sales Manager',      'amit@company.com',   'NONE',                  blankRoutingValues,         '',      '',           '',                   '',      ''),
   ];
 
   const fmtType = empCodeFormat?.type || 'free';
@@ -2391,4 +2810,374 @@ export async function downloadErrorReport(parsedData, errors, config) {
   });
 
   await writeAndDownload(wb, 'goal_library_errors.xlsx');
+}
+
+/* ── COMPETENCY UPLOADS ─────────────────────────────────────────────────
+   Three modes mirror the wizard's competencyScope:
+     - 'org'        : one flat sheet
+     - 'group'      : 2 tabs (Weight Splits + Competencies)
+     - 'group_role' : 2 tabs with a Designation column on both
+   Default weight per competency is blank (= equal weighting at evaluation).
+   Replace-on-upload semantics — same as goal library.
+   ────────────────────────────────────────────────────────────────────── */
+
+function buildCompetencyHeader(ws, headers, widths) {
+  ws.columns = widths.map((w) => ({ width: w }));
+  const headerRow = ws.addRow(headers);
+  styleHeaderRow(headerRow, headers.length);
+}
+
+function addCompetencyDataRow(ws, values, rowIndex) {
+  const row = ws.addRow(values);
+  styleDataRow(row, values.length, rowIndex);
+}
+
+function getGroupNames(config) {
+  return (config?.goalGroups || []).map((g) => String(g?.name || '').trim()).filter(Boolean);
+}
+
+function getDesignationsByGroupName(config) {
+  const employees = config?.employeeUploadData?.employees || [];
+  const out = new Map();
+  employees.forEach((emp) => {
+    const g = String(emp['Group Name'] || '').trim();
+    const d = String(emp['Role'] || emp['Designation'] || '').trim();
+    if (!g || !d) return;
+    if (!out.has(g)) out.set(g, new Set());
+    out.get(g).add(d);
+  });
+  return out;
+}
+
+export async function downloadOrgCompetencyTemplate(config = {}) {
+  const { default: ExcelJS } = await getExcelJS();
+  const wb = makeWorkbook(ExcelJS);
+  const ws = wb.addWorksheet('Competencies', {
+    views: [{ showGridLines: false, state: 'frozen', xSplit: 0, ySplit: 1, topLeftCell: 'A2' }],
+    properties: { tabColor: { argb: C.BLUE_DARK } },
+  });
+  buildCompetencyHeader(ws, ['Competency', 'Weight %'], [40, 14]);
+  const existing = (config.selectedCompetencies || []).filter(Boolean);
+  if (existing.length > 0) {
+    existing.forEach((name, i) => addCompetencyDataRow(ws, [name, ''], i));
+  } else {
+    ['Communication', 'Problem Solving', 'Teamwork'].forEach((name, i) => {
+      const r = ws.addRow([name, '']);
+      styleExampleRow(r, 2);
+    });
+  }
+  addNoteRows(ws, [
+    ['NOTES'],
+    ['• One row per competency. Weight % is optional — leave blank for equal weighting at evaluation.'],
+    ['• Delete the red example rows before uploading.'],
+  ]);
+  await writeAndDownload(wb, 'competencies_org.xlsx');
+}
+
+export async function downloadGroupCompetencyTemplate(config = {}) {
+  const { default: ExcelJS } = await getExcelJS();
+  const wb = makeWorkbook(ExcelJS);
+  const groups = getGroupNames(config);
+
+  const ws1 = wb.addWorksheet('Weight Splits', {
+    views: [{ showGridLines: false, state: 'frozen', xSplit: 0, ySplit: 1, topLeftCell: 'A2' }],
+    properties: { tabColor: { argb: C.BLUE_DARK } },
+  });
+  buildCompetencyHeader(ws1, ['Group', 'KRA %', 'Competency %'], [28, 12, 16]);
+  groups.forEach((g, i) => addCompetencyDataRow(ws1, [g, 80, 20], i));
+  if (groups.length > 0) {
+    const groupList = `"${groups.map((g) => g.replace(/"/g, '""')).join(',')}"`;
+    for (let r = 2; r <= groups.length + 1; r++) {
+      ws1.getCell(`A${r}`).dataValidation = {
+        type: 'list', allowBlank: false, formulae: [groupList], showErrorMessage: true,
+        errorTitle: 'Unknown group', error: 'Pick a group from the dropdown.',
+      };
+    }
+  }
+  addNoteRows(ws1, [
+    ['NOTES'],
+    ['• One row per group. KRA % + Competency % must equal 100.'],
+  ]);
+
+  const ws2 = wb.addWorksheet('Competencies', {
+    views: [{ showGridLines: false, state: 'frozen', xSplit: 0, ySplit: 1, topLeftCell: 'A2' }],
+    properties: { tabColor: { argb: C.BLUE_DARK } },
+  });
+  buildCompetencyHeader(ws2, ['Group', 'Competency', 'Weight %'], [28, 36, 14]);
+  if (groups.length > 0) {
+    groups.forEach((g, gi) => {
+      const seed = ((config.competencyByGroup || {})[
+        (config.goalGroups || []).find((gg) => gg.name === g)?.id
+      ]?.competencies) || config.selectedCompetencies || [];
+      seed.forEach((name, ci) => addCompetencyDataRow(ws2, [g, name, ''], gi * 10 + ci));
+    });
+  } else {
+    ['Communication', 'Teamwork'].forEach((name, i) => {
+      const r = ws2.addRow(['Group A', name, '']);
+      styleExampleRow(r, 3);
+    });
+  }
+  addNoteRows(ws2, [
+    ['NOTES'],
+    ['• Many rows per group — one row per competency.'],
+    ['• Weight % is optional — leave blank for equal weighting at evaluation.'],
+  ]);
+  await writeAndDownload(wb, 'competencies_by_group.xlsx');
+}
+
+export async function downloadGroupRoleCompetencyTemplate(config = {}) {
+  const { default: ExcelJS } = await getExcelJS();
+  const wb = makeWorkbook(ExcelJS);
+  const groups = getGroupNames(config);
+  const desigByGroup = getDesignationsByGroupName(config);
+
+  const ws1 = wb.addWorksheet('Weight Splits', {
+    views: [{ showGridLines: false, state: 'frozen', xSplit: 0, ySplit: 1, topLeftCell: 'A2' }],
+    properties: { tabColor: { argb: C.BLUE_DARK } },
+  });
+  buildCompetencyHeader(ws1, ['Group', 'Role', 'KRA %', 'Competency %'], [24, 26, 12, 16]);
+  let r1 = 0;
+  groups.forEach((g) => {
+    addCompetencyDataRow(ws1, [g, '', 80, 20], r1++);
+    (desigByGroup.get(g) ? Array.from(desigByGroup.get(g)) : []).forEach((d) => {
+      addCompetencyDataRow(ws1, [g, d, 80, 20], r1++);
+    });
+  });
+  addNoteRows(ws1, [
+    ['NOTES'],
+    ['• Blank Designation = group baseline. Designation row = override for that role.'],
+    ['• KRA % + Competency % must equal 100 on every row.'],
+  ]);
+
+  const ws2 = wb.addWorksheet('Competencies', {
+    views: [{ showGridLines: false, state: 'frozen', xSplit: 0, ySplit: 1, topLeftCell: 'A2' }],
+    properties: { tabColor: { argb: C.BLUE_DARK } },
+  });
+  buildCompetencyHeader(ws2, ['Group', 'Role', 'Competency', 'Weight %'], [22, 24, 32, 14]);
+  if (groups.length > 0) {
+    groups.forEach((g, gi) => {
+      const baseline = ((config.competencyByGroup || {})[
+        (config.goalGroups || []).find((gg) => gg.name === g)?.id
+      ]?.competencies) || config.selectedCompetencies || [];
+      baseline.forEach((name, ci) => addCompetencyDataRow(ws2, [g, '', name, ''], gi * 100 + ci));
+    });
+  } else {
+    ['Communication', 'Teamwork'].forEach((name, i) => {
+      const r = ws2.addRow(['Group A', '', name, '']);
+      styleExampleRow(r, 4);
+    });
+  }
+  addNoteRows(ws2, [
+    ['NOTES'],
+    ['• Blank Designation = group baseline. Add Designation rows only to override.'],
+    ['• Weight % is optional — leave blank for equal weighting.'],
+  ]);
+  await writeAndDownload(wb, 'competencies_by_group_role.xlsx');
+}
+
+/* ── Parsers ──────────────────────────────────────────────────────────── */
+
+function readCompetencySheet(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error('Could not read file'));
+    reader.onload = async (e) => {
+      try {
+        const XLSX = await getXLSX();
+        const wb = XLSX.read(e.target.result, { type: 'array' });
+        resolve({ XLSX, wb });
+      } catch (err) {
+        reject(err);
+      }
+    };
+    reader.readAsArrayBuffer(file);
+  });
+}
+
+function sheetToRows(XLSX, wb, sheetName) {
+  const ws = wb.Sheets[sheetName];
+  if (!ws) return null;
+  return XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' });
+}
+
+function findHeaderIdx(headers, label) {
+  return headers.indexOf(String(label).trim().toLowerCase());
+}
+
+function isNoteRow(firstCell) {
+  const v = String(firstCell || '').trim();
+  return !v || v.startsWith('•') || v.toUpperCase().startsWith('NOTES');
+}
+
+function parseWeightCell(raw) {
+  const text = String(raw || '').trim();
+  if (!text) return { value: null, error: null };
+  const num = Number(text);
+  if (!Number.isFinite(num)) return { value: null, error: `"${text}" is not a number` };
+  if (num < 0 || num > 100) return { value: null, error: `"${text}" must be between 0 and 100` };
+  return { value: num, error: null };
+}
+
+export async function parseOrgCompetencyXlsx(file) {
+  const { XLSX, wb } = await readCompetencySheet(file);
+  const rows = sheetToRows(XLSX, wb, wb.SheetNames[0]) || [];
+  if (rows.length === 0) throw new Error('File is empty.');
+  const headers = (rows[0] || []).map((h) => String(h || '').trim().toLowerCase());
+  const idxName = findHeaderIdx(headers, 'competency');
+  const idxWeight = findHeaderIdx(headers, 'weight %');
+  if (idxName === -1) throw new Error('Missing "Competency" column.');
+  const errors = [];
+  const competencies = [];
+  const weights = {};
+  for (let r = 1; r < rows.length; r++) {
+    const row = rows[r];
+    if (isNoteRow(row?.[0])) continue;
+    const name = String(row[idxName] || '').trim();
+    if (!name) continue;
+    if (competencies.includes(name)) {
+      errors.push(`Row ${r + 1}: duplicate competency "${name}".`);
+      continue;
+    }
+    competencies.push(name);
+    if (idxWeight !== -1) {
+      const w = parseWeightCell(row[idxWeight]);
+      if (w.error) errors.push(`Row ${r + 1}: weight ${w.error}.`);
+      else if (w.value !== null) weights[name] = w.value;
+    }
+  }
+  if (competencies.length === 0) errors.push('No competencies found.');
+  return { competencies, weights, errors };
+}
+
+export async function parseGroupCompetencyXlsx(file, goalGroups = []) {
+  const { XLSX, wb } = await readCompetencySheet(file);
+  const groupByName = new Map((goalGroups || []).map((g) => [String(g.name || '').trim().toLowerCase(), g]));
+  const errors = [];
+  const result = {}; // groupId → { competencies, kraShare, compShare }
+
+  const wsSplit = sheetToRows(XLSX, wb, 'Weight Splits');
+  if (!wsSplit || wsSplit.length === 0) throw new Error('Missing "Weight Splits" tab.');
+  const sh = (wsSplit[0] || []).map((h) => String(h || '').trim().toLowerCase());
+  const sIdxGroup = findHeaderIdx(sh, 'group');
+  const sIdxKra = findHeaderIdx(sh, 'kra %');
+  const sIdxComp = findHeaderIdx(sh, 'competency %');
+  if (sIdxGroup === -1 || sIdxKra === -1 || sIdxComp === -1) throw new Error('Weight Splits tab needs Group, KRA %, Competency % columns.');
+  for (let r = 1; r < wsSplit.length; r++) {
+    const row = wsSplit[r];
+    if (isNoteRow(row?.[0])) continue;
+    const gname = String(row[sIdxGroup] || '').trim();
+    if (!gname) continue;
+    const group = groupByName.get(gname.toLowerCase());
+    if (!group) { errors.push(`Weight Splits row ${r + 1}: unknown group "${gname}".`); continue; }
+    const kw = parseWeightCell(row[sIdxKra]);
+    const cw = parseWeightCell(row[sIdxComp]);
+    if (kw.error || cw.error) { errors.push(`Weight Splits row ${r + 1}: ${kw.error || cw.error}.`); continue; }
+    if (Math.round((kw.value || 0) + (cw.value || 0)) !== 100) {
+      errors.push(`Weight Splits row ${r + 1}: KRA % + Competency % must equal 100.`);
+      continue;
+    }
+    result[group.id] = { competencies: [], kraShare: kw.value, compShare: cw.value };
+  }
+
+  const wsComp = sheetToRows(XLSX, wb, 'Competencies');
+  if (!wsComp || wsComp.length === 0) throw new Error('Missing "Competencies" tab.');
+  const ch = (wsComp[0] || []).map((h) => String(h || '').trim().toLowerCase());
+  const cIdxGroup = findHeaderIdx(ch, 'group');
+  const cIdxComp = findHeaderIdx(ch, 'competency');
+  if (cIdxGroup === -1 || cIdxComp === -1) throw new Error('Competencies tab needs Group, Competency columns.');
+  for (let r = 1; r < wsComp.length; r++) {
+    const row = wsComp[r];
+    if (isNoteRow(row?.[0])) continue;
+    const gname = String(row[cIdxGroup] || '').trim();
+    const cname = String(row[cIdxComp] || '').trim();
+    if (!gname || !cname) continue;
+    const group = groupByName.get(gname.toLowerCase());
+    if (!group) { errors.push(`Competencies row ${r + 1}: unknown group "${gname}".`); continue; }
+    if (!result[group.id]) result[group.id] = { competencies: [], kraShare: 80, compShare: 20 };
+    if (result[group.id].competencies.includes(cname)) continue;
+    result[group.id].competencies.push(cname);
+  }
+
+  Object.entries(result).forEach(([gid, entry]) => {
+    if (!entry.competencies.length) {
+      const gname = (goalGroups.find((g) => g.id === gid) || {}).name || gid;
+      errors.push(`Group "${gname}" has a weight split but no competencies.`);
+    }
+  });
+  return { byGroup: result, errors };
+}
+
+export async function parseGroupRoleCompetencyXlsx(file, goalGroups = []) {
+  const { XLSX, wb } = await readCompetencySheet(file);
+  const groupByName = new Map((goalGroups || []).map((g) => [String(g.name || '').trim().toLowerCase(), g]));
+  const errors = [];
+  const byGroup = {}; // baselines (blank Designation)
+  const byRole = {};  // per-designation overrides
+
+  const wsSplit = sheetToRows(XLSX, wb, 'Weight Splits');
+  if (!wsSplit || wsSplit.length === 0) throw new Error('Missing "Weight Splits" tab.');
+  const sh = (wsSplit[0] || []).map((h) => String(h || '').trim().toLowerCase());
+  const sIdxGroup = findHeaderIdx(sh, 'group');
+  let sIdxDesig = findHeaderIdx(sh, 'role');
+  if (sIdxDesig === -1) sIdxDesig = findHeaderIdx(sh, 'designation');
+  const sIdxKra = findHeaderIdx(sh, 'kra %');
+  const sIdxComp = findHeaderIdx(sh, 'competency %');
+  if (sIdxGroup === -1 || sIdxDesig === -1 || sIdxKra === -1 || sIdxComp === -1) throw new Error('Weight Splits tab needs Group, Role, KRA %, Competency % columns.');
+  for (let r = 1; r < wsSplit.length; r++) {
+    const row = wsSplit[r];
+    if (isNoteRow(row?.[0])) continue;
+    const gname = String(row[sIdxGroup] || '').trim();
+    if (!gname) continue;
+    const group = groupByName.get(gname.toLowerCase());
+    if (!group) { errors.push(`Weight Splits row ${r + 1}: unknown group "${gname}".`); continue; }
+    const desig = String(row[sIdxDesig] || '').trim();
+    const kw = parseWeightCell(row[sIdxKra]);
+    const cw = parseWeightCell(row[sIdxComp]);
+    if (kw.error || cw.error) { errors.push(`Weight Splits row ${r + 1}: ${kw.error || cw.error}.`); continue; }
+    if (Math.round((kw.value || 0) + (cw.value || 0)) !== 100) {
+      errors.push(`Weight Splits row ${r + 1}: KRA % + Competency % must equal 100.`);
+      continue;
+    }
+    if (desig) {
+      byRole[group.id] = byRole[group.id] || {};
+      byRole[group.id][desig] = { competencies: [], kraShare: kw.value, compShare: cw.value };
+    } else {
+      byGroup[group.id] = { competencies: [], kraShare: kw.value, compShare: cw.value };
+    }
+  }
+
+  const wsComp = sheetToRows(XLSX, wb, 'Competencies');
+  if (!wsComp || wsComp.length === 0) throw new Error('Missing "Competencies" tab.');
+  const ch = (wsComp[0] || []).map((h) => String(h || '').trim().toLowerCase());
+  const cIdxGroup = findHeaderIdx(ch, 'group');
+  let cIdxDesig = findHeaderIdx(ch, 'role');
+  if (cIdxDesig === -1) cIdxDesig = findHeaderIdx(ch, 'designation');
+  const cIdxComp = findHeaderIdx(ch, 'competency');
+  if (cIdxGroup === -1 || cIdxDesig === -1 || cIdxComp === -1) throw new Error('Competencies tab needs Group, Role, Competency columns.');
+  for (let r = 1; r < wsComp.length; r++) {
+    const row = wsComp[r];
+    if (isNoteRow(row?.[0])) continue;
+    const gname = String(row[cIdxGroup] || '').trim();
+    const cname = String(row[cIdxComp] || '').trim();
+    if (!gname || !cname) continue;
+    const group = groupByName.get(gname.toLowerCase());
+    if (!group) { errors.push(`Competencies row ${r + 1}: unknown group "${gname}".`); continue; }
+    const desig = String(row[cIdxDesig] || '').trim();
+    if (desig) {
+      byRole[group.id] = byRole[group.id] || {};
+      const target = byRole[group.id][desig] = byRole[group.id][desig] || { competencies: [], kraShare: 80, compShare: 20 };
+      if (!target.competencies.includes(cname)) target.competencies.push(cname);
+    } else {
+      const target = byGroup[group.id] = byGroup[group.id] || { competencies: [], kraShare: 80, compShare: 20 };
+      if (!target.competencies.includes(cname)) target.competencies.push(cname);
+    }
+  }
+
+  Object.entries(byGroup).forEach(([gid, entry]) => {
+    if (!entry.competencies.length) {
+      const gname = (goalGroups.find((g) => g.id === gid) || {}).name || gid;
+      errors.push(`Group "${gname}" baseline has a weight split but no competencies.`);
+    }
+  });
+  return { byGroup, byRole, errors };
 }

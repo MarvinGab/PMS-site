@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import zaroLogo from '../images/final zaro logo.png';
-import { downloadGoalLibraryTemplate, parseGoalLibraryXlsx, downloadEmployeeTemplate, parseEmployeeXlsx, validateGoalLibraryData, downloadErrorReport, goalLibraryTemplateMeta, employeeTemplateMeta, validateEmployeeData, downloadAttributeValuesTemplate, parseAttributeValuesXlsx, downloadGoalLibraryBulkTemplate, downloadPrefillBulkTemplate, parseGoalLibraryBulkXlsx, getEmployeeRoutingColumns } from './templateUtils';
+import { downloadGoalLibraryTemplate, parseGoalLibraryXlsx, downloadEmployeeTemplate, parseEmployeeXlsx, validateGoalLibraryData, downloadErrorReport, goalLibraryTemplateMeta, employeeTemplateMeta, validateEmployeeData, downloadAttributeValuesTemplate, parseAttributeValuesXlsx, downloadGoalLibraryBulkTemplate, downloadPrefillBulkTemplate, parseGoalLibraryBulkXlsx, getEmployeeRoutingColumns, downloadOrgCompetencyTemplate, downloadGroupCompetencyTemplate, downloadGroupRoleCompetencyTemplate, parseOrgCompetencyXlsx, parseGroupCompetencyXlsx, parseGroupRoleCompetencyXlsx, canonicalTargetTypeId } from './templateUtils';
 import { readWizardStateSync, persistWizardState, hydrateWizardState, readEmployeeCredentialsSync, readOrganizationsSync, syncEmployeeCredentialsForOrg } from './backend/stateStore';
 
 /* ─── CONSTANTS ──────────────────────────────────────────────────────────── */
@@ -18,12 +18,18 @@ function getNavSteps(config) {
       { id: 'framework',      label: 'Performance Framework', desc: 'Choose framework' },
       { id: 'perspectives',   label: 'BSC Perspectives',      desc: 'Strategy layers & weights' },
       { id: 'groups',         label: 'Groups & Strategy',     desc: 'Who gets what goal approach' },
+      // Targets is configured BEFORE any sheet generation/upload so the templates know
+      // which level + types to surface and parsers know how to route values.
+      { id: 'targets',        label: 'Targets', desc: 'Types, level & caps' },
+      { id: 'scale',          label: 'Rating Scale', desc: 'Points & labels' },
+      { id: 'auto_rating',    label: 'Auto-Rating', desc: 'Achievement scoring' },
       ...(hasBscPrefill ? [{ id: 'prefill_data', label: 'Pre-fill Data', desc: 'Upload pre-assigned KRAs/KPIs' }] : []),
       ...(hasBscLibraries ? [{ id: 'goal_libraries', label: 'Goal Libraries', desc: 'Build or upload KRA libraries' }] : []),
       { id: 'limits',         label: 'Goal Limits',           desc: 'KRA/KPI count & weight rules' },
-      { id: 'targets',        label: 'Targets', desc: 'Types, level & caps' },
+      { id: 'bellcurve',      label: 'Bell Curve', desc: 'Normalization bands' },
       { id: 'emp_settings',   label: 'Employee Settings',     desc: 'Manager hierarchy & email rules' },
       { id: 'upload',         label: 'Employee Upload',       desc: 'Upload employees, managers & routing' },
+      { id: 'competencies',   label: 'Competencies', desc: 'Org / group / role assignment' },
       { id: 'summary',        label: 'Summary & Launch',      desc: 'Review & go live' },
     ];
     return steps;
@@ -32,12 +38,16 @@ function getNavSteps(config) {
     const steps = [
       { id: 'framework',      label: 'Performance Framework', desc: 'Choose framework' },
       { id: 'groups',         label: 'Groups & Strategy',     desc: 'Who gets what goal approach' },
+      { id: 'targets',        label: 'Targets', desc: 'Types, level & caps' },
+      { id: 'scale',          label: 'Rating Scale', desc: 'Points & labels' },
+      { id: 'auto_rating',    label: 'Auto-Rating', desc: 'Achievement scoring' },
       ...(hasBscPrefill ? [{ id: 'prefill_data', label: 'Pre-fill Data', desc: 'Upload pre-assigned KRAs/KPIs' }] : []),
       ...(hasBscLibraries ? [{ id: 'goal_libraries', label: 'Goal Libraries', desc: 'Build or upload KRA libraries' }] : []),
       { id: 'limits',         label: 'Goal Limits',           desc: 'KRA/KPI count & weight rules' },
-      { id: 'targets',        label: 'Targets', desc: 'Types, level & caps' },
+      { id: 'bellcurve',      label: 'Bell Curve', desc: 'Normalization bands' },
       { id: 'emp_settings',   label: 'Employee Settings',     desc: 'Manager hierarchy & email rules' },
       { id: 'upload',         label: 'Employee Upload',       desc: 'Upload employees, managers & routing' },
+      { id: 'competencies',   label: 'Competencies', desc: 'Org / group / role assignment' },
       { id: 'summary',        label: 'Summary & Launch',      desc: 'Review & go live' },
     ];
     return steps;
@@ -46,11 +56,12 @@ function getNavSteps(config) {
     { id: 'framework',    label: 'Performance Framework', desc: 'Structure & model' },
     { id: 'goals',        label: 'Goal Library',           desc: 'Flat KRA / KPI structure' },
   ];
+  // Targets step lands BEFORE the KRA Library upload step so the template can pull
+  // the chosen target level + types. Even in KRA-only mode (no KPIs) it's exposed
+  // so admins can pre-set KRA targets and types from the wizard.
+  steps.push({ id: 'targets', label: 'Targets', desc: 'Types & level' });
   if (hasLibrary) steps.push({ id: 'kra_library', label: 'KRA Library', desc: 'Build & upload goal library' });
   steps.push({ id: 'limits', label: 'Limits & Rules', desc: 'Counts, weights & permissions' });
-  if (frameworkId !== 'kra') {
-    steps.push({ id: 'targets', label: 'Targets & Auto-Rating', desc: 'Achievement mapping' });
-  }
   steps.push(
     { id: 'hierarchy',    label: 'Rating Hierarchy',        desc: 'Who rates whom' },
     { id: 'scale',        label: 'Rating Scale',            desc: 'Points & labels' },
@@ -126,6 +137,53 @@ const KRA_ASSIGNMENT_MODES = [
 ];
 
 const COMPETENCY_CHIPS = ['Communication', 'Problem Solving', 'Teamwork', 'Ownership', 'Technical Expertise', 'Leadership', 'Innovation', 'Customer Focus', 'Adaptability', 'Collaboration', 'Result Orientation', 'Strategic Thinking'];
+
+const COMPETENCY_LIBRARY = {
+  behavioural: [
+    'Communication', 'Teamwork', 'Ownership', 'Adaptability', 'Collaboration',
+    'Customer Focus', 'Result Orientation', 'Innovation', 'Empathy', 'Resilience',
+  ],
+  functional: [
+    'Technical Expertise', 'Problem Solving', 'Analytical Thinking', 'Process Discipline',
+    'Quality Orientation', 'Domain Knowledge', 'Project Execution', 'Data Literacy',
+  ],
+  values: [
+    'Integrity', 'Excellence', 'Trust', 'Respect', 'Accountability',
+    'Innovation', 'Customer First', 'Diversity & Inclusion',
+  ],
+  leadership: [
+    'Strategic Thinking', 'Leadership', 'People Development', 'Decision Making',
+    'Vision Setting', 'Change Management', 'Influence', 'Coaching',
+  ],
+};
+
+function getMergedCompetencyItems(type, customByType) {
+  const base = COMPETENCY_LIBRARY[type] || [];
+  const custom = Array.isArray(customByType?.[type]) ? customByType[type] : [];
+  // Preserve order: defaults first, then customs. Dedupe case-insensitively.
+  const seen = new Set(base.map((s) => s.toLowerCase()));
+  const merged = [...base];
+  custom.forEach((name) => {
+    const k = String(name || '').trim();
+    if (!k) return;
+    if (seen.has(k.toLowerCase())) return;
+    seen.add(k.toLowerCase());
+    merged.push(k);
+  });
+  return merged;
+}
+function getCompetencyLibraries(type, customByType = {}) {
+  const lib = (key, label) => ({
+    key, label,
+    items: getMergedCompetencyItems(key, customByType),
+    customs: Array.isArray(customByType?.[key]) ? customByType[key] : [],
+  });
+  if (type === 'behavioural') return [lib('behavioural', 'Behavioural')];
+  if (type === 'functional')  return [lib('functional',  'Functional / Technical')];
+  if (type === 'values')      return [lib('values',      'Core values')];
+  if (type === 'both')        return [lib('behavioural', 'Behavioural'), lib('functional', 'Functional / Technical')];
+  return [lib('behavioural', 'Behavioural')];
+}
 const APP_DATA_KEY = 'zarohr_app_data_v1';
 const SESSION_KEY = 'zarohr_auth_session';
 const WIZARD_STATE_KEY = 'zarohr_pms_wizard_state_v1';
@@ -580,6 +638,8 @@ function getNewGroupsSnapshot(config) {
       hasLibrary: !!g.hasLibrary,
       libraryType: g.hasLibrary ? (g.libraryType || 'kra-only') : null,
       kpiRatingMode: g.kpiRatingMode === 'free-text' ? 'free-text' : 'rated',
+      // targetLevel intentionally excluded: it's managed on the Targets step now,
+      // so changing it must NOT dirty the Groups & Strategy applied-snapshot.
     })),
   });
 }
@@ -597,8 +657,20 @@ function isGroupLibraryEnabled(group) {
   );
 }
 
+function isGroupShownOnGoalsBoard(group) {
+  return !!group && (isGroupLibraryEnabled(group) || !!group.prefillType);
+}
+
 function normalizeSimpleGoalGroup(group) {
-  return group;
+  if (!group) return group;
+  // Coerce legacy / blank target-level values into the binary 'KPI' or 'KRA'.
+  // The wizard no longer offers an 'inherit' option, so callers that still hold
+  // it (stored configs, snapshots) get rewritten on the next edit.
+  const next = { ...group };
+  if (next.targetLevel !== 'KRA' && next.targetLevel !== 'KPI') {
+    next.targetLevel = 'KPI';
+  }
+  return next;
 }
 
 function groupsNeedingDataUpload(config) {
@@ -771,7 +843,9 @@ function getEmployeeSettingsSnapshot(config) {
   });
 }
 
-function StepStatusBar({ applied, valid = true, appliedMessage, pendingMessage, invalidMessage, buttonLabel, onApply }) {
+function StepStatusBar({ applied, valid = true, appliedMessage, pendingMessage, invalidMessage, buttonLabel, onApply, readOnly = false }) {
+  if (readOnly && !applied) return null;
+
   const background = applied ? '#F0FDF4' : valid ? '#EFF6FF' : '#FFF7ED';
   const border = applied ? '#86EFAC' : valid ? '#BFDBFE' : '#FED7AA';
   const text = applied ? '#15803D' : valid ? '#1E40AF' : '#92400E';
@@ -781,7 +855,7 @@ function StepStatusBar({ applied, valid = true, appliedMessage, pendingMessage, 
       <div style={{ fontSize: 13, color: text }}>
         {applied ? appliedMessage : valid ? pendingMessage : invalidMessage}
       </div>
-      {!applied && onApply ? (
+      {!readOnly && !applied && onApply ? (
         <button
           type="button"
           disabled={!valid}
@@ -975,6 +1049,7 @@ function SectionHead({ title, sub }) {
   return (
     <div style={{ marginBottom: 16 }}>
       <div style={{ fontSize: 17, fontWeight: 600, color: '#0D1117' }}>{title}</div>
+      {sub && <div style={{ fontSize: 12.5, color: '#64748B', marginTop: 5, lineHeight: 1.45 }}>{sub}</div>}
     </div>
   );
 }
@@ -1012,10 +1087,54 @@ function Field({ label, children, hint }) {
   );
 }
 
+function ChoiceCards({ value, options, onChange, columns = 3, disabled = false, compact = false }) {
+  return (
+    <div style={{ display: 'grid', gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))`, gap: compact ? 6 : 8 }}>
+      {options.map((opt) => {
+        const active = value === opt.id;
+        return (
+          <button
+            key={opt.id}
+            type="button"
+            disabled={disabled}
+            onClick={() => onChange(opt.id)}
+            style={{
+              minHeight: compact ? 38 : 58,
+              padding: compact ? '7px 10px' : '10px 12px',
+              borderRadius: compact ? 8 : 10,
+              border: `1.5px solid ${active ? '#2563EB' : '#E2E8F0'}`,
+              background: active ? '#EFF4FF' : '#fff',
+              color: active ? '#1D4ED8' : '#334155',
+              cursor: disabled ? 'not-allowed' : 'pointer',
+              fontFamily: 'inherit',
+              textAlign: 'left',
+              opacity: disabled ? 0.55 : 1,
+            }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', gap: 7, fontSize: compact ? 12.5 : 13, fontWeight: 800 }}>
+              <span style={{
+                width: compact ? 12 : 14,
+                height: compact ? 12 : 14,
+                borderRadius: '50%',
+                border: `1.5px solid ${active ? '#2563EB' : '#CBD5E1'}`,
+                background: active ? '#2563EB' : '#fff',
+                boxShadow: active ? 'inset 0 0 0 3px #fff' : 'none',
+                flexShrink: 0,
+              }} />
+              {opt.label}
+            </div>
+            {!compact && opt.desc && <div style={{ marginTop: 4, paddingLeft: 21, fontSize: 11.5, color: active ? '#2563EB' : '#94A3B8', lineHeight: 1.35 }}>{opt.desc}</div>}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 const inputStyle = {
   padding: '7px 10px', border: '1px solid #E2E8F0', borderRadius: 7,
   fontSize: 13, color: '#0D1117', background: '#fff', width: '100%',
-  fontFamily: 'inherit', outline: 'none',
+  fontFamily: 'inherit', outline: 'none', boxSizing: 'border-box',
 };
 
 const selectStyle = { ...inputStyle, cursor: 'pointer' };
@@ -1873,87 +1992,878 @@ function StepHierarchy({ config, update }) {
 const SCALE_DEFAULTS = {
   3: [{ n: 1, l: 'Below Expectations' }, { n: 2, l: 'Meets Expectations' }, { n: 3, l: 'Exceeds Expectations' }],
   4: [{ n: 1, l: 'Below Expectations' }, { n: 2, l: 'Meets Expectations' }, { n: 3, l: 'Exceeds Expectations' }, { n: 4, l: 'Outstanding' }],
+  7: [{ n: 1, l: 'Unsatisfactory' }, { n: 2, l: 'Needs Improvement' }, { n: 3, l: 'Partially Meets' }, { n: 4, l: 'Meets Expectations' }, { n: 5, l: 'Exceeds Expectations' }, { n: 6, l: 'Strong Performance' }, { n: 7, l: 'Outstanding' }],
   5: [{ n: 1, l: 'Needs Improvement' }, { n: 2, l: 'Below Expectations' }, { n: 3, l: 'Meets Expectations' }, { n: 4, l: 'Exceeds Expectations' }, { n: 5, l: 'Outstanding' }],
-  10: Array.from({ length: 10 }, (_, i) => ({ n: i + 1, l: `Level ${i + 1}` })),
+  10: Array.from({ length: 10 }, (_, i) => ({ n: i + 1, l: '' })),
 };
+const SCALE_PRESETS = [3, 4, 5, 7];
 const SCALE_COLORS = ['#DC2626','#F97316','#FBBF24','#84CC16','#22C55E','#10B981','#14B8A6','#3B82F6','#8B5CF6','#EC4899'];
 
-function StepScale({ config, update }) {
-  const scale = SCALE_DEFAULTS[config.scalePoints] || SCALE_DEFAULTS[5];
+function getScaleDefaults(points) {
+  const n = Math.max(2, Math.min(10, Number(points) || 5));
+  const defaults = SCALE_DEFAULTS[n] || Array.from({ length: n }, (_, i) => ({ n: i + 1, l: '' }));
+  return defaults.map((item) => ({ ...item, code: String(item.n) }));
+}
+
+function getScaleLevels(config = {}) {
+  const points = Math.max(2, Math.min(10, Number(config.scalePoints) || 5));
+  const defaults = getScaleDefaults(points);
+  const labels = config.scaleLabels || {};
+  const codes = config.scaleRankCodes || {};
+  return defaults.map((item) => ({
+    ...item,
+    l: String(labels[item.n] || item.l),
+    code: String(codes[item.n] ?? item.n),
+  }));
+}
+
+function getPresetScalePatch(points) {
+  return {
+    scalePreset: String(points),
+    scalePoints: points,
+    scaleLabels: {},
+    scaleRankCodes: {},
+    scaleRankRanges: {},
+  };
+}
+
+function getMergedRankRanges(scale, stored = {}) {
+  const N = scale.length;
+  return scale.map((s) => {
+    const defFrom = s.n === 1 ? 1 : (s.n - 0.5);
+    const defTo = s.n === N ? N : (s.n + 0.49);
+    const v = stored[s.n] || {};
+    const fromRaw = v.from === undefined || v.from === null || v.from === '' ? defFrom : Number(v.from);
+    const toRaw = v.to === undefined || v.to === null || v.to === '' ? defTo : Number(v.to);
+    return { n: s.n, from: fromRaw, to: toRaw };
+  });
+}
+
+const BAND_PRESETS = [
+  { id: 'standard', label: 'Standard',  desc: 'Even split between ranks',     offset: 0     },
+  { id: 'strict',   label: 'Strict',    desc: 'Higher bar for the top ranks', offset: 0.2   },
+  { id: 'lenient',  label: 'Lenient',   desc: 'Easier to reach the top ranks', offset: -0.2 },
+];
+
+function getBandPresetRanges(presetId, N) {
+  const offset = (BAND_PRESETS.find((p) => p.id === presetId) || BAND_PRESETS[0]).offset;
+  const round2 = (n) => Math.round(n * 100) / 100;
+  const thresholds = Array.from({ length: N - 1 }, (_, i) => round2(i + 1.5 + offset));
+  const out = {};
+  for (let k = 1; k <= N; k++) {
+    const from = k === 1 ? 1 : thresholds[k - 2];
+    const to = k === N ? N : round2(thresholds[k - 1] - 0.01);
+    out[k] = { from: round2(from), to: round2(to) };
+  }
+  return out;
+}
+
+function detectBandPreset(mergedRanges, N) {
+  for (const preset of BAND_PRESETS) {
+    const target = getBandPresetRanges(preset.id, N);
+    const matches = mergedRanges.every((r) => {
+      const t = target[r.n];
+      return t && Math.abs(t.from - r.from) < 0.005 && Math.abs(t.to - r.to) < 0.005;
+    });
+    if (matches) return preset.id;
+  }
+  return 'custom';
+}
+
+function validateRankRanges(ranges, N) {
+  const errors = [];
+  if (!ranges.length) return errors;
+  ranges.forEach((r) => {
+    if (!Number.isFinite(r.from) || !Number.isFinite(r.to)) {
+      errors.push(`Rank ${r.n}: enter a number for From and To.`);
+    } else if (r.from > r.to) {
+      errors.push(`Rank ${r.n}: From must be less than or equal to To.`);
+    } else if (r.from < 1 || r.to < 1 || r.from > N || r.to > N) {
+      errors.push(`Rank ${r.n}: bands must stay between 1 and ${N}.`);
+    }
+  });
+  for (let i = 1; i < ranges.length; i++) {
+    const prev = ranges[i - 1];
+    const cur = ranges[i];
+    if (Number.isFinite(prev.to) && Number.isFinite(cur.from) && cur.from <= prev.to) {
+      errors.push(`Rank ${cur.n} overlaps Rank ${prev.n}.`);
+    }
+  }
+  return [...new Set(errors)];
+}
+
+const round2 = (n) => Math.round(n * 100) / 100;
+
+const SCORE_PRECISION_OPTIONS = [
+  { id: 'integer', label: 'Whole numbers', desc: '1, 2, 3, 4, 5', step: 1 },
+  { id: 'half', label: 'Half-points', desc: '3.0, 3.5, 4.0', step: 0.5 },
+  { id: 'one-decimal', label: 'Tenth-points', desc: '3.1, 3.7, 4.2', step: 0.1 },
+];
+
+function getScoreStep(config = {}) {
+  const precision = config.scorePrecision || 'half';
+  return SCORE_PRECISION_OPTIONS.find((item) => item.id === precision)?.step || 0.5;
+}
+
+function roundToStep(value, step) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return 1;
+  return round2(Math.round(n / step) * step);
+}
+
+const FINAL_RATING_DISPLAY_OPTIONS = [
+  { id: 'code',          label: 'Rank code',     format: ({ code }) => code },
+  { id: 'code-label',    label: 'Rank + label',  format: ({ code, l }) => `${code} - ${l}` },
+  { id: 'label',         label: 'Label only',    format: ({ l }) => l },
+  { id: 'decimal-code',  label: 'Score + rank',  format: ({ code, decimal }) => `${decimal.toFixed(2)} - ${code}` },
+  { id: 'decimal-label', label: 'Score + label', format: ({ l, decimal }) => `${decimal.toFixed(2)} - ${l}` },
+];
+
+function findRankForDecimal(decimal, ranges, scale) {
+  for (let i = 0; i < ranges.length; i++) {
+    const r = ranges[i];
+    if (decimal >= r.from && decimal <= r.to + 0.005) return scale[i];
+  }
+  if (decimal < ranges[0]?.from) return scale[0];
+  return scale[scale.length - 1];
+}
+
+const SCORE_INPUT_MODES = [
+  { id: 'dropdown',  label: 'Dropdown',      desc: 'Pick from a list',     supportsDecimals: false, showsBandLabel: true  },
+  { id: 'segmented', label: 'Band pills',    desc: 'One-click choice',     supportsDecimals: false, showsBandLabel: true  },
+  { id: 'stars',     label: 'Stars',         desc: 'Click or drag stars',  supportsDecimals: true,  showsBandLabel: false },
+  { id: 'number',    label: 'Numeric input', desc: 'Type a score',         supportsDecimals: true,  showsBandLabel: false },
+  { id: 'slider',    label: 'Slider',        desc: 'Drag to a score',      supportsDecimals: true,  showsBandLabel: false },
+];
+
+function getWidgetSpec(widgetId) {
+  return SCORE_INPUT_MODES.find((m) => m.id === widgetId) || SCORE_INPUT_MODES[0];
+}
+
+const RATING_CHOICE_DISPLAY_OPTIONS = [
+  { id: 'number-label', label: 'Number + label', example: '4 - Exceeds Expectations' },
+  { id: 'number-only', label: 'Number only', example: '4' },
+  { id: 'label-only', label: 'Label only', example: 'Exceeds Expectations' },
+];
+
+export function getScaleSnapshot(config = {}) {
+  const scale = getScaleLevels(config);
+  const ranges = getMergedRankRanges(scale, config.scaleRankRanges || {});
+  return JSON.stringify({
+    scalePreset: config.scalePreset || '5',
+    scalePoints: Math.max(2, Math.min(10, Number(config.scalePoints) || 5)),
+    labels: config.scaleLabels || {},
+    codes: config.scaleRankCodes || {},
+    ranges,
+    scoreInputMode: config.scoreInputMode || 'dropdown',
+    scorePrecision: config.scorePrecision || 'half',
+    ratingChoiceDisplay: config.ratingChoiceDisplay || 'number-label',
+    finalRatingDisplay: config.finalRatingDisplay || 'code-label',
+    commentRequiredAt: config.commentRequiredAt || 'lowest',
+    managerRatingVisibleFrom: config.managerRatingVisibleFrom || 'manager-rating',
+    finalRatingVisibleFrom: config.finalRatingVisibleFrom || 'hr-review',
+  });
+}
+
+const RATING_VISIBILITY_PHASES = {
+  manager: [
+    { id: 'manager-rating', label: 'After manager submits their rating' },
+    { id: 'hr-review',      label: 'After HR review & publish (coming soon)', unavailable: true },
+    { id: 'never',          label: 'Never (always hidden)' },
+  ],
+  final: [
+    { id: 'hr-review', label: 'After HR review & publish (coming soon)', unavailable: true },
+    { id: 'never',     label: 'Never (always hidden)' },
+  ],
+};
+
+function isScaleConfigValid(config = {}) {
+  const scale = getScaleLevels(config);
+  return (
+    scale.every((level) => String(level.l || '').trim()) &&
+    scale.every((level) => String(level.code || '').trim()) &&
+    validateRankRanges(getMergedRankRanges(scale, config.scaleRankRanges || {}), scale.length).length === 0
+  );
+}
+
+export function StepScale({ config, update, hideHead, hideApplyBar = false }) {
+  const scale = getScaleLevels(config);
+  const updateLabel = (point, value) => update('__mergeConfig', { scalePreset: 'custom', scaleLabels: { ...(config.scaleLabels || {}), [point]: value } });
+  const updateRankCode = (point, value) => update('__mergeConfig', { scalePreset: 'custom', scaleRankCodes: { ...(config.scaleRankCodes || {}), [point]: value } });
+  const setScalePoints = (value) => update('__mergeConfig', {
+    scalePreset: 'custom',
+    scalePoints: Math.max(2, Math.min(10, Number(value) || 5)),
+    scaleRankRanges: {},
+  });
+  const hasCustomLabels = Object.values(config.scaleLabels || {}).some((v) => String(v || '').trim().length > 0);
+  const hasCustomCodes  = Object.values(config.scaleRankCodes || {}).some((v) => String(v || '').trim().length > 0);
+  const hasCustomRanges = Object.keys(config.scaleRankRanges || {}).length > 0;
+  const isCustomScale   = (config.scalePreset || '5') === 'custom' || hasCustomLabels || hasCustomCodes || hasCustomRanges || !SCALE_PRESETS.includes(Number(config.scalePoints));
+  const rankRanges = getMergedRankRanges(scale, config.scaleRankRanges || {});
+  const rangeErrors = validateRankRanges(rankRanges, scale.length);
+  const updateRange = (point, field, value) => {
+    const num = value === '' ? null : Number(value);
+    const stored = { ...(config.scaleRankRanges || {}) };
+    rankRanges.forEach((r) => {
+      if (!stored[r.n]) stored[r.n] = { from: r.from, to: r.to };
+    });
+    if (num === null || !Number.isFinite(num)) {
+      stored[point] = { ...stored[point], [field]: '' };
+      update('__mergeConfig', { scalePreset: 'custom', scaleRankRanges: stored, bandPreset: 'custom' });
+      return;
+    }
+    const v = round2(num);
+    stored[point] = { ...stored[point], [field]: v };
+    const idx = rankRanges.findIndex((r) => r.n === point);
+    if (field === 'to' && idx >= 0 && idx < rankRanges.length - 1) {
+      const next = rankRanges[idx + 1];
+      stored[next.n] = { ...stored[next.n], from: round2(v + 0.01) };
+    } else if (field === 'from' && idx > 0) {
+      const prev = rankRanges[idx - 1];
+      stored[prev.n] = { ...stored[prev.n], to: round2(v - 0.01) };
+    }
+    update('__mergeConfig', { scalePreset: 'custom', scaleRankRanges: stored, bandPreset: 'custom' });
+  };
+  const [pendingPreset, setPendingPreset] = useState(null);
+  const applyPreset = (points) => {
+    update('__mergeConfig', getPresetScalePatch(points));
+    setPendingPreset(null);
+  };
+  const handlePresetClick = (points) => {
+    if (isCustomScale) {
+      setPendingPreset(points);
+      return;
+    }
+    applyPreset(points);
+  };
+  const scaleValid = isScaleConfigValid(config);
+  const finalRatingDisplay = config.finalRatingDisplay || 'code-label';
+  const sampleFormatter = FINAL_RATING_DISPLAY_OPTIONS.find((o) => o.id === finalRatingDisplay) || FINAL_RATING_DISPLAY_OPTIONS[1];
+  const scaleApplied = scaleValid && config.scaleAppliedSnapshot === getScaleSnapshot(config);
+  const inputMode = config.scoreInputMode || 'dropdown';
+  const widgetSpec = getWidgetSpec(inputMode);
+  const ratingChoiceDisplay = config.ratingChoiceDisplay || 'number-label';
+  const setInputWidget = (nextWidgetId) => {
+    if (nextWidgetId === inputMode) return;
+    const next = getWidgetSpec(nextWidgetId);
+    const patch = { scoreInputMode: nextWidgetId };
+    if (!next.supportsDecimals) patch.scorePrecision = 'integer';
+    else if ((config.scorePrecision || 'half') === 'integer') patch.scorePrecision = 'half';
+    update('__mergeConfig', patch);
+  };
+  const starsRef = useRef(null);
+  const [starsDragging, setStarsDragging] = useState(false);
+  const numericDraftRef = useRef(null);
+  const [numericDraft, setNumericDraft] = useState(null);
+  const scoreStep = getScoreStep(config);
+  const defaultPreview = roundToStep(1 + (scale.length - 1) * 0.68, scoreStep);
+  const [previewScore, setPreviewScore] = useState(defaultPreview);
+  const clampedPreview = Math.max(1, Math.min(scale.length, roundToStep(previewScore, scoreStep)));
+  const previewLevel = findRankForDecimal(clampedPreview, rankRanges, scale);
+  const displayScore = (value) => Number(value).toFixed(scoreStep === 1 ? 0 : scoreStep === 0.5 ? 1 : 1);
+  const formatChoice = (score, rank = findRankForDecimal(score, rankRanges, scale)) => {
+    if (ratingChoiceDisplay === 'number-only') return String(rank?.code || rank?.n || score);
+    if (ratingChoiceDisplay === 'label-only') return rank?.l || '';
+    return `${rank?.code || rank?.n || score} - ${rank?.l || ''}`;
+  };
+  const setPreviewDecimal = (value) => setPreviewScore(Math.max(1, Math.min(scale.length, roundToStep(value, scoreStep))));
+  const updateStarsFromPointer = (e) => {
+    const el = starsRef.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    const x = Math.max(0, Math.min(rect.width, e.clientX - rect.left));
+    const ratio = rect.width > 0 ? x / rect.width : 0;
+    const raw = ratio * scale.length;
+    const stepped = scoreStep >= 1
+      ? Math.max(1, Math.min(scale.length, Math.ceil(raw)))
+      : Math.max(1, Math.min(scale.length, roundToStep(raw, scoreStep)));
+    setPreviewDecimal(stepped);
+  };
+  const perspectives = (config.frameworkId === 'bsc' ? (config.perspectives || []) : []).filter((p) => String(p.name || '').trim());
+  const bscRows = perspectives.length ? perspectives.slice(0, 4) : [
+    { name: 'Financial', weight: 25 }, { name: 'Customer', weight: 25 }, { name: 'Internal Processes', weight: 25 }, { name: 'Learning & Growth', weight: 25 },
+  ];
+  const weightedRows = bscRows.map((p, i) => {
+    const score = Math.max(1, Math.min(scale.length, roundToStep(clampedPreview - 0.4 + i * 0.25, scoreStep)));
+    return { ...p, score, weighted: score * ((Number(p.weight) || 0) / 100) };
+  });
+  const totalWeight = weightedRows.reduce((sum, row) => sum + (Number(row.weight) || 0), 0) || 100;
+  const bscFinalScore = round2(weightedRows.reduce((sum, row) => sum + row.weighted, 0) * (100 / totalWeight));
+  const configuredTargetLevels = (config.goalGroups || []).map((group) => group.targetLevel === 'KRA' ? 'KRA' : 'KPI');
+  const flatTargetLevel = config.targetLevelMode === 'KRA'
+    ? 'KRA'
+    : config.targetLevelMode === 'KPI'
+      ? 'KPI'
+      : configuredTargetLevels.length && configuredTargetLevels.every((level) => level === 'KRA')
+        ? 'KRA'
+        : 'KPI';
+  const flatFinalScore = clampedPreview;
+  const finalScore = config.frameworkId === 'bsc' ? bscFinalScore : flatFinalScore;
+  const finalRank = findRankForDecimal(finalScore, rankRanges, scale);
+  const finalOutput = finalRank ? sampleFormatter.format({ code: finalRank.code, l: finalRank.l, decimal: finalScore }) : '';
+  const sampleTarget = 95;
+  const sampleAchievement = 93;
+  const sampleAchievementPct = Math.round((sampleAchievement / sampleTarget) * 100);
+  const ratingBoxLabel = config.autoRating ? 'Suggested rating' : 'Manual rating';
+  const scaleModeLabel = isCustomScale
+    ? `Custom scale (${scale.length} points)`
+    : `${config.scalePreset || config.scalePoints || 5}-point preset`;
   return (
     <div>
-      <SectionHead title="Rating scale & calculation" sub="Define how scores are presented and computed across the appraisal." />
+      {!hideHead && <SectionHead title="Rating scale" sub="Set the scoring points and labels used by goals, competencies, auto-rating, and final normalization." />}
       <Card>
-        <CardHead title="Scale configuration" />
+        <CardHead title="Scale setup" />
         <CardBody>
-          <Grid3>
-            <Field label="Scale type">
-              <select style={selectStyle} value={config.scalePoints} onChange={e => update('scalePoints', Number(e.target.value))}>
-                <option value={5}>5-point (1–5)</option>
-                <option value={4}>4-point (1–4)</option>
-                <option value={10}>10-point (1–10)</option>
-                <option value={3}>3-point (1–3)</option>
-              </select>
-            </Field>
-            <Field label="Display format">
-              <select style={selectStyle} value={config.scaleDisplay} onChange={e => update('scaleDisplay', e.target.value)}>
-                <option>Number + label</option>
-                <option>Number only</option>
-                <option>Label only</option>
-                <option>Star rating</option>
-              </select>
-            </Field>
-            <Field label="Rating applies at">
-              <select style={selectStyle} value={config.ratingAppliesAt} onChange={e => update('ratingAppliesAt', e.target.value)}>
-                <option>KPI level — rolled up</option>
-                <option>KRA level directly</option>
-                <option>Perspective level</option>
-                <option>Overall only</option>
-              </select>
-            </Field>
-          </Grid3>
-          <div style={{ marginBottom: 16 }}>
-            <div style={{ fontSize: 12, fontWeight: 600, color: '#374151', textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: 10 }}>Scale preview & labels</div>
-            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 12 }}>
+          <div style={{ marginBottom: 18 }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap', marginBottom: 10 }}>
+              <div>
+                <div style={{ fontSize: 12, fontWeight: 800, color: '#64748B', textTransform: 'uppercase', letterSpacing: '.04em' }}>Rating scale type</div>
+                <div style={{ fontSize: 12, color: '#64748B', marginTop: 3 }}>Choose a preset point scale or edit it into a custom scale.</div>
+              </div>
+              <span style={{ border: `1px solid ${isCustomScale ? '#F59E0B' : '#93C5FD'}`, background: isCustomScale ? '#FFFBEB' : '#EFF6FF', color: isCustomScale ? '#92400E' : '#1D4ED8', borderRadius: 999, padding: '6px 10px', fontSize: 12, fontWeight: 800 }}>
+                {scaleModeLabel}
+              </span>
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: 'minmax(260px, max-content) minmax(180px, 240px)', gap: 10, alignItems: 'stretch' }}>
+              <div style={{ display: 'inline-grid', gridTemplateColumns: `repeat(${SCALE_PRESETS.length}, minmax(82px, 1fr))`, gap: 3, padding: 3, border: '1px solid #D8E1EC', borderRadius: 10, background: '#F8FAFC', width: 'max-content' }}>
+                {SCALE_PRESETS.map((points) => {
+                  const active = !isCustomScale && Number(config.scalePoints) === points;
+                  return (
+                    <button
+                      key={points}
+                      type="button"
+                      onClick={() => handlePresetClick(points)}
+                      style={{
+                        height: 38,
+                        border: `1px solid ${active ? '#2563EB' : 'transparent'}`,
+                        background: active ? '#fff' : 'transparent',
+                        color: active ? '#1D4ED8' : '#475569',
+                        borderRadius: 8,
+                        padding: '0 12px',
+                        fontSize: 12.5,
+                        fontWeight: 850,
+                        cursor: 'pointer',
+                        fontFamily: 'inherit',
+                        boxShadow: active ? '0 1px 2px rgba(15,23,42,.08)' : 'none',
+                      }}
+                    >
+                      {points}-point
+                    </button>
+                  );
+                })}
+              </div>
+              <label style={{
+                display: 'grid',
+                gridTemplateColumns: '1fr 64px',
+                alignItems: 'center',
+                minHeight: 46,
+                border: `1.5px solid ${isCustomScale ? '#2563EB' : '#D8E1EC'}`,
+                borderRadius: 10,
+                background: isCustomScale ? '#F8FBFF' : '#fff',
+                overflow: 'hidden',
+              }}>
+                <span style={{ color: isCustomScale ? '#1D4ED8' : '#475569', fontSize: 12.5, fontWeight: 850, padding: '0 12px' }}>Custom points</span>
+                <input
+                  type="number"
+                  min={2}
+                  max={10}
+                  value={Math.max(2, Math.min(10, Number(config.scalePoints) || 5))}
+                  onChange={(e) => setScalePoints(e.target.value)}
+                  style={{ width: '100%', height: '100%', border: 'none', borderLeft: '1px solid #E2E8F0', outline: 'none', fontFamily: 'inherit', fontSize: 14, fontWeight: 900, color: isCustomScale ? '#1D4ED8' : '#0F172A', background: '#fff', textAlign: 'center' }}
+                />
+              </label>
+            </div>
+            {pendingPreset && (
+              <div style={{ marginTop: 12, border: '1px solid #FCD34D', background: '#FFFBEB', borderRadius: 10, padding: 12, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
+                <div style={{ color: '#78350F', fontSize: 12.5, fontWeight: 700 }}>
+                  Applying the {pendingPreset}-point preset will replace this custom scale's labels, codes, and score bands.
+                </div>
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <button type="button" onClick={() => setPendingPreset(null)} style={{ border: '1px solid #FCD34D', background: '#fff', color: '#78350F', borderRadius: 8, padding: '7px 10px', fontSize: 12, fontWeight: 800, cursor: 'pointer', fontFamily: 'inherit' }}>Keep custom</button>
+                  <button type="button" onClick={() => applyPreset(pendingPreset)} style={{ border: 'none', background: '#D97706', color: '#fff', borderRadius: 8, padding: '7px 10px', fontSize: 12, fontWeight: 800, cursor: 'pointer', fontFamily: 'inherit' }}>Apply preset</button>
+                </div>
+              </div>
+            )}
+          </div>
+
+          <div style={{ marginBottom: 18 }}>
+            <div style={{ fontSize: 12, fontWeight: 800, color: '#64748B', textTransform: 'uppercase', letterSpacing: '.04em', marginBottom: 10 }}>Rank codes and labels</div>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(210px, 1fr))', gap: 10 }}>
               {scale.map((s, i) => (
-                <div key={s.n} style={{ width: 42, height: 42, borderRadius: 8, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 14, fontWeight: 700, background: SCALE_COLORS[i] + '20', color: SCALE_COLORS[i], border: `1.5px solid ${SCALE_COLORS[i]}40` }}>
-                  {s.n}
+                <div key={s.n} style={{ border: `1.5px solid ${SCALE_COLORS[i % SCALE_COLORS.length]}45`, background: SCALE_COLORS[i % SCALE_COLORS.length] + '12', borderRadius: 10, padding: 10 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8 }}>
+                    <input
+                      value={s.code}
+                      placeholder={String(s.n)}
+                      maxLength={6}
+                      onChange={(e) => updateRankCode(s.n, e.target.value)}
+                      style={{
+                        width: 64, height: 36, textAlign: 'center',
+                        borderRadius: 9, background: '#fff',
+                        border: `1.5px solid ${SCALE_COLORS[i % SCALE_COLORS.length]}55`,
+                        color: SCALE_COLORS[i % SCALE_COLORS.length],
+                        fontSize: 15, fontWeight: 900, fontFamily: 'inherit',
+                        outline: 'none', padding: '0 6px',
+                      }}
+                    />
+                    <div style={{ minWidth: 0, flex: 1, color: i === 0 ? '#DC2626' : i === scale.length - 1 ? '#16A34A' : '#94A3B8', fontSize: 11, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '.04em' }}>
+                      {i === 0 ? 'Lowest' : i === scale.length - 1 ? 'Highest' : ''}
+                    </div>
+                  </div>
+                  <input
+                    style={{ ...inputStyle, fontWeight: 800, background: '#fff' }}
+                    value={s.l}
+                    placeholder={`Description for ${s.n}`}
+                    onChange={(e) => updateLabel(s.n, e.target.value)}
+                  />
                 </div>
               ))}
             </div>
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 10 }}>
-              {scale.map(s => (
-                <Field key={s.n} label={`Label for ${s.n}`}>
-                  <input style={inputStyle} type="text" defaultValue={s.l} />
-                </Field>
-              ))}
+          </div>
+
+          <div style={{ marginBottom: 18 }}>
+            <div style={{ fontSize: 12, fontWeight: 800, color: '#64748B', textTransform: 'uppercase', letterSpacing: '.04em', marginBottom: 6 }}>Score-to-rating bands</div>
+            <div style={{ fontSize: 12, color: '#6B7280', marginBottom: 12, lineHeight: 1.5 }}>
+              These bands convert every decimal score into a rank, from individual KRA/KPI ratings through the weighted final rating.
+            </div>
+            {(() => {
+              const activePreset = config.bandPreset || 'standard';
+              return (
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 12 }}>
+                  {BAND_PRESETS.map((preset) => {
+                    const active = activePreset === preset.id;
+                    return (
+                      <button
+                        key={preset.id}
+                        type="button"
+                        onClick={() => update('__mergeConfig', { scaleRankRanges: getBandPresetRanges(preset.id, scale.length), bandPreset: preset.id })}
+                        style={{
+                          border: `1.5px solid ${active ? '#2563EB' : '#CBD5E1'}`,
+                          background: active ? '#EFF6FF' : '#fff',
+                          color: active ? '#2563EB' : '#475569',
+                          borderRadius: 10, padding: '8px 14px',
+                          fontSize: 12.5, fontWeight: 800,
+                          cursor: 'pointer', fontFamily: 'inherit', textAlign: 'left',
+                          minWidth: 150,
+                          display: 'flex', flexDirection: 'column', gap: 2,
+                        }}
+                      >
+                        <span>{preset.label}</span>
+                        <span style={{ fontSize: 11, fontWeight: 600, color: active ? '#1E40AF' : '#94A3B8' }}>{preset.desc}</span>
+                      </button>
+                    );
+                  })}
+                  <div style={{
+                    border: `1.5px solid ${activePreset === 'custom' ? '#F59E0B' : '#E2E8F0'}`,
+                    background: activePreset === 'custom' ? '#FFFBEB' : '#F8FAFC',
+                    color: activePreset === 'custom' ? '#92400E' : '#94A3B8',
+                    borderRadius: 10, padding: '8px 14px',
+                    fontSize: 12.5, fontWeight: 800,
+                    minWidth: 150,
+                    display: 'flex', flexDirection: 'column', gap: 2,
+                  }}>
+                    <span>Custom</span>
+                    <span style={{ fontSize: 11, fontWeight: 600, color: activePreset === 'custom' ? '#92400E' : '#94A3B8' }}>Set by editing the rows below</span>
+                  </div>
+                </div>
+              );
+            })()}
+            <div style={{ display: 'grid', gap: 8 }}>
+              {rankRanges.map((r, i) => {
+                const s = scale[i];
+                return (
+                  <div key={r.n} style={{ display: 'grid', gridTemplateColumns: 'minmax(90px, 110px) auto minmax(90px, 110px) minmax(160px, 1fr)', gap: 10, alignItems: 'center', padding: '10px 12px', borderRadius: 10, border: '1px solid #E2E8F0', background: '#fff' }}>
+                    <input
+                      type="number"
+                      step="0.01"
+                      min={1}
+                      max={scale.length}
+                      value={Number.isFinite(r.from) ? r.from : ''}
+                      onChange={(e) => updateRange(r.n, 'from', e.target.value)}
+                      disabled={i === 0}
+                      title={i === 0 ? 'Locked to the scale minimum.' : ''}
+                      style={{ ...inputStyle, padding: '8px 10px', fontWeight: 700, textAlign: 'center', background: i === 0 ? '#F1F5F9' : '#fff', color: i === 0 ? '#64748B' : '#0F172A', cursor: i === 0 ? 'not-allowed' : 'text' }}
+                    />
+                    <span style={{ fontSize: 12, color: '#94A3B8', fontWeight: 800 }}>to</span>
+                    <input
+                      type="number"
+                      step="0.01"
+                      min={1}
+                      max={scale.length}
+                      value={Number.isFinite(r.to) ? r.to : ''}
+                      onChange={(e) => updateRange(r.n, 'to', e.target.value)}
+                      disabled={i === rankRanges.length - 1}
+                      title={i === rankRanges.length - 1 ? 'Locked to the scale maximum.' : ''}
+                      style={{ ...inputStyle, padding: '8px 10px', fontWeight: 700, textAlign: 'center', background: i === rankRanges.length - 1 ? '#F1F5F9' : '#fff', color: i === rankRanges.length - 1 ? '#64748B' : '#0F172A', cursor: i === rankRanges.length - 1 ? 'not-allowed' : 'text' }}
+                    />
+                    <div style={{ minWidth: 0, display: 'flex', alignItems: 'center', gap: 8 }}>
+                      <span style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', minWidth: 36, height: 28, padding: '0 9px', borderRadius: 999, background: SCALE_COLORS[i % SCALE_COLORS.length] + '20', color: SCALE_COLORS[i % SCALE_COLORS.length], fontSize: 12, fontWeight: 900 }}>
+                        {s.code}
+                      </span>
+                      <span style={{ color: '#475569', fontSize: 12.5, fontWeight: 700, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{s.l}</span>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+            {rangeErrors.length > 0 && (
+              <div style={{ marginTop: 8, padding: '8px 12px', borderRadius: 8, background: '#FEF2F2', border: '1px solid #FCA5A5', color: '#B91C1C', fontSize: 11.5, fontWeight: 700 }}>
+                {rangeErrors.join(' ')}
+              </div>
+            )}
+          </div>
+
+          <div style={{ marginBottom: 18 }}>
+            <div style={{ fontSize: 12, fontWeight: 800, color: '#64748B', textTransform: 'uppercase', letterSpacing: '.04em', marginBottom: 10 }}>How the rater scores</div>
+
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 14 }}>
+              {SCORE_INPUT_MODES.map((widget) => {
+                const active = inputMode === widget.id;
+                return (
+                  <button
+                    key={widget.id}
+                    type="button"
+                    onClick={() => setInputWidget(widget.id)}
+                    style={{
+                      border: `1.5px solid ${active ? '#2563EB' : '#CBD5E1'}`,
+                      background: active ? '#EFF6FF' : '#fff',
+                      color: active ? '#2563EB' : '#475569',
+                      borderRadius: 10, padding: '10px 14px',
+                      fontSize: 12.5, fontWeight: 800,
+                      cursor: 'pointer', fontFamily: 'inherit', textAlign: 'left',
+                      minWidth: 160,
+                      display: 'flex', flexDirection: 'column', gap: 2,
+                    }}
+                  >
+                    <span>{widget.label}</span>
+                    <span style={{ fontSize: 11, fontWeight: 600, color: active ? '#1E40AF' : '#94A3B8' }}>{widget.desc}</span>
+                  </button>
+                );
+              })}
+            </div>
+
+            {widgetSpec.showsBandLabel && (
+              <div style={{ marginBottom: 12 }}>
+                <div style={{ fontSize: 11, fontWeight: 800, color: '#64748B', textTransform: 'uppercase', letterSpacing: '.04em', marginBottom: 6 }}>Show each band as</div>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+                  {RATING_CHOICE_DISPLAY_OPTIONS.map((option) => {
+                    const active = ratingChoiceDisplay === option.id;
+                    return (
+                      <button
+                        key={option.id}
+                        type="button"
+                        onClick={() => update('ratingChoiceDisplay', option.id)}
+                        style={{
+                          border: `1.5px solid ${active ? '#2563EB' : '#CBD5E1'}`,
+                          background: active ? '#EFF6FF' : '#fff',
+                          color: active ? '#2563EB' : '#475569',
+                          borderRadius: 10, padding: '8px 14px',
+                          fontSize: 12.5, fontWeight: 800,
+                          cursor: 'pointer', fontFamily: 'inherit', textAlign: 'left',
+                          display: 'flex', flexDirection: 'column', gap: 2,
+                        }}
+                      >
+                        <span>{option.label}</span>
+                        <span style={{ fontSize: 11, fontWeight: 600, color: active ? '#1E40AF' : '#94A3B8' }}>{option.example}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
+            {widgetSpec.supportsDecimals && (
+              <div style={{ marginBottom: 12 }}>
+                <div style={{ fontSize: 11, fontWeight: 800, color: '#64748B', textTransform: 'uppercase', letterSpacing: '.04em', marginBottom: 6 }}>Score precision</div>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+                  {SCORE_PRECISION_OPTIONS.map((option) => {
+                    const active = (config.scorePrecision || 'half') === option.id;
+                    return (
+                      <button
+                        key={option.id}
+                        type="button"
+                        onClick={() => update('scorePrecision', option.id)}
+                        style={{
+                          border: `1.5px solid ${active ? '#2563EB' : '#CBD5E1'}`,
+                          background: active ? '#EFF6FF' : '#fff',
+                          color: active ? '#2563EB' : '#475569',
+                          borderRadius: 10, padding: '8px 14px',
+                          fontSize: 12.5, fontWeight: 800,
+                          cursor: 'pointer', fontFamily: 'inherit', textAlign: 'left',
+                          minWidth: 150,
+                          display: 'flex', flexDirection: 'column', gap: 2,
+                        }}
+                      >
+                        <span>{option.label}</span>
+                        <span style={{ fontSize: 11, fontWeight: 600, color: active ? '#1E40AF' : '#94A3B8' }}>{option.desc}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
+          </div>
+
+          <div style={{ marginBottom: 18 }}>
+            <div style={{ border: '1.5px solid #E2E8F0', borderRadius: 12, background: '#F8FAFC', padding: 14 }}>
+              <div style={{ fontSize: 11, fontWeight: 800, color: '#64748B', textTransform: 'uppercase', letterSpacing: '.04em', marginBottom: 10 }}>What the rater will see</div>
+              <div style={{ border: '1px solid #E2E8F0', borderRadius: 10, background: '#fff', padding: 12, marginBottom: 12 }}>
+                <div style={{ fontSize: 12, fontWeight: 900, color: '#0F172A', marginBottom: 4 }}>KRA: Improve customer onboarding completion</div>
+                <div style={{ fontSize: 11.5, color: '#64748B', marginBottom: 12 }}>KPI: Complete onboarding within agreed SLA</div>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))', gap: 8, marginBottom: 12 }}>
+                  {[
+                    { label: 'Target', value: `${sampleTarget}% completion` },
+                    { label: 'Achievement', value: `${sampleAchievement}% completion` },
+                    { label: 'Achievement %', value: `${sampleAchievementPct}%` },
+                    { label: ratingBoxLabel, value: previewLevel ? formatChoice(clampedPreview, previewLevel) : '—' },
+                  ].map((item) => (
+                    <div key={item.label} style={{ border: '1px solid #E2E8F0', borderRadius: 9, background: '#F8FAFC', padding: '9px 10px' }}>
+                      <div style={{ fontSize: 10.5, color: '#94A3B8', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '.04em', marginBottom: 4 }}>{item.label}</div>
+                      <div style={{ fontSize: 12.5, color: '#0F172A', fontWeight: 850, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{item.value}</div>
+                    </div>
+                  ))}
+                </div>
+                {inputMode === 'dropdown' && (
+                  <select
+                    style={{ ...selectStyle, maxWidth: 360, background: '#fff' }}
+                    value={previewLevel?.n || ''}
+                    onChange={(e) => setPreviewDecimal(Number(e.target.value))}
+                  >
+                    {scale.map((rank) => <option key={rank.n} value={rank.n}>{formatChoice(rank.n, rank)}</option>)}
+                  </select>
+                )}
+                {inputMode === 'segmented' && (
+                  <div style={{ display: 'inline-flex', flexWrap: 'wrap', gap: 4, padding: 4, background: '#F8FAFC', borderRadius: 999, border: '1px solid #E2E8F0' }}>
+                    {scale.map((rank) => {
+                      const active = rank.n === previewLevel?.n;
+                      return (
+                        <button
+                          key={rank.n}
+                          type="button"
+                          onClick={() => setPreviewDecimal(rank.n)}
+                          style={{
+                            border: 'none', borderRadius: 999, padding: '7px 12px',
+                            background: active ? '#2563EB' : 'transparent',
+                            color: active ? '#fff' : '#475569',
+                            fontSize: 12, fontWeight: 800, cursor: 'pointer', fontFamily: 'inherit',
+                          }}
+                        >
+                          {formatChoice(rank.n, rank)}
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+                {inputMode === 'stars' && (
+                  <div
+                    ref={starsRef}
+                    onPointerDown={(e) => { setStarsDragging(true); updateStarsFromPointer(e); }}
+                    onPointerMove={(e) => { if (starsDragging) updateStarsFromPointer(e); }}
+                    onPointerUp={() => setStarsDragging(false)}
+                    onPointerLeave={() => setStarsDragging(false)}
+                    style={{ display: 'inline-flex', gap: 4, padding: '8px 10px', background: '#fff', borderRadius: 9, border: '1px solid #E2E8F0', cursor: 'pointer', userSelect: 'none', touchAction: 'none' }}
+                  >
+                    {scale.map((s) => {
+                      const fillPct = Math.max(0, Math.min(100, (clampedPreview - (s.n - 1)) * 100));
+                      return (
+                        <span key={s.n} style={{ position: 'relative', display: 'inline-block', fontSize: 30, lineHeight: 1, pointerEvents: 'none', color: '#E2E8F0' }}>
+                          ★
+                          <span aria-hidden style={{ position: 'absolute', top: 0, left: 0, height: '100%', color: '#F59E0B', overflow: 'hidden', width: `${fillPct}%`, whiteSpace: 'nowrap' }}>★</span>
+                        </span>
+                      );
+                    })}
+                  </div>
+                )}
+                {inputMode === 'number' && (
+                  <div style={{ display: 'inline-flex', alignItems: 'center', gap: 10, border: '1.5px solid #E2E8F0', borderRadius: 10, background: '#fff', padding: '10px 12px' }}>
+                    <span style={{ fontSize: 12, color: '#64748B', fontWeight: 800 }}>Score</span>
+                    <input
+                      ref={numericDraftRef}
+                      type="text"
+                      inputMode="decimal"
+                      value={numericDraft !== null ? numericDraft : displayScore(clampedPreview)}
+                      onChange={(e) => {
+                        const raw = e.target.value;
+                        if (raw !== '' && !/^\d*\.?\d*$/.test(raw)) return;
+                        if (raw !== '') {
+                          const n = Number(raw);
+                          if (Number.isFinite(n) && n > scale.length) {
+                            setNumericDraft(String(scale.length));
+                            return;
+                          }
+                        }
+                        setNumericDraft(raw);
+                      }}
+                      onBlur={() => {
+                        if (numericDraft === null) return;
+                        const trimmed = String(numericDraft).trim();
+                        if (trimmed === '') { setNumericDraft(null); return; }
+                        const n = Number(trimmed);
+                        if (Number.isFinite(n)) setPreviewDecimal(n);
+                        setNumericDraft(null);
+                      }}
+                      onKeyDown={(e) => { if (e.key === 'Enter') e.currentTarget.blur(); }}
+                      placeholder={`1 – ${scale.length}`}
+                      style={{ width: 110, border: 'none', outline: 'none', fontFamily: 'inherit', fontSize: 16, fontWeight: 850, color: '#0F172A', textAlign: 'center' }}
+                    />
+                    <span style={{ fontSize: 11, fontWeight: 700, color: '#94A3B8' }}>/ {scale.length}</span>
+                  </div>
+                )}
+                {inputMode === 'slider' && (
+                  <div style={{ maxWidth: 460 }}>
+                    <input
+                      type="range"
+                      min={1}
+                      max={scale.length}
+                      step={scoreStep}
+                      value={clampedPreview}
+                      onChange={(e) => setPreviewDecimal(Number(e.target.value))}
+                      style={{ width: '100%', accentColor: '#2563EB' }}
+                    />
+                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, fontWeight: 700, color: '#94A3B8', marginTop: 4 }}>
+                      {scale.map((s) => <span key={s.n}>{s.code}</span>)}
+                    </div>
+                  </div>
+                )}
+              </div>
+              <div style={{ padding: '8px 12px', borderRadius: 8, background: '#fff', border: '1px solid #E2E8F0', fontSize: 12.5, fontWeight: 700, color: '#0F172A', display: 'inline-block' }}>
+                {config.autoRating ? 'Suggested' : 'Selected'}: <span style={{ color: '#2563EB' }}>
+                  {widgetSpec.supportsDecimals && scoreStep < 1
+                    ? `${displayScore(clampedPreview)} → ${previewLevel ? formatChoice(clampedPreview, previewLevel) : ''}`
+                    : (previewLevel ? formatChoice(clampedPreview, previewLevel) : '')}
+                </span>
+              </div>
             </div>
           </div>
-          <div style={{ borderTop: '1px solid #F1F3F5', paddingTop: 16 }}>
-            <div style={{ fontSize: 12, fontWeight: 600, color: '#374151', textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: 12 }}>Weightage configuration</div>
-            <Grid3>
-              <Field label="KRA / Perspective weightage">
-                <select style={selectStyle}><option>HR pre-sets fixed weights</option><option>Employee proposes, manager approves</option><option>Equal weight across all</option></select>
-              </Field>
-              <Field label="KPI weightage within KRA">
-                <select style={selectStyle}><option>HR pre-sets fixed weights</option><option>Employee sets, manager approves</option><option>Equal weight</option><option>Not applicable</option></select>
-              </Field>
-              <Field label="Competency weight in final score" hint="% of final rating">
-                <input style={inputStyle} type="number" defaultValue={20} min={0} max={100} />
-              </Field>
-            </Grid3>
-            <Grid3>
-              <Field label="Decimal rounding">
-                <select style={selectStyle}><option>Round to nearest 0.5</option><option>Round to integer</option><option>2 decimal places</option></select>
-              </Field>
-              <Field label="Mandatory comment if score ≤">
-                <select style={selectStyle}><option>1 (lowest only)</option><option>2</option><option>Always mandatory</option><option>Not required</option></select>
-              </Field>
-              <Field label="Rating change audit trail">
-                <select style={selectStyle}><option>Yes — log all changes</option><option>No</option></select>
-              </Field>
-            </Grid3>
+
+          <div style={{ marginBottom: 18 }}>
+            <div style={{ fontSize: 12, fontWeight: 800, color: '#64748B', textTransform: 'uppercase', letterSpacing: '.04em', marginBottom: 6 }}>Final rating display</div>
+            <div style={{ fontSize: 12, color: '#6B7280', marginBottom: 12, lineHeight: 1.5 }}>
+              Choose the format used in reports, employee pages, and manager summaries.
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 8, marginBottom: 12 }}>
+              {(() => {
+                const midRank = scale[Math.floor((scale.length - 1) / 2)];
+                const examplePayload = {
+                  code: midRank?.code || String(midRank?.n || ''),
+                  l: midRank?.l || '',
+                  decimal: midRank?.n || 0,
+                };
+                return FINAL_RATING_DISPLAY_OPTIONS.map((opt) => {
+                  const active = finalRatingDisplay === opt.id;
+                  const example = opt.format(examplePayload);
+                  return (
+                    <button
+                      key={opt.id}
+                      type="button"
+                      onClick={() => update('finalRatingDisplay', opt.id)}
+                      style={{
+                        border: `1.5px solid ${active ? '#2563EB' : '#CBD5E1'}`,
+                        background: active ? '#EFF6FF' : '#fff',
+                        color: active ? '#2563EB' : '#475569',
+                        borderRadius: 10, padding: '9px 12px',
+                        fontSize: 12, fontWeight: 800,
+                        cursor: 'pointer', fontFamily: 'inherit', textAlign: 'left',
+                      }}
+                    >
+                      <span style={{ display: 'block' }}>{opt.label}</span>
+                      <span style={{ display: 'block', marginTop: 4, fontSize: 11, color: active ? '#1E40AF' : '#94A3B8', fontWeight: 700 }}>{example}</span>
+                    </button>
+                  );
+                });
+              })()}
+            </div>
+            <div style={{ border: '1.5px solid #E2E8F0', borderRadius: 12, background: '#F8FAFC', padding: 14 }}>
+              <div style={{ fontSize: 11, fontWeight: 800, color: '#64748B', textTransform: 'uppercase', letterSpacing: '.04em', marginBottom: 10 }}>Calculation preview</div>
+              {config.frameworkId === 'bsc' ? (
+                <div style={{ display: 'grid', gap: 8, marginBottom: 12 }}>
+                  {weightedRows.map((row) => (
+                    <div key={row.name} style={{ display: 'grid', gridTemplateColumns: 'minmax(150px, 1fr) 70px 80px 90px', gap: 8, alignItems: 'center', fontSize: 12.5, color: '#475569' }}>
+                      <strong style={{ color: '#0F172A', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{row.name}</strong>
+                      <span>{Number(row.weight) || 0}%</span>
+                      <span>{displayScore(row.score)}</span>
+                      <span>{row.weighted.toFixed(2)}</span>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div style={{ display: 'grid', gap: 8, marginBottom: 12, fontSize: 12.5, color: '#475569' }}>
+                  <div><strong style={{ color: '#0F172A' }}>{flatTargetLevel} target rating:</strong> {displayScore(clampedPreview)}</div>
+                  <div style={{ fontSize: 11.5, color: '#64748B' }}>
+                    Targets are configured at {flatTargetLevel} level for this preview, so only that level receives an achievement and rating.
+                  </div>
+                </div>
+              )}
+              <div style={{ padding: '10px 12px', borderRadius: 8, background: '#fff', border: '1px solid #E2E8F0', fontSize: 12.5, fontWeight: 800, color: '#0F172A', display: 'inline-block' }}>
+                Final: <span style={{ color: '#2563EB' }}>{finalOutput || '—'}</span>
+              </div>
+            </div>
           </div>
+
+          <div style={{ borderTop: '1px solid #F1F3F5', paddingTop: 16 }}>
+            <div style={{ fontSize: 12, fontWeight: 800, color: '#64748B', textTransform: 'uppercase', letterSpacing: '.04em', marginBottom: 12 }}>Score handling</div>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: 12 }}>
+              <Field label="Mandatory comment if score at/below">
+                <select style={selectStyle} value={config.commentRequiredAt || 'lowest'} onChange={(e) => update('commentRequiredAt', e.target.value)}>
+                  <option value="lowest">Lowest point only</option>
+                  <option value="below-mid">Below midpoint</option>
+                  <option value="always">Always mandatory</option>
+                  <option value="never">Not required</option>
+                </select>
+              </Field>
+              <Field label="Manager comments during rating">
+                <select style={selectStyle} value={config.managerCommentMode || 'overall'} onChange={(e) => update('managerCommentMode', e.target.value)}>
+                  <option value="overall">One overall comment only</option>
+                  <option value="per-goal">A comment per goal</option>
+                  <option value="per-item">A comment per goal/KPI</option>
+                </select>
+              </Field>
+            </div>
+          </div>
+
+          <div style={{ borderTop: '1px solid #F1F3F5', paddingTop: 16, marginTop: 16 }}>
+            <div style={{ fontSize: 12, fontWeight: 800, color: '#64748B', textTransform: 'uppercase', letterSpacing: '.04em', marginBottom: 6 }}>Visibility to employee</div>
+            <div style={{ fontSize: 12, color: '#6B7280', marginBottom: 12, lineHeight: 1.5 }}>
+              Choose the cycle phase that unlocks each rating on the employee page. Until that phase, the cell shows <em>"Awaiting review"</em>.
+            </div>
+            <div style={{ display: 'grid', gap: 10 }}>
+              {[
+                { key: 'managerRatingVisibleFrom', title: 'Manager rating visible from', desc: 'When the employee starts seeing the manager\'s score.',          options: RATING_VISIBILITY_PHASES.manager, fallback: 'manager-rating' },
+                { key: 'finalRatingVisibleFrom',   title: 'Final rating visible from',   desc: 'When the employee starts seeing the calibrated final rating.', options: RATING_VISIBILITY_PHASES.final,   fallback: 'hr-review'       },
+              ].map((opt) => {
+                const value = config[opt.key] || opt.fallback;
+                return (
+                  <div key={opt.key} style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(260px, 320px)', gap: 12, alignItems: 'center', padding: '10px 12px', border: '1px solid #E2E8F0', borderRadius: 10, background: '#fff' }}>
+                    <div style={{ minWidth: 0 }}>
+                      <div style={{ fontSize: 12.5, fontWeight: 800, color: '#0F172A' }}>{opt.title}</div>
+                      <div style={{ marginTop: 3, fontSize: 11.5, color: '#64748B', lineHeight: 1.5 }}>{opt.desc}</div>
+                    </div>
+                    <select
+                      style={selectStyle}
+                      value={value}
+                      onChange={(e) => update(opt.key, e.target.value)}
+                    >
+                      {opt.options.map((phase) => (
+                        <option key={phase.id} value={phase.id} disabled={!!phase.unavailable}>{phase.label}</option>
+                      ))}
+                    </select>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+          {!hideApplyBar && (
+            <StepStatusBar
+              applied={scaleApplied}
+              valid={scaleValid}
+              appliedMessage="✓ Rating scale saved. Move to the next step, or change a field above to re-enable editing."
+              pendingMessage="Review the scale and click Save when ready."
+              invalidMessage="Add every label/code and fix score bands before saving."
+              buttonLabel="Save rating scale"
+              onApply={() => update('scaleAppliedSnapshot', getScaleSnapshot(config))}
+            />
+          )}
         </CardBody>
       </Card>
     </div>
@@ -2404,6 +3314,7 @@ function GoalLibrarySheetControls({ config, downloadConfig = null, existingLibra
     try {
       const result = await parseGoalLibraryBulkXlsx(file, config?.goalGroups || [], {
         requireGroupName: (config?.goalGroups || []).filter(g => g.hasLibrary).length > 1,
+        config,
       });
       const uploadErrors = validateBulkGoalLibraryUpload(config, result.libraries || []);
       if (uploadErrors.length > 0) {
@@ -2703,6 +3614,7 @@ function PrefillSheetControls({ config, selectedGroup, onImported, phase, setPha
       };
       const result = await parseGoalLibraryBulkXlsx(file, [parserGroup], {
         requireGroupName: (config?.goalGroups || []).filter(g => g.prefillType).length > 1,
+        config,
       });
       const expectedCardNames = getGroupPrefillAssignments(selectedGroup).map(assignment => String(assignment.label || '').trim()).filter(Boolean);
       const expectedCardNamesLower = expectedCardNames.map(name => name.toLowerCase());
@@ -3416,7 +4328,7 @@ function getGroupResult(group) {
   return null;
 }
 
-function GroupStrategyCard({ group, index, totalGroups, onUpdate, onDelete, libraries = [], frameworkId = 'bsc', orgTargetsEnabled = false, orgTargetLevel = 'KPI' }) {
+function GroupStrategyCard({ group, index, totalGroups, onUpdate, onDelete, libraries = [], frameworkId = 'bsc' }) {
   const isOnly = totalGroups === 1;
   const hasNoFilter = !group.segmentAttr && !(group.segmentValues || []).length;
   const canUseGoalLibrary = canUseGroupLibrary(group);
@@ -3595,10 +4507,10 @@ function GroupStrategyCard({ group, index, totalGroups, onUpdate, onDelete, libr
           </div>
         </div>
 
-        {/* KPI evaluation mode — applies to BSC and KRA/KPI flat */}
+        {/* Rating level — applies to BSC and KRA/KPI flat */}
         {frameworkHasKpis && (
           <div style={{ marginBottom: 16 }}>
-            <div style={S.sectionLabel}>How should KPIs be evaluated?</div>
+            <div style={S.sectionLabel}>Rating at:</div>
             <div style={{
               display: 'flex',
               alignItems: 'center',
@@ -3612,12 +4524,14 @@ function GroupStrategyCard({ group, index, totalGroups, onUpdate, onDelete, libr
             }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 220 }}>
                 <span style={{ width: 6, height: 22, borderRadius: 3, background: 'linear-gradient(180deg,#EC4899,#DB2777)', flexShrink: 0 }} />
-                <span style={{ fontSize: 12.5, color: '#9D174D', fontWeight: 600 }}>KPI evaluation mode</span>
+                <span style={{ fontSize: 12.5, color: '#9D174D', fontWeight: 600 }}>Rating level</span>
               </div>
               <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
               {[
-                { id: 'rated', title: 'Rated', hint: 'KPI-by-KPI scoring' },
-                { id: 'free-text', title: 'Free text', hint: 'Rate only at KRA level' },
+                // 'rated' = score every KPI numerically. 'free-text' = score only at KRA;
+                // KPIs become descriptive. Stored IDs unchanged so existing data still works.
+                { id: 'rated',     title: 'KPI level', hint: 'Rate each KPI separately' },
+                { id: 'free-text', title: 'KRA Level', hint: 'KPIs are free text' },
               ].map(opt => {
                 const active = kpiRatingMode === opt.id;
                 return (
@@ -3669,63 +4583,8 @@ function GroupStrategyCard({ group, index, totalGroups, onUpdate, onDelete, libr
           </div>
         )}
 
-        {/* Target level override — appears when targets are enabled org-wide */}
-        {orgTargetsEnabled && (
-          <div style={{ margin: '0 16px 16px' }}>
-            <div style={S.sectionLabel}>Where does the target live for this group?</div>
-            <div style={{
-              display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12,
-              padding: '10px 14px', borderRadius: 12,
-              border: '1px solid #BFCFFE',
-              background: 'linear-gradient(135deg, #EFF6FF 0%, #DBEAFE 100%)',
-              flexWrap: 'wrap',
-            }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 220 }}>
-                <span style={{ width: 6, height: 22, borderRadius: 3, background: 'linear-gradient(180deg,#3B82F6,#2563EB)', flexShrink: 0 }} />
-                <span style={{ fontSize: 12.5, color: '#1E3A8A', fontWeight: 600 }}>Target level</span>
-              </div>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-                {[
-                  { id: 'inherit', title: `Inherit (${orgTargetLevel})`, hint: 'Use org default' },
-                  { id: 'KPI', title: 'KPI level', hint: 'Per KPI' },
-                  { id: 'KRA', title: 'KRA level', hint: 'Per KRA' },
-                ].map(opt => {
-                  const current = group.targetLevel || 'inherit';
-                  const active = current === opt.id;
-                  return (
-                    <button
-                      key={opt.id}
-                      type="button"
-                      onClick={() => onUpdate({ targetLevel: opt.id })}
-                      style={{
-                        display: 'inline-flex', alignItems: 'center', gap: 8,
-                        padding: '8px 12px', borderRadius: 999, cursor: 'pointer', fontFamily: 'inherit',
-                        border: `1px solid ${active ? '#2563EB' : '#BFCFFE'}`,
-                        background: active ? '#FFFFFF' : 'rgba(255,255,255,0.6)',
-                        color: active ? '#1D4ED8' : '#475569',
-                        boxShadow: active ? '0 1px 3px rgba(37,99,235,0.2)' : 'none',
-                        minHeight: 36, transition: 'all .15s',
-                      }}
-                    >
-                      <span style={{
-                        width: 18, height: 18, borderRadius: '50%',
-                        border: `1.5px solid ${active ? '#2563EB' : '#CBD5E1'}`,
-                        background: active ? '#2563EB' : '#FFFFFF',
-                        color: '#FFFFFF',
-                        display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-                        fontSize: 11, fontWeight: 800, flexShrink: 0,
-                      }}>{active ? '✓' : ''}</span>
-                      <span style={{ display: 'flex', alignItems: 'baseline', gap: 6, flexWrap: 'wrap' }}>
-                        <span style={{ fontSize: 12.5, fontWeight: 700 }}>{opt.title}</span>
-                        <span style={{ fontSize: 11.5, color: active ? '#2563EB' : '#94A3B8', fontWeight: 500 }}>{opt.hint}</span>
-                      </span>
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-          </div>
-        )}
+        {/* Target level is configured centrally in Step Targets (single page for all
+            target-related decisions). Per-group overrides happen there via Custom mode. */}
 
         {/* ── Animated Result Strip ── */}
         <style>{`@keyframes grpResultIn{from{opacity:0;transform:translateY(5px)}to{opacity:1;transform:translateY(0)}}`}</style>
@@ -3763,7 +4622,16 @@ function StepGroups({ config, update }) {
   const isApplied = isValid && config.goalGroupsAppliedSnapshot === getNewGroupsSnapshot(config);
 
   function updateGroup(id, changes) {
-    update('goalGroups', groups.map(g => g.id === id ? normalizeSimpleGoalGroup({ ...g, ...changes }) : g));
+    const patched = { ...changes };
+    // When rating mode changes, snap the group's targetLevel to the matching
+    // default. KPI-level rating requires per-KPI targets; KRA-level rating
+    // defaults to per-KRA targets. The Targets step can still override to the
+    // Rating level (kpiRatingMode) is now INDEPENDENT of target level.
+    // The Targets step is the single source of truth for where targets live.
+    // KRA-level rating with KPI-level targets is a valid combo (KPIs provide
+    // measurable detail; manager rates the KRA holistically).
+    const nextGroups = groups.map(g => g.id === id ? normalizeSimpleGoalGroup({ ...g, ...patched }) : g);
+    update('goalGroups', nextGroups);
     update('goalGroupsAppliedSnapshot', null);
     update('prefillDataAppliedSnapshot', null);
     update('goalLibrariesAppliedSnapshot', null);
@@ -3808,8 +4676,6 @@ function StepGroups({ config, update }) {
           onDelete={() => removeGroup(group.id)}
           libraries={libraries}
           frameworkId={config.frameworkId}
-          orgTargetsEnabled={config.targetsEnabled !== false}
-          orgTargetLevel={config.targetLevel || 'KPI'}
         />
       ))}
 
@@ -3993,7 +4859,7 @@ function WeightPctBadge({ label, pct }) {
   );
 }
 
-function LibraryCard({ library, groupLabel, assignedText, accent, active = false, onSelect, onEdit, onDelete, selectionHint, empty = false, warning = null, showKpiPercent = false }) {
+function LibraryCard({ library, groupLabel, assignedText, accent, active = false, onSelect, onEdit, onDelete, selectionHint, empty = false, warning = null, showKpiPercent = false, setupLabels = [] }) {
   const kraCount = (library.perspectives || []).reduce((sum, perspective) => sum + (perspective.kras || []).length, 0);
   const kpiCount = (library.perspectives || []).reduce((sum, perspective) => (
     sum + (perspective.kras || []).reduce((nested, kra) => nested + (kra.kpis || []).length, 0)
@@ -4057,32 +4923,39 @@ function LibraryCard({ library, groupLabel, assignedText, accent, active = false
                 +
               </div>
             </div>
-            <div style={{ display: 'flex', alignItems: 'flex-end', justifyContent: 'space-between', gap: 10 }}>
-              <div />
-              <button
-                type="button"
-                onClick={(event) => { event.stopPropagation(); onEdit?.(); }}
-                style={{
-                  padding: '8px 16px',
-                  borderRadius: 14,
-                  border: '1px solid #D6E4FF',
-                  background: '#F8FAFC',
-                  color: '#2563EB',
-                  fontWeight: 700,
-                  fontSize: 13,
-                  cursor: 'pointer',
-                  fontFamily: 'inherit',
-                }}
-              >
-                Create
-              </button>
-            </div>
+            {onEdit ? (
+              <div style={{ display: 'flex', alignItems: 'flex-end', justifyContent: 'space-between', gap: 10 }}>
+                <div />
+                <button
+                  type="button"
+                  onClick={(event) => { event.stopPropagation(); onEdit?.(); }}
+                  style={{
+                    padding: '8px 16px',
+                    borderRadius: 14,
+                    border: '1px solid #D6E4FF',
+                    background: '#F8FAFC',
+                    color: '#2563EB',
+                    fontWeight: 700,
+                    fontSize: 13,
+                    cursor: 'pointer',
+                    fontFamily: 'inherit',
+                  }}
+                >
+                  Create
+                </button>
+              </div>
+            ) : null}
           </>
         ) : (
           <>
         <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12, marginBottom: 16 }}>
           <div>
             <div style={{ fontSize: 15, fontWeight: 800, color: '#111827', marginBottom: 6 }}>{library.name}</div>
+            {setupLabels.length > 0 && (
+              <div style={{ fontSize: 11.5, color: '#64748B', fontWeight: 700, marginBottom: 6, lineHeight: 1.35 }}>
+                {setupLabels.join(' · ')}
+              </div>
+            )}
             <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
               <span style={{ fontSize: 11, color: '#9CA3AF' }}>{kraCount} KRAs · {kpiCount} KPIs</span>
               <span style={{ fontSize: 10.5, color: '#94A3B8', background: '#F1F5F9', border: '1px solid #E2E8F0', borderRadius: 20, padding: '1px 8px', fontWeight: 500 }}>
@@ -4107,26 +4980,152 @@ function LibraryCard({ library, groupLabel, assignedText, accent, active = false
           <div style={{ fontSize: 11.5, color: active ? accent.text : '#9CA3AF', lineHeight: 1.5, maxWidth: 150 }}>
             {selectionHint || (active ? 'Currently assigned' : 'Click card to use it')}
           </div>
-          <button
-            type="button"
-            onClick={(event) => { event.stopPropagation(); onEdit?.(); }}
-            style={{
-              padding: '8px 16px',
-              borderRadius: 14,
-              border: `1px solid ${active ? accent.bar : '#D6E4FF'}`,
-              background: active ? accent.soft : '#F8FAFC',
-              color: active ? accent.text : '#2563EB',
-              fontWeight: 700,
-              fontSize: 13,
-              cursor: 'pointer',
-              fontFamily: 'inherit',
-            }}
-          >
-            Edit
-          </button>
+          {onEdit ? (
+            <button
+              type="button"
+              onClick={(event) => { event.stopPropagation(); onEdit?.(); }}
+              style={{
+                padding: '8px 16px',
+                borderRadius: 14,
+                border: `1px solid ${active ? accent.bar : '#D6E4FF'}`,
+                background: active ? accent.soft : '#F8FAFC',
+                color: active ? accent.text : '#2563EB',
+                fontWeight: 700,
+                fontSize: 13,
+                cursor: 'pointer',
+                fontFamily: 'inherit',
+              }}
+            >
+              Edit
+            </button>
+          ) : null}
         </div>
           </>
         )}
+      </div>
+    </div>
+  );
+}
+
+function getGoalSetupLabels(group = {}) {
+  const prefillLabel = group.prefillType === 'kra-kpi'
+    ? 'Pre-fill KRAs + KPIs'
+    : group.prefillType === 'kra-only'
+      ? 'Pre-fill KRAs only'
+      : null;
+  const libraryLabel = group.hasLibrary
+    ? `Reference library ${group.libraryType === 'kra-kpi' ? 'KRAs + KPIs' : 'KRAs only'}`
+    : null;
+  const editLabel = group.canEditOwn === false ? 'Employee edits off' : 'Employee edits on';
+  return [prefillLabel, libraryLabel, editLabel].filter(Boolean);
+}
+
+function ReadOnlyLibraryModal({ library, onClose, showKpiPercent = false, targetTypes = [] }) {
+  if (!library) return null;
+  const perspectives = library.perspectives || [];
+  const allTargetTypes = targetTypes.length > 0 ? targetTypes : DEFAULT_TARGET_TYPES;
+  const normType = (s) => String(s || '').trim().toLowerCase().replace(/[_\s-]+/g, ' ');
+  const getTargetType = (typeId) => {
+    const raw = String(typeId || '').trim();
+    if (!raw) return null;
+    const n = normType(raw);
+    // Match by id first, then by name — bulk-uploaded goals store short type
+    // ids ("percentage") that don't match the config's long ids
+    // ("tt_default_percentage"), so fall back to a name match.
+    return allTargetTypes.find((type) => (type.id || type) === raw)
+      || allTargetTypes.find((type) => normType(type.name || type.label) === n)
+      || DEFAULT_TARGET_TYPES.find((type) => type.id === raw)
+      || DEFAULT_TARGET_TYPES.find((type) => normType(type.name) === n)
+      || null;
+  };
+  const formatTarget = (value, typeId) => {
+    const text = String(value || '').trim();
+    if (!text) return '';
+    const meta = getTargetType(typeId);
+    const unit = String(meta?.unit || '').trim();
+    if (!unit) return text;
+    return meta?.unitPosition === 'prefix' ? `${unit} ${text}` : `${text} ${unit}`;
+  };
+  const renderTarget = (value, typeId, label) => {
+    const displayValue = formatTarget(value, typeId);
+    if (!displayValue) return null;
+    const meta = getTargetType(typeId);
+    const typeLabel = String(meta?.name || meta?.label || '').trim();
+    const visibleLabel = typeLabel ? `${label} · ${typeLabel}` : label;
+    return (
+      <div title={`${visibleLabel}: ${displayValue}`} style={{ marginTop: 8, border: '1px solid #D9E2EC', borderRadius: 10, background: '#FFFFFF', padding: '7px 9px', minWidth: 120 }}>
+        <div style={{ fontSize: 9.5, fontWeight: 900, color: '#94A3B8', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 3 }}>{visibleLabel}</div>
+        <div style={{ fontSize: 13, fontWeight: 800, color: '#0F172A', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{displayValue}</div>
+      </div>
+    );
+  };
+  return (
+    <div onClick={onClose} style={{ position: 'fixed', inset: 0, background: 'rgba(15,23,42,.35)', zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20 }}>
+      <div onClick={(e) => e.stopPropagation()} style={{ width: 'min(760px, 96vw)', maxHeight: '86vh', overflow: 'auto', background: '#fff', borderRadius: 18, border: '1px solid #E2E8F0', boxShadow: '0 24px 70px rgba(15,23,42,.22)' }}>
+        <div style={{ position: 'sticky', top: 0, background: '#FFFFFF', borderBottom: '1px solid #E2E8F0', padding: '18px 22px', display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 16, zIndex: 1 }}>
+          <div>
+            <div style={{ fontSize: 18, fontWeight: 800, color: '#0F172A' }}>{library.name || 'Goal library'}</div>
+            <div style={{ marginTop: 4, fontSize: 12.5, color: '#64748B', fontWeight: 700 }}>
+              {library.type === 'kra-kpi' ? 'KRAs + KPIs' : 'KRAs only'}
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Close"
+            style={{ border: '1px solid #E2E8F0', background: '#F8FAFC', borderRadius: 10, width: 34, height: 34, color: '#334155', cursor: 'pointer', fontSize: 18, lineHeight: 1, fontFamily: 'inherit' }}
+          >
+            x
+          </button>
+        </div>
+        <div style={{ padding: 22 }}>
+          {perspectives.length === 0 ? (
+            <div style={{ minHeight: 120, borderRadius: 14, border: '1px dashed #CBD5E1', background: '#F8FAFC', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#64748B', fontSize: 13, fontWeight: 700 }}>
+              No KRAs configured.
+            </div>
+          ) : perspectives.map((perspective, perspectiveIndex) => (
+            <div key={perspective.id || perspective.name || perspectiveIndex} style={{ marginBottom: 16, border: '1px solid #E2E8F0', borderRadius: 14, overflow: 'hidden' }}>
+              <div style={{ background: '#F8FAFC', borderBottom: '1px solid #E2E8F0', padding: '10px 14px', fontSize: 12.5, fontWeight: 800, color: '#334155' }}>
+                {perspective.name || `Section ${perspectiveIndex + 1}`}
+              </div>
+              <div style={{ padding: 14, display: 'flex', flexDirection: 'column', gap: 12 }}>
+                {(perspective.kras || []).length === 0 ? (
+                  <div style={{ color: '#94A3B8', fontSize: 12.5 }}>No KRAs in this section.</div>
+                ) : (perspective.kras || []).map((kra, kraIndex) => (
+                  <div key={kra.id || kra.name || kraIndex} style={{ border: '1px solid #EEF2F7', borderRadius: 12, padding: 12 }}>
+                    <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12 }}>
+                      <div style={{ fontSize: 13.5, fontWeight: 800, color: '#0F172A' }}>{kra.name || `KRA ${kraIndex + 1}`}</div>
+                      {kra.suggestedWeight || kra.weight ? (
+                        <span style={{ flexShrink: 0, fontSize: 11, fontWeight: 800, color: '#15803D', background: '#F0FDF4', border: '1px solid #BBF7D0', borderRadius: 999, padding: '2px 8px' }}>
+                          KRA {kra.suggestedWeight ?? kra.weight}%
+                        </span>
+                      ) : null}
+                    </div>
+                    {kra.desc ? (
+                      <div style={{ marginTop: 6, fontSize: 12.5, color: '#64748B', lineHeight: 1.5 }}>{kra.desc}</div>
+                    ) : null}
+                    {renderTarget(kra.target, kra.targetType, 'KRA target')}
+                    {(kra.kpis || []).length > 0 ? (
+                      <div style={{ marginTop: 10, display: 'flex', flexDirection: 'column', gap: 7 }}>
+                        {(kra.kpis || []).map((kpi, kpiIndex) => (
+                          <div key={kpi.id || kpi.name || kpiIndex} style={{ padding: '8px 9px', borderRadius: 9, background: '#F8FAFC', color: '#334155', fontSize: 12.5 }}>
+                            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
+                              <span>{kpi.name || `KPI ${kpiIndex + 1}`}</span>
+                              {showKpiPercent && (kpi.weight || kpi.suggestedWeight) ? (
+                                <span style={{ flexShrink: 0, fontSize: 11, fontWeight: 800, color: '#2563EB' }}>{kpi.weight ?? kpi.suggestedWeight}%</span>
+                              ) : null}
+                            </div>
+                            {renderTarget(kpi.target, kpi.targetType, 'KPI target')}
+                          </div>
+                        ))}
+                      </div>
+                    ) : null}
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
       </div>
     </div>
   );
@@ -4180,13 +5179,14 @@ function buildLegacyPrefillData(config, groupsOverride = null) {
   };
 }
 
-function StepPrefillData({ config, update }) {
+export function StepPrefillData({ config, update, readOnly = false }) {
   const groups = config.goalGroups || [];
   const groupsNeedingPrefill = groupsNeedingPrefillData(config);
   const canShowAllGroups = groupsNeedingPrefill.length > 1;
   const [selectedGroupId, setSelectedGroupId] = useState(groupsNeedingPrefill[0]?.id || '');
   const [showAllGroups, setShowAllGroups] = useState(false);
   const [editingPrefillTarget, setEditingPrefillTarget] = useState(null);
+  const [viewingLibrary, setViewingLibrary] = useState(null);
   const [phase, setPhase] = useState('idle');
   const [errors, setErrors] = useState([]);
   const canShowGroupSwitcher = groupsNeedingPrefill.length > 1;
@@ -4249,7 +5249,7 @@ function StepPrefillData({ config, update }) {
 
   return (
     <div style={{ maxWidth: 1180, margin: '0 auto', paddingBottom: 40 }}>
-      {editingPrefillGroup && editingPrefillAssignment && (
+      {!readOnly && editingPrefillGroup && editingPrefillAssignment && (
         <AddLibraryModal
           config={getGroupPrefillUploadConfig(config, editingPrefillGroup)}
           initialLibrary={{
@@ -4263,6 +5263,9 @@ function StepPrefillData({ config, update }) {
           suggestedType={editingPrefillGroup.prefillType}
           lockType
           hideKpiWeights={editingPrefillGroup.kpiRatingMode === 'free-text'}
+          targetsOn={config.targetsEnabled !== false}
+          targetLevel={editingPrefillGroup.targetLevel === 'KRA' ? 'KRA' : 'KPI'}
+          targetTypeOptions={getMergedTargetTypes(config).filter((t) => !t.hidden).map((t) => ({ id: canonicalTargetTypeId(t), label: t.name }))}
           onSave={(library) => {
             updatePrefillAssignmentData(editingPrefillGroup.id, editingPrefillAssignment.slotKey, library.perspectives || []);
             setEditingPrefillTarget(null);
@@ -4270,6 +5273,7 @@ function StepPrefillData({ config, update }) {
           onClose={() => setEditingPrefillTarget(null)}
         />
       )}
+      <ReadOnlyLibraryModal library={viewingLibrary} onClose={() => setViewingLibrary(null)} targetTypes={getMergedTargetTypes(config).filter((t) => !t.hidden)} />
 
       <SectionHead title="Upload pre-filled goals" />
 
@@ -4319,17 +5323,25 @@ function StepPrefillData({ config, update }) {
                           empty={uploadedCount === 0}
                           onSelect={() => {
                             setSelectedGroupId(group.id);
-                            setEditingPrefillTarget({ groupId: group.id, slotKey: assignment.slotKey });
+                            if (readOnly && uploadedCount > 0) {
+                              setViewingLibrary({
+                                name: assignment.label,
+                                type: group.prefillType === 'kra-kpi' ? 'kra-kpi' : 'kra-only',
+                                perspectives: assignment.data || [],
+                              });
+                            }
                           }}
-                          onEdit={() => {
+                          onEdit={!readOnly ? () => {
                             setSelectedGroupId(group.id);
                             setEditingPrefillTarget({ groupId: group.id, slotKey: assignment.slotKey });
-                          }}
-                          onDelete={uploadedCount > 0 ? () => updatePrefillAssignmentData(group.id, assignment.slotKey, []) : null}
+                          } : null}
+                          onDelete={!readOnly && uploadedCount > 0 ? () => updatePrefillAssignmentData(group.id, assignment.slotKey, []) : null}
                           showKpiPercent={group.prefillType === 'kra-kpi' && group.kpiRatingMode !== 'free-text'}
-                          selectionHint={uploadedCount > 0
-                            ? `${prefillKraCount} pre-filled KRA${prefillKraCount !== 1 ? 's' : ''} · ${prefillLabel}`
-                            : `Create or upload ${prefillLabel.toLowerCase()} for ${assignment.label}`}
+                          selectionHint={readOnly
+                            ? (uploadedCount > 0 ? `${prefillKraCount} KRA${prefillKraCount !== 1 ? 's' : ''} configured · click to view` : 'No data configured')
+                            : (uploadedCount > 0
+                                ? `${prefillKraCount} pre-filled KRA${prefillKraCount !== 1 ? 's' : ''} · ${prefillLabel}`
+                                : `Create or upload ${prefillLabel.toLowerCase()} for ${assignment.label}`)}
                         />
                       );
                     })}
@@ -4399,7 +5411,7 @@ function StepPrefillData({ config, update }) {
             </div>
 
             <div style={{ display: 'flex', flexDirection: 'column', gap: 10, alignItems: 'stretch' }}>
-              {selectedGroup && (
+              {!readOnly && selectedGroup && (
                 <>
                   <PrefillSheetControls
                     config={config}
@@ -4430,6 +5442,7 @@ function StepPrefillData({ config, update }) {
         invalidMessage={phase === 'error' && errors.length > 0 ? 'Fix the upload errors shown above, then re-upload the sheet.' : 'Upload pre-fill data for every pre-fill-enabled group.'}
         buttonLabel="Confirm Pre-fill Data"
         onApply={() => update('prefillDataAppliedSnapshot', `confirmed_${Date.now()}`)}
+        readOnly={readOnly}
       />
     </div>
   );
@@ -4488,9 +5501,10 @@ function libraryHasPerspectiveMismatch(library, configPerspNamesLower) {
 
 function AddLibraryModal({ config, initialLibrary = null, fixedName = '', suggestedType = null, lockType = false, hideKpiWeights = false, onSave, onClose }) {
   const normalizedInitialLibrary = initialLibrary ? normalizeGoalLibraryRecord(initialLibrary) : null;
+  const usesBscPerspectives = config?.frameworkId === 'bsc';
 
   // Configured perspectives for this org — source of truth
-  const configPerspectives = (config.perspectives || []).filter(p => p.name);
+  const configPerspectives = usesBscPerspectives ? (config.perspectives || []).filter(p => p.name) : [];
   const configPerspNames = configPerspectives.map(p => String(p.name).trim());
 
   const defaultPersp = configPerspectives.map((p, i) => ({
@@ -4515,7 +5529,7 @@ function AddLibraryModal({ config, initialLibrary = null, fixedName = '', sugges
   // Detect if saved library perspectives don't match configured ones
   const savedPerspNames = seedPerspectives.map(p => String(p.name || '').trim().toLowerCase());
   const configPerspNamesLower = configPerspNames.map(n => n.toLowerCase());
-  const hasPerspMismatch = configPerspNames.length > 0 && !!initialLibrary && savedPerspNames.some(
+  const hasPerspMismatch = usesBscPerspectives && configPerspNames.length > 0 && !!initialLibrary && savedPerspNames.some(
     n => !configPerspNamesLower.includes(n)
   );
 
@@ -4731,14 +5745,14 @@ function AddLibraryModal({ config, initialLibrary = null, fixedName = '', sugges
           )}
 
           {/* No perspectives configured */}
-          {configPerspNames.length === 0 && (
+          {usesBscPerspectives && configPerspNames.length === 0 && (
             <div style={{ marginBottom: 16, background: '#FFFBEB', border: '1.5px solid #FDE68A', borderRadius: 9, padding: '12px 14px', fontSize: 12.5, color: '#92400E', lineHeight: 1.6 }}>
               ⚠ <strong>No BSC perspectives configured</strong> for this org yet. Go back to the <strong>BSC Perspectives</strong> step to set them up before building libraries — KRAs must belong to a valid perspective.
             </div>
           )}
 
           {/* Perspective mismatch sync banner */}
-          {showPerspSyncBanner && (
+          {usesBscPerspectives && showPerspSyncBanner && (
             <div style={{ marginBottom: 16, background: '#FEF2F2', border: '1.5px solid #FECACA', borderRadius: 9, padding: '12px 14px' }}>
               <div style={{ fontSize: 12.5, fontWeight: 600, color: '#991B1B', marginBottom: 6 }}>
                 ⚠ Perspective mismatch
@@ -4924,9 +5938,10 @@ function AddLibraryModal({ config, initialLibrary = null, fixedName = '', sugges
   );
 }
 
-function StepGoalLibraries({ config, update }) {
+export function StepGoalLibraries({ config, update, hideHead, readOnly = false }) {
   const libraries = config.goalLibraries || [];
   const groups = config.goalGroups || [];
+  const usesBscPerspectives = config?.frameworkId === 'bsc';
   const groupsNeedingLib = groups.filter(isGroupLibraryEnabled);
   const canShowAllGroups = groupsNeedingLib.length > 1;
   const [showAddModal, setShowAddModal] = useState(false);
@@ -4934,6 +5949,7 @@ function StepGoalLibraries({ config, update }) {
   const [showAllGroups, setShowAllGroups] = useState(false);
   const [selectedGroupId, setSelectedGroupId] = useState(groupsNeedingLib[0]?.id || '');
   const [editingSlot, setEditingSlot] = useState(null);
+  const [viewingLibrary, setViewingLibrary] = useState(null);
   const [uploadErrors, setUploadErrors] = useState([]);
 
   const groupsWithAssignments = groupsNeedingLib.map(group => ({
@@ -4954,7 +5970,7 @@ function StepGoalLibraries({ config, update }) {
         .map(l => [l.id, l])
     )
   ).values());
-  const mismatchedLibraries = assignedLibraries.filter(l => libraryHasPerspectiveMismatch(l, configPerspNamesLower));
+  const mismatchedLibraries = usesBscPerspectives ? assignedLibraries.filter(l => libraryHasPerspectiveMismatch(l, configPerspNamesLower)) : [];
   const isValid = allSlotsAssigned && mismatchedLibraries.length === 0;
   const isApplied = !!config.goalLibrariesAppliedSnapshot && isValid;
 
@@ -5105,7 +6121,7 @@ function StepGoalLibraries({ config, update }) {
 
   return (
     <div style={{ maxWidth: 1180, margin: '0 auto', paddingBottom: 40 }}>
-      {showAddModal && (
+      {!readOnly && showAddModal && (
         <AddLibraryModal
           config={config}
           initialLibrary={editingLibrary}
@@ -5120,8 +6136,9 @@ function StepGoalLibraries({ config, update }) {
           }}
         />
       )}
+      <ReadOnlyLibraryModal library={viewingLibrary} onClose={() => setViewingLibrary(null)} targetTypes={getMergedTargetTypes(config).filter((t) => !t.hidden)} />
 
-      <SectionHead title="Build your KRA libraries" />
+      {!hideHead && <SectionHead title="Build your KRA libraries" />}
 
       <div style={{ background: 'linear-gradient(180deg, #FFFFFF 0%, #FCFDFE 100%)', border: '1px solid #E2E8F0', borderRadius: 34, padding: 30, marginBottom: 22, boxShadow: '0 20px 45px rgba(15,23,42,.05)' }}>
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 220px', gap: 24, alignItems: 'stretch' }}>
@@ -5152,25 +6169,26 @@ function StepGoalLibraries({ config, update }) {
                     {slots.map((slot, index) => {
                       const { group, assignment, library } = slot;
                       const accent = slot.accent || LIBRARY_BOARD_COLORS[(selectedGroupIndex + index) % LIBRARY_BOARD_COLORS.length];
-                      const hasMismatch = !!library && libraryHasPerspectiveMismatch(library, configPerspNamesLower);
+                      const hasMismatch = usesBscPerspectives && !!library && libraryHasPerspectiveMismatch(library, configPerspNamesLower);
                       return (
                         <LibraryCard
                           key={`${group.id}:${assignment.slotKey}`}
                           library={library || { name: assignment.label, type: 'kra-kpi', perspectives: [] }}
                           groupLabel={assignment.label}
-                          assignedText={null}
+                          assignedText={!readOnly ? (group.prefillType === 'kra-kpi' ? 'Pre-fill: KRA + KPI' : group.prefillType === 'kra-only' ? 'Pre-fill: KRA only' : null) : null}
                           accent={accent}
                           active={!!library}
                           empty={!library}
-                          warning={hasMismatch ? 'Perspective mismatch — open and sync' : null}
-                          onSelect={() => openSlotEditor(group, assignment, library?.id || null)}
-                          onEdit={() => openSlotEditor(group, assignment, library?.id || null)}
-                          onDelete={library ? () => deleteLibrary(library.id) : null}
-                          selectionHint={
-                            library
-                              ? `${group.name}${group.segmentAttr ? ` · ${group.segmentAttr}` : ''}`
-                              : `Create library for ${assignment.label}`
-                          }
+                          warning={!readOnly && hasMismatch ? 'Perspective mismatch — open and sync' : null}
+                          setupLabels={!readOnly ? getGoalSetupLabels(group) : []}
+                          onSelect={readOnly && library ? () => setViewingLibrary(library) : null}
+                          onEdit={!readOnly ? () => openSlotEditor(group, assignment, library?.id || null) : null}
+                          onDelete={!readOnly && library ? () => deleteLibrary(library.id) : null}
+                          selectionHint={readOnly
+                            ? (library ? 'Click to view details' : 'No library configured')
+                            : (library
+                                ? `${group.name}${group.segmentAttr ? ` · ${group.segmentAttr}` : ''}`
+                                : `Create library for ${assignment.label}`)}
                         />
                       );
                     })}
@@ -5239,6 +6257,7 @@ function StepGoalLibraries({ config, update }) {
               )}
             </div>
 
+            {!readOnly && (
             <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
               <GoalLibrarySheetControls
                 config={config}
@@ -5248,6 +6267,7 @@ function StepGoalLibraries({ config, update }) {
                 onUploadErrors={setUploadErrors}
               />
             </div>
+            )}
           </div>
         </div>
       </div>
@@ -5280,6 +6300,7 @@ function StepGoalLibraries({ config, update }) {
         }
         buttonLabel="Confirm Libraries"
         onApply={() => update('goalLibrariesAppliedSnapshot', `confirmed_${Date.now()}`)}
+        readOnly={readOnly}
       />
     </div>
   );
@@ -6997,8 +8018,17 @@ function GroupDataUploadPanel({ group, config, update }) {
     setImportPhase(prev => ({ ...prev, [type]: 'parsing' }));
     setImportErrors(prev => ({ ...prev, [type]: [] }));
     try {
-      // Use a minimal config for parsing — no byAttr for per-group uploads
-      const fakeConfig = { ...config, goalLibraryScope: 'common', goalSegmentValues: [] };
+      // Use a minimal config for parsing — no byAttr for per-group uploads.
+      // Pin the parse to THIS group's target level (not the org-wide mode) so
+      // uploaded targets land on the same level the employee page renders at.
+      // Otherwise, when the group differs from the org default (or the org is on
+      // "Custom"), targets get attached to the wrong level and never show.
+      const fakeConfig = {
+        ...config,
+        goalLibraryScope: 'common',
+        goalSegmentValues: [],
+        targetLevelMode: group.targetLevel === 'KRA' ? 'KRA' : 'KPI',
+      };
       const result = await parseGoalLibraryXlsx(file, fakeConfig);
       const errs = validateGoalLibraryData(result, fakeConfig);
       // Block on perspective errors and invalid/negative weights — KPIs and empty weights are optional.
@@ -7944,42 +8974,449 @@ function StepLimitsRules({ config, update }) {
   );
 }
 
+// Contiguous defaults: top point is open-ended at 100+, bottom point is 0–49,
+// and the (N-2) middle bands evenly split the 50–99 range. No gaps, no overlaps.
+function getDefaultAutoRatingBands(config = {}) {
+  const sorted = getScaleLevels(config).slice().sort((a, b) => b.n - a.n);
+  const N = sorted.length;
+  if (N <= 1) return sorted.map((item) => ({ point: item.n, from: 0, to: '' }));
+  if (N === 2) {
+    return [
+      { point: sorted[0].n, from: 100, to: '' },
+      { point: sorted[1].n, from: 0, to: 99 },
+    ];
+  }
+  const out = [{ point: sorted[0].n, from: 100, to: '' }];
+  const midBands = N - 2;
+  for (let i = 0; i < midBands; i++) {
+    const upper = i === 0 ? 99 : 99 - Math.round((i * 50) / midBands);
+    const lower = 99 - Math.round(((i + 1) * 50) / midBands) + 1;
+    out.push({ point: sorted[i + 1].n, from: lower, to: upper });
+  }
+  out.push({ point: sorted[N - 1].n, from: 0, to: 49 });
+  return out;
+}
+
+// Flags missing values, non-numbers, inverted ranges, gaps between bands,
+// overlaps, and a non-zero bottom band. Returns global error list +
+// per-row errors keyed by score point.
+function validateAutoRatingBands(bands, config) {
+  const sorted = getScaleLevels(config).slice().sort((a, b) => b.n - a.n);
+  const errors = [];
+  const errorsByPoint = {};
+  const addRowError = (point, msg) => {
+    if (!errorsByPoint[point]) errorsByPoint[point] = [];
+    errorsByPoint[point].push(msg);
+    errors.push(msg);
+  };
+  const isBlank = (v) => v === '' || v === null || v === undefined;
+  const topPoint = sorted[0]?.n;
+  const bottomPoint = sorted[sorted.length - 1]?.n;
+
+  const parsed = sorted.map((lvl) => {
+    const row = bands.find((b) => b.point === lvl.n) || {};
+    const fromBlank = isBlank(row.from);
+    const toBlank = isBlank(row.to);
+    const fromNum = Number(row.from);
+    const toNum = Number(row.to);
+    if (fromBlank) addRowError(lvl.n, `Score ${lvl.n}: From % is required.`);
+    else if (!Number.isFinite(fromNum)) addRowError(lvl.n, `Score ${lvl.n}: From % must be a number.`);
+    else if (fromNum < 0) addRowError(lvl.n, `Score ${lvl.n}: From % cannot be negative.`);
+    if (lvl.n !== topPoint) {
+      if (toBlank) addRowError(lvl.n, `Score ${lvl.n}: To % is required.`);
+      else if (!Number.isFinite(toNum)) addRowError(lvl.n, `Score ${lvl.n}: To % must be a number.`);
+    }
+    if (!fromBlank && !toBlank && Number.isFinite(fromNum) && Number.isFinite(toNum) && fromNum > toNum) {
+      addRowError(lvl.n, `Score ${lvl.n}: From % (${fromNum}) cannot be greater than To % (${toNum}).`);
+    }
+    return { point: lvl.n, fromNum, toNum, fromBlank, toBlank };
+  });
+
+  // Contiguity check across adjacent rows (top-down).
+  for (let i = 1; i < parsed.length; i++) {
+    const higher = parsed[i - 1];
+    const lower = parsed[i];
+    if (lower.fromBlank || lower.toBlank || higher.fromBlank) continue;
+    if (!Number.isFinite(lower.fromNum) || !Number.isFinite(lower.toNum) || !Number.isFinite(higher.fromNum)) continue;
+    if (lower.toNum + 1 < higher.fromNum) {
+      addRowError(lower.point, `Gap: ${lower.toNum + 1}–${higher.fromNum - 1}% falls between score ${lower.point} and score ${higher.point}.`);
+    } else if (lower.toNum >= higher.fromNum) {
+      addRowError(lower.point, `Overlap: score ${lower.point} ends at ${lower.toNum}% but score ${higher.point} starts at ${higher.fromNum}%.`);
+    }
+  }
+
+  const bottom = parsed[parsed.length - 1];
+  if (bottom && !bottom.fromBlank && Number.isFinite(bottom.fromNum) && bottom.fromNum > 0) {
+    addRowError(bottomPoint, `The lowest score should start at 0%, not ${bottom.fromNum}%.`);
+  }
+
+  return { errors: [...new Set(errors)], errorsByPoint };
+}
+
+function getAutoRatingBands(config = {}) {
+  const stored = Array.isArray(config.autoRatingBands) && config.autoRatingBands.length > 0
+    ? config.autoRatingBands
+    : null;
+  if (stored) return stored;
+  // Backward compat: pick up the first stored per-type rule if any.
+  const legacyRules = config.autoRatingRules || {};
+  const firstLegacy = Object.values(legacyRules).find((rule) => Array.isArray(rule?.rows) && rule.rows.length > 0);
+  if (firstLegacy) return firstLegacy.rows;
+  return getDefaultAutoRatingBands(config);
+}
+
+export function StepAutoRating({ config, update, hideHead, hideApplyBar = false }) {
+  const scale = getScaleLevels(config).slice().sort((a, b) => b.n - a.n);
+  const bands = getAutoRatingBands(config);
+  const setBands = (next) => update('autoRatingBands', next);
+  const setRow = (point, patch) => {
+    const next = bands.map((row) => row.point === point ? { ...row, ...patch } : row);
+    setBands(next);
+  };
+  const resetBandsToDefaults = () => setBands(getDefaultAutoRatingBands(config));
+  const autoRatingOff = config.autoRating === false;
+  const bandValidation = autoRatingOff
+    ? { errors: [], errorsByPoint: {} }
+    : validateAutoRatingBands(bands, config);
+  const targetTypeErrors = getTargetTypeValidation(getMergedTargetTypes(config), config.targetsEnabled !== false).errors;
+  const autoRatingValid = autoRatingOff
+    || (config.scalePoints > 0 && targetTypeErrors.length === 0 && bandValidation.errors.length === 0);
+  const autoRatingApplied = autoRatingValid && !!config.autoRatingAppliedSnapshot;
+  const invalidMessage = targetTypeErrors.length > 0
+    ? 'Fix the rating scale and target types before saving auto-rating.'
+    : bandValidation.errors.length > 0
+      ? 'Fix the band errors above before saving.'
+      : 'Fix the issues above before saving.';
+
+  return (
+    <div>
+      {!hideHead && <SectionHead title="Auto-rating" sub="Map achievement % to a score. Direction (higher/lower/exact) is set per goal at goal definition, not here." />}
+      <Card>
+        <CardHead title="Scoring rules" />
+        <CardBody>
+          <TogRow
+            label="Enable auto-rating from targets"
+            desc="When enabled, the system suggests a score from achievement. Managers can still review based on the override setting."
+            on={config.autoRating !== false}
+            onChange={(v) => update('autoRating', v)}
+          />
+          <TogRow
+            label="Allow manager override"
+            desc="Manager can change the suggested score with a reason."
+            last
+            on={config.managerOverrideAuto !== false}
+            onChange={(v) => update('managerOverrideAuto', v)}
+            disabled={config.autoRating === false}
+          />
+
+          {config.autoRating !== false && (
+            <div style={{ marginTop: 16 }}>
+              <div style={{ padding: '10px 12px', borderRadius: 9, background: '#EFF6FF', border: '1px solid #BFDBFE', color: '#1E40AF', fontSize: 12, fontWeight: 600, marginBottom: 14, lineHeight: 1.5 }}>
+                These bands map <strong>achievement %</strong> (already direction-adjusted at evaluation) to a score on the <strong>{config.scalePoints || 5}-point scale</strong>. Each goal carries its own direction (Higher is better / Lower is better / Exact / Manual) — set during goal definition, not here.
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 8 }}>
+                <button
+                  type="button"
+                  onClick={resetBandsToDefaults}
+                  style={{ background: '#F8FAFC', border: '1px solid #CBD5E1', color: '#334155', borderRadius: 8, padding: '6px 12px', fontSize: 12, fontWeight: 700, cursor: 'pointer' }}
+                >Reset to defaults</button>
+              </div>
+              <div style={{ border: '1px solid #E2E8F0', borderRadius: 10, overflow: 'hidden' }}>
+                <div style={{ display: 'grid', gridTemplateColumns: '120px 1fr 1fr', gap: 10, padding: '9px 12px', background: '#F8FAFC', color: '#64748B', fontSize: 11, fontWeight: 900, textTransform: 'uppercase', letterSpacing: '.04em' }}>
+                  <span>Score</span>
+                  <span>From achievement %</span>
+                  <span>To achievement %</span>
+                </div>
+                {scale.map((level) => {
+                  const row = bands.find((item) => item.point === level.n) || { point: level.n, from: '', to: '' };
+                  const rowErrors = bandValidation.errorsByPoint[level.n] || [];
+                  const hasError = rowErrors.length > 0;
+                  const errStyle = hasError ? { borderColor: '#DC2626', boxShadow: '0 0 0 1px #FEE2E2 inset' } : {};
+                  return (
+                    <div key={level.n} style={{ padding: '10px 12px', borderTop: '1px solid #E2E8F0', background: hasError ? '#FEF2F2' : 'transparent' }}>
+                      <div style={{ display: 'grid', gridTemplateColumns: '120px 1fr 1fr', gap: 10, alignItems: 'center' }}>
+                        <div style={{ fontSize: 12.5, fontWeight: 800, color: '#111827' }}>{level.n} - {level.l}</div>
+                        <input style={{ ...inputStyle, ...errStyle }} type="number" value={row.from} placeholder="From" onChange={(e) => setRow(level.n, { from: e.target.value })} />
+                        <input style={{ ...inputStyle, ...errStyle }} type="number" value={row.to} placeholder={level.n === scale[0].n ? 'No upper cap' : 'To'} onChange={(e) => setRow(level.n, { to: e.target.value })} />
+                      </div>
+                      {hasError && (
+                        <ul style={{ margin: '6px 0 0 0', padding: '0 0 0 18px', color: '#B91C1C', fontSize: 11.5, fontWeight: 600, lineHeight: 1.5 }}>
+                          {rowErrors.map((msg, idx) => <li key={idx}>{msg}</li>)}
+                        </ul>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+          {!hideApplyBar && (
+            <StepStatusBar
+              applied={autoRatingApplied}
+              valid={autoRatingValid}
+              appliedMessage={autoRatingOff ? '✓ Auto-rating turned off. Managers will rate manually.' : '✓ Auto-rating saved. Move to the next step, or change a field above to re-enable editing.'}
+              pendingMessage={autoRatingOff ? 'Auto-rating is off. Save to confirm and continue.' : 'Review the rules and click Save when ready.'}
+              invalidMessage={invalidMessage}
+              buttonLabel="Save auto-rating"
+              onApply={() => update('autoRatingAppliedSnapshot', `confirmed_${Date.now()}`)}
+            />
+          )}
+        </CardBody>
+      </Card>
+    </div>
+  );
+}
+
 /* ── STEP 6: TARGETS ───────────────────────────────────────────────────── */
 const DEFAULT_TARGET_TYPES = [
-  { id: 'tt_default_number',     name: 'Number',     unit: '',  isNumeric: true,  hasMin: false, min: null, hasMax: false, max: null,  isDefault: true, hidden: false },
-  { id: 'tt_default_percentage', name: 'Percentage', unit: '%', isNumeric: true,  hasMin: true,  min: 0,    hasMax: true,  max: 100,   isDefault: true, hidden: false },
-  { id: 'tt_default_currency',   name: 'Currency',   unit: '₹', isNumeric: true,  hasMin: false, min: null, hasMax: false, max: null,  isDefault: true, hidden: false },
-  { id: 'tt_default_yesno',      name: 'Yes / No',   unit: '',  isNumeric: false, hasMin: false, min: null, hasMax: false, max: null,  isDefault: true, hidden: false },
-  { id: 'tt_default_text',       name: 'Text',       unit: '',  isNumeric: false, hasMin: false, min: null, hasMax: false, max: null,  isDefault: true, hidden: false },
+  { id: 'tt_default_number',     name: 'Number',     unit: '',  unitPosition: 'suffix', isNumeric: true,  hasMin: false, min: null, hasMax: false, max: null,  isDefault: true, hidden: false },
+  { id: 'tt_default_percentage', name: 'Percentage', unit: '%', unitPosition: 'suffix', isNumeric: true,  hasMin: true,  min: 0,    hasMax: true,  max: 100,   isDefault: true, hidden: false },
+  { id: 'tt_default_currency',   name: 'Currency',   unit: '₹', unitPosition: 'prefix', isNumeric: true,  hasMin: false, min: null, hasMax: false, max: null,  isDefault: true, hidden: false },
+  { id: 'tt_neg_number',         name: 'Negative number',   unit: '',  unitPosition: 'suffix', isNumeric: true,  hasMin: false, min: null, hasMax: false, max: null,  isDefault: true, hidden: false, lowerIsBetter: true },
+  { id: 'tt_neg_currency',       name: 'Negative currency', unit: '₹', unitPosition: 'prefix', isNumeric: true,  hasMin: false, min: null, hasMax: false, max: null,  isDefault: true, hidden: false, lowerIsBetter: true },
+  { id: 'tt_default_text',       name: 'Free text',  unit: '',  unitPosition: 'suffix', isNumeric: false, hasMin: false, min: null, hasMax: false, max: null,  isDefault: true, hidden: false },
 ];
 
-function StepTargets({ config, update, onOpenGroups }) {
+function getMergedTargetTypes(config = {}) {
+  const stored = Array.isArray(config.targetTypes) ? config.targetTypes : [];
+  const storedById = Object.fromEntries(stored.map(t => [t.id, t]));
+  const mergedDefaults = DEFAULT_TARGET_TYPES.map((d) => {
+    if (!storedById[d.id]) return d;
+    const storedType = { ...d, ...storedById[d.id], isDefault: true };
+    if (d.id === 'tt_default_text' && String(storedType.name || '').trim().toLowerCase() === 'text') {
+      storedType.name = d.name;
+    }
+    return storedType;
+  });
+  const customs = stored.filter(t =>
+    !DEFAULT_TARGET_TYPES.some(d => d.id === t.id)
+    && t.id !== 'tt_default_yesno'
+    && String(t.name || '').trim().toLowerCase() !== 'yes / no'
+  );
+  return [...mergedDefaults, ...customs];
+}
+
+function getTargetTypeValidation(types = [], targetsOn = true) {
+  if (!targetsOn) return { errors: [], errorsById: {}, duplicateNames: new Set(), visibleCount: 0 };
+  const errors = [];
+  const errorsById = {};
+  const addRowError = (id, message) => {
+    if (!errorsById[id]) errorsById[id] = [];
+    errorsById[id].push(message);
+  };
+  const visible = types.filter((type) => !type.hidden);
+  const labels = new Map();
+  visible.forEach((type) => {
+    const label = String(type.name || '').trim();
+    if (!label) {
+      addRowError(type.id, 'Add a target name or remove this row.');
+      errors.push('Every visible target type needs a target name.');
+      return;
+    }
+    const key = label.toLowerCase();
+    labels.set(key, [...(labels.get(key) || []), type.id]);
+    if (type.isNumeric && type.hasMin && type.hasMax) {
+      const min = Number(type.min);
+      const max = Number(type.max);
+      if (Number.isFinite(min) && Number.isFinite(max)) {
+        if (min > max) {
+          addRowError(type.id, 'Min cannot be greater than max.');
+          errors.push(`"${label}" has min greater than max.`);
+        } else if (min === max) {
+          addRowError(type.id, 'Min and max cannot be the same — give the range some room.');
+          errors.push(`"${label}" has the same min and max.`);
+        }
+      }
+    }
+  });
+  const duplicateNames = new Set();
+  labels.forEach((ids) => {
+    if (ids.length <= 1) return;
+    ids.forEach((id) => {
+      duplicateNames.add(id);
+      addRowError(id, 'Duplicate target name. Rename one of these rows.');
+    });
+    errors.push('Target names must be unique.');
+  });
+  if (visible.length === 0) {
+    errors.push('At least one target type must stay visible.');
+  }
+  return {
+    errors: [...new Set(errors)],
+    errorsById,
+    duplicateNames,
+    visibleCount: visible.filter((type) => String(type.name || '').trim()).length,
+  };
+}
+
+function StepTargets({ config, update }) {
   const targetsOn = config.targetsEnabled !== false;
-  const targetLevel = config.targetLevel || 'KPI';
+  const [pendingRemoveTypeId, setPendingRemoveTypeId] = useState(null);
+  // Rows added via "+ Add type" start pristine — we suppress the empty-name
+  // red error for them until the user actually types or clicks Save. Default
+  // rows are never pristine since the user didn't add them.
+  const [pristineTypeIds, setPristineTypeIds] = useState(() => new Set());
+  // KRA-only framework has no KPIs anywhere, so the KPI-level option is meaningless.
+  // Force KRA and skip the picker card in that mode.
+  const isKraOnlyFramework = config.frameworkId === 'kra';
+
+  // Three-mode state model:
+  //  'KRA'    = apply KRA level to every group (no exceptions)
+  //  'KPI'    = apply KPI level to every group (no exceptions)
+  //  'CUSTOM' = per-group editor visible; each group keeps its own setting
+  // The mode is stored explicitly so picking Custom stays sticky even if the
+  // resulting per-group values happen to all match.
+  const groups = config.goalGroups || [];
+  const storedMode = config.targetLevelMode;
+  // Derive mode from groups when no explicit value is stored (back-compat with
+  // existing orgs that pre-date this field).
+  const derivedMode = (() => {
+    if (groups.length === 0) return 'KPI';
+    const levels = groups.map((g) => (g.targetLevel === 'KRA' ? 'KRA' : 'KPI'));
+    const allSame = levels.every((l) => l === levels[0]);
+    return allSame ? levels[0] : 'CUSTOM';
+  })();
+  const mode = isKraOnlyFramework
+    ? 'KRA'
+    : (storedMode === 'KRA' || storedMode === 'KPI' || storedMode === 'CUSTOM' ? storedMode : derivedMode);
+
+  // Apply a uniform level to every group. Called when user picks "KRA level" or
+  // "KPI level" in non-Custom mode. Sheets (prefill / library) need re-applying
+  // since their column layout depends on the level, so we invalidate those — but
+  // NOT the Groups & Strategy snapshot, which is unrelated to target choices.
+  function applyToAllGroups(level, nextMode = level) {
+    const next = groups.map((g) => ({ ...g, targetLevel: level }));
+    update('goalGroups', next);
+    update('targetLevelMode', nextMode);
+    // Target level is a significant change — dirty the Targets step itself so
+    // HR has to click Save, and invalidate downstream templates whose columns
+    // depend on the level.
+    update('targetTypesAppliedSnapshot', null);
+    update('prefillDataAppliedSnapshot', null);
+    update('goalLibrariesAppliedSnapshot', null);
+  }
+  function setGroupLevel(groupId, level) {
+    const next = groups.map((g) => g.id === groupId ? { ...g, targetLevel: level } : g);
+    update('goalGroups', next);
+    update('targetLevelMode', 'CUSTOM');
+    update('targetTypesAppliedSnapshot', null);
+    update('prefillDataAppliedSnapshot', null);
+    update('goalLibrariesAppliedSnapshot', null);
+  }
+  function selectMode(nextMode) {
+    if (nextMode === mode) return;
+    if (nextMode === 'KRA' || nextMode === 'KPI') {
+      applyToAllGroups(nextMode);
+    } else {
+      // CUSTOM: just flip the mode; don't touch per-group values. Still dirty
+      // the Targets step so the user explicitly confirms the new shape.
+      update('targetLevelMode', 'CUSTOM');
+      update('targetTypesAppliedSnapshot', null);
+    }
+  }
 
   // Merge stored types with code defaults — keeps newly added defaults visible
   // for orgs that customised the list before this default existed.
-  const stored = Array.isArray(config.targetTypes) ? config.targetTypes : [];
-  const storedById = Object.fromEntries(stored.map(t => [t.id, t]));
-  const mergedDefaults = DEFAULT_TARGET_TYPES.map(d => storedById[d.id] ? { ...d, ...storedById[d.id], isDefault: true } : d);
-  const customs = stored.filter(t => !DEFAULT_TARGET_TYPES.some(d => d.id === t.id));
-  const types = [...mergedDefaults, ...customs];
+  const types = getMergedTargetTypes(config);
 
   const setTypes = (next) => update('targetTypes', next);
-  const patchType = (id, patch) => setTypes(types.map(t => t.id === id ? { ...t, ...patch } : t));
+  const markTouched = (id) => {
+    setPristineTypeIds(prev => {
+      if (!prev.has(id)) return prev;
+      const n = new Set(prev);
+      n.delete(id);
+      return n;
+    });
+  };
+  const patchType = (id, patch) => {
+    markTouched(id);
+    setTypes(types.map(t => t.id === id ? { ...t, ...patch } : t));
+  };
   const toggleHidden = (id) => patchType(id, { hidden: !types.find(t => t.id === id)?.hidden });
-  const removeCustom = (id) => {
+  const removeCustom = (id, confirmed = false) => {
     const t = types.find(x => x.id === id);
     if (!t || t.isDefault) return;
-    if (!window.confirm(`Remove "${t.name || 'this type'}"? Targets currently using it will need to be reassigned.`)) return;
+    if (!confirmed) {
+      setPendingRemoveTypeId(id);
+      return;
+    }
+    setPendingRemoveTypeId(null);
+    setPristineTypeIds(prev => {
+      if (!prev.has(id)) return prev;
+      const n = new Set(prev);
+      n.delete(id);
+      return n;
+    });
     setTypes(types.filter(x => x.id !== id));
   };
-  const addType = () => setTypes([...types, {
-    id: `tt_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`,
-    name: '', unit: '', isNumeric: true,
-    hasMin: false, min: null, hasMax: false, max: null,
-    isDefault: false, hidden: false,
-  }]);
+  const addType = () => {
+    const newId = `tt_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`;
+    setPristineTypeIds(prev => {
+      const n = new Set(prev);
+      n.add(newId);
+      return n;
+    });
+    setTypes([...types, {
+      id: newId,
+      name: '', unit: '', unitPosition: 'suffix', isNumeric: false,
+      hasMin: false, min: null, hasMax: false, max: null,
+      isDefault: false, hidden: false,
+    }]);
+  };
+  const setTypeValueKind = (id, isNumeric) => patchType(id, {
+    isNumeric,
+    unit: isNumeric ? (types.find(t => t.id === id)?.unit || '') : '',
+    unitPosition: types.find(t => t.id === id)?.unitPosition || 'suffix',
+    hasMin: isNumeric ? !!types.find(t => t.id === id)?.hasMin : false,
+    min: isNumeric ? (types.find(t => t.id === id)?.min ?? null) : null,
+    hasMax: isNumeric ? !!types.find(t => t.id === id)?.hasMax : false,
+    max: isNumeric ? (types.find(t => t.id === id)?.max ?? null) : null,
+  });
+  const targetLevelOptions = [
+    { id: 'KPI', title: 'KPI level', eyebrow: 'Most detailed', desc: 'Employees enter a target for each KPI.', summary: 'One target per KPI' },
+    { id: 'KRA', title: 'KRA level', eyebrow: 'Simpler plan', desc: 'Employees enter one target for the whole KRA.', summary: 'One target per KRA' },
+    { id: 'CUSTOM', title: 'Custom', eyebrow: 'Mixed by group', desc: 'Choose KPI or KRA level for each employee group.', summary: 'Group-specific' },
+  ];
+  const kpiGroupCount = groups.filter((g) => g.targetLevel !== 'KRA').length;
+  const kraGroupCount = groups.length - kpiGroupCount;
+  const targetSummary = mode === 'CUSTOM'
+    ? `${kpiGroupCount} KPI-level group${kpiGroupCount === 1 ? '' : 's'} · ${kraGroupCount} KRA-level group${kraGroupCount === 1 ? '' : 's'}`
+    : targetLevelOptions.find((opt) => opt.id === mode)?.summary || 'Target level';
+  const visibleTargetTypeCount = types.filter((t) => !t.hidden && String(t.name || '').trim()).length;
+  const unitExamples = '%  days  kg  hrs';
+  const targetTypeValidation = getTargetTypeValidation(types, targetsOn);
+  // UI-facing validation: hide the empty-name error for rows the user just
+  // added but hasn't touched yet, so a fresh row doesn't flash red on entry.
+  // Save is still gated on full validation.
+  const displayValidation = (() => {
+    const errorsById = {};
+    Object.entries(targetTypeValidation.errorsById).forEach(([id, msgs]) => {
+      const isPristine = pristineTypeIds.has(id);
+      const filtered = isPristine
+        ? msgs.filter((m) => m !== 'Add a target name or remove this row.')
+        : msgs;
+      if (filtered.length > 0) errorsById[id] = filtered;
+    });
+    const onlyEmptyNameError = targetTypeValidation.errors.length === 1
+      && targetTypeValidation.errors[0] === 'Every visible target type needs a target name.';
+    const allOffendersPristine = onlyEmptyNameError
+      && Object.keys(targetTypeValidation.errorsById).every((id) => pristineTypeIds.has(id));
+    const errors = allOffendersPristine ? [] : targetTypeValidation.errors;
+    // Banner only carries errors that have nowhere else to surface — i.e. they
+    // don't correspond to any specific row. Row-pinpointed errors are already
+    // shown inline under each offending row, so duplicating them in a top
+    // banner just creates noise.
+    const bannerErrors = errors.filter((msg) => msg === 'At least one target type must stay visible.');
+    return { errors, errorsById, bannerErrors };
+  })();
+  const hasFullValidationErrors = targetTypeValidation.errors.length > 0;
+  const isTargetsSaved = !!config.targetTypesAppliedSnapshot && !hasFullValidationErrors;
+  const handleSaveTargets = () => {
+    // Touch every row so any remaining empty-name errors surface clearly.
+    setPristineTypeIds(new Set());
+    if (targetTypeValidation.errors.length > 0) return;
+    update('targetTypesAppliedSnapshot', `confirmed_${Date.now()}`);
+  };
 
   return (
     <div>
@@ -8005,188 +9442,591 @@ function StepTargets({ config, update, onOpenGroups }) {
         </Banner>
       )}
 
+      {targetsOn && isKraOnlyFramework && (
+        <Banner type="blue">
+          <span>ℹ️</span>
+          <span>KRA-only framework — KPIs don&apos;t exist here, so targets always sit on the KRA. Configure the target types below.</span>
+        </Banner>
+      )}
+      {targetsOn && !isKraOnlyFramework && (
+        <>
+          <Card>
+            <CardHead title="Target level" />
+            <CardBody>
+              <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 0.9fr) minmax(0, 1.4fr)', gap: 18, alignItems: 'start' }}>
+                <div>
+                  <div style={{ fontSize: 12.5, color: '#6B7280', lineHeight: 1.6, marginBottom: 14 }}>
+                    Choose where employees enter targets. This controls the template columns and the employee goal screen.
+                  </div>
+                  <div style={{
+                    display: 'inline-flex', alignItems: 'center', gap: 8,
+                    padding: '7px 10px', borderRadius: 999,
+                    background: mode === 'CUSTOM' ? '#F8FAFC' : '#EFF6FF',
+                    border: '1px solid #DBEAFE',
+                    color: '#1E40AF', fontSize: 11.5, fontWeight: 700,
+                  }}>
+                    <span style={{ width: 7, height: 7, borderRadius: 999, background: '#2563EB', flex: '0 0 auto' }} />
+                    {targetSummary}
+                  </div>
+                </div>
+
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: 8 }}>
+                  {targetLevelOptions.map((opt) => {
+                    const active = mode === opt.id;
+                    return (
+                      <button
+                        key={opt.id}
+                        type="button"
+                        onClick={() => selectMode(opt.id)}
+                        aria-pressed={active}
+                        style={{
+                          textAlign: 'left',
+                          minHeight: 112,
+                          padding: '13px 14px',
+                          borderRadius: 12,
+                          border: `1.5px solid ${active ? '#2563EB' : '#E2E8F0'}`,
+                          background: active ? '#F8FBFF' : '#fff',
+                          cursor: 'pointer',
+                          fontFamily: 'inherit',
+                          boxShadow: active ? '0 8px 18px rgba(37,99,235,0.10)' : '0 1px 2px rgba(15,23,42,0.04)',
+                          transition: 'border-color .14s ease, background .14s ease, box-shadow .14s ease, transform .14s ease',
+                        }}
+                      >
+                        <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 8, marginBottom: 10 }}>
+                          <div>
+                            <div style={{ fontSize: 10.5, color: active ? '#2563EB' : '#94A3B8', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '.04em', marginBottom: 3 }}>
+                              {opt.eyebrow}
+                            </div>
+                            <div style={{ fontSize: 13.5, fontWeight: 800, color: active ? '#1D4ED8' : '#111827' }}>{opt.title}</div>
+                          </div>
+                          <span style={{
+                            width: 20, height: 20, borderRadius: 999,
+                            border: `1.5px solid ${active ? '#2563EB' : '#CBD5E1'}`,
+                            background: active ? '#2563EB' : '#fff',
+                            color: '#fff',
+                            display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                            fontSize: 11, fontWeight: 900, flex: '0 0 auto',
+                          }}>
+                            {active ? '✓' : ''}
+                          </span>
+                        </div>
+                        <div style={{ fontSize: 12, color: '#64748B', lineHeight: 1.45 }}>{opt.desc}</div>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {mode === 'CUSTOM' && (
+                <div style={{ marginTop: 16, border: '1px solid #E2E8F0', borderRadius: 12, background: '#F8FAFC', overflow: 'hidden' }}>
+                  <div style={{
+                    padding: '11px 14px',
+                    borderBottom: '1px solid #E2E8F0',
+                  }}>
+                    <div style={{ fontSize: 11.5, color: '#64748B', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '.05em' }}>
+                      Group-level target placement
+                    </div>
+                  </div>
+                  {groups.length === 0 ? (
+                    <div style={{ padding: 14, fontSize: 12, color: '#94A3B8', fontStyle: 'italic' }}>
+                      No groups yet. Add them in <strong>Groups &amp; Strategy</strong> first.
+                    </div>
+                  ) : (
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: 10, padding: 12 }}>
+                      {groups.map((g) => {
+                        const groupLevel = g.targetLevel === 'KRA' ? 'KRA' : 'KPI';
+                        const levelCopy = groupLevel === 'KRA' ? 'KRA target' : 'KPI targets';
+                        return (
+                          <div
+                            key={g.id}
+                            style={{
+                              minWidth: 0,
+                              display: 'grid',
+                              gridTemplateColumns: 'minmax(0, 1fr) auto',
+                              gap: 12,
+                              alignItems: 'center',
+                              padding: '10px 10px 10px 12px',
+                              background: '#fff',
+                              border: '1px solid #E5E7EB',
+                              borderRadius: 10,
+                              boxShadow: '0 1px 2px rgba(15,23,42,0.04)',
+                            }}
+                          >
+                            <div style={{ minWidth: 0 }}>
+                              <div style={{ fontSize: 12.5, fontWeight: 800, color: '#111827', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                {g.name || 'Untitled group'}
+                              </div>
+                              <div style={{ fontSize: 11.5, color: '#64748B', marginTop: 3 }}>{levelCopy}</div>
+                            </div>
+                            <div style={{ display: 'inline-flex', padding: 3, background: '#F1F5F9', border: '1px solid #CBD5E1', borderRadius: 999, flexShrink: 0 }}>
+                              {['KPI', 'KRA'].map((lvl) => {
+                                const isActive = groupLevel === lvl;
+                                return (
+                                  <button
+                                    key={lvl}
+                                    type="button"
+                                    onClick={() => setGroupLevel(g.id, lvl)}
+                                    title={lvl === 'KPI' ? 'One target on every KPI for this group' : 'One target on the KRA; KPIs stay descriptive for this group'}
+                                    aria-pressed={isActive}
+                                    style={{
+                                      minWidth: 42,
+                                      padding: '5px 10px',
+                                      cursor: 'pointer',
+                                      fontFamily: 'inherit',
+                                      fontSize: 11.5,
+                                      fontWeight: 900,
+                                      border: 'none',
+                                      borderRadius: 999,
+                                      background: isActive ? '#2563EB' : 'transparent',
+                                      color: isActive ? '#fff' : '#64748B',
+                                      boxShadow: isActive ? '0 2px 5px rgba(37,99,235,0.25)' : 'none',
+                                      transition: 'background .12s ease, color .12s ease, box-shadow .12s ease',
+                                    }}
+                                  >
+                                    {lvl}
+                                  </button>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              )}
+            </CardBody>
+          </Card>
+          {(() => {
+            const targetsDirty = config.targetTypesAppliedSnapshot == null;
+            const prefillDirty = config.prefillDataAppliedSnapshot == null;
+            const goalLibDirty = config.goalLibrariesAppliedSnapshot == null;
+            const downstreamDirty = [];
+            if (prefillDirty) downstreamDirty.push('Pre-fill Data');
+            if (goalLibDirty) downstreamDirty.push('Goal Libraries');
+            if (!targetsDirty && downstreamDirty.length === 0) return null;
+            return (
+              <div style={{
+                margin: '10px 0 0',
+                padding: '12px 14px',
+                background: '#FFFBEB',
+                border: '1px solid #FDE68A',
+                borderRadius: 12,
+                color: '#92400E',
+                fontSize: 12.5,
+                lineHeight: 1.5,
+              }}>
+                <strong>Target level changed.</strong>{' '}
+                {targetsDirty && 'Click "Save Targets step" below to confirm. '}
+                {downstreamDirty.length > 0 && (
+                  <>The template columns now look different — re-download the latest template and re-upload your data in {downstreamDirty.join(' and ')} (flagged in the sidebar).</>
+                )}
+              </div>
+            );
+          })()}
+        </>
+      )}
+
       {targetsOn && (
         <>
           <Card>
-            <div style={{ padding: '13px 20px', borderBottom: '1px solid #E9EDF2', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
-              <div style={{ fontSize: 13.5, fontWeight: 600, color: '#0D1117' }}>Target level</div>
-              {onOpenGroups && (
-                <button
-                  type="button"
-                  onClick={onOpenGroups}
-                  style={{ background: '#fff', border: '1px solid #BFCFFE', color: '#2563EB', borderRadius: 7, padding: '5px 12px', fontSize: 12, fontWeight: 600, cursor: 'pointer', fontFamily: 'inherit' }}
-                >
-                  Advanced: set per group ↗
-                </button>
-              )}
-            </div>
-            <CardBody>
-              <div style={{ fontSize: 12.5, color: '#6B7280', marginBottom: 12 }}>
-                Org-wide default. Groups inherit unless overridden in <strong>Groups &amp; Strategy</strong>.
-              </div>
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
-                {[
-                  { id: 'KPI', title: 'KPI level', desc: 'One target per KPI inside a KRA. Finer-grained reporting.' },
-                  { id: 'KRA', title: 'KRA level', desc: 'One target per KRA. KPIs stay descriptive. Coarser, simpler.' },
-                ].map(opt => {
-                  const active = targetLevel === opt.id;
-                  return (
-                    <button
-                      key={opt.id}
-                      type="button"
-                      onClick={() => update('targetLevel', opt.id)}
-                      style={{
-                        textAlign: 'left',
-                        padding: '12px 14px',
-                        borderRadius: 10,
-                        border: `1.5px solid ${active ? '#2563EB' : '#E2E8F0'}`,
-                        background: active ? '#EFF6FF' : '#fff',
-                        cursor: 'pointer', fontFamily: 'inherit',
-                        boxShadow: active ? '0 0 0 1px rgba(37,99,235,0.08)' : 'none',
-                        transition: 'border-color .14s ease, background .14s ease, box-shadow .14s ease',
-                      }}
-                    >
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
-                        <span style={{
-                          width: 16, height: 16, borderRadius: '50%',
-                          border: `2px solid ${active ? '#2563EB' : '#CBD5E1'}`,
-                          background: active ? '#2563EB' : '#fff',
-                          display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-                          color: '#fff', fontSize: 9, fontWeight: 700,
-                        }}>{active ? '✓' : ''}</span>
-                        <div style={{ fontSize: 13, fontWeight: 700, color: active ? '#1D4ED8' : '#0D1117' }}>{opt.title}</div>
-                      </div>
-                      <div style={{ fontSize: 12, color: '#6B7280', lineHeight: 1.45, paddingLeft: 24 }}>{opt.desc}</div>
-                    </button>
-                  );
-                })}
-              </div>
-            </CardBody>
-          </Card>
-
-          <Card>
             <CardHead title="Target types" />
             <CardBody>
-              <div style={{ fontSize: 12.5, color: '#6B7280', marginBottom: 12 }}>
-                Shown in the target dropdown when a target is set. Min / max caps apply when that type is chosen.
-              </div>
+              {displayValidation.bannerErrors.length > 0 && (
+                <div style={{
+                  marginBottom: 10,
+                  padding: '9px 12px',
+                  borderRadius: 9,
+                  border: '1px solid #FCA5A5',
+                  background: '#FEF2F2',
+                  color: '#B91C1C',
+                  fontSize: 12,
+                  fontWeight: 700,
+                }}>
+                  Fix target type setup before continuing: {displayValidation.bannerErrors.join(' ')}
+                </div>
+              )}
+              {isTargetsSaved && (
+                <div style={{
+                  marginBottom: 10,
+                  padding: '9px 12px',
+                  borderRadius: 9,
+                  border: '1px solid #BBF7D0',
+                  background: '#F0FDF4',
+                  color: '#166534',
+                  fontSize: 12,
+                  fontWeight: 700,
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 8,
+                }}>
+                  <span>✓</span>
+                  <span>Target types saved. You can move to the next step, or edit below to make changes.</span>
+                </div>
+              )}
 
-              <div style={{ overflowX: 'auto' }}>
-                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
-                  <thead>
-                    <tr style={{ color: '#9CA3AF', textTransform: 'uppercase', fontSize: 10.5, letterSpacing: '0.05em' }}>
-                      <td style={{ padding: '6px 10px', borderBottom: '1px solid #F1F3F5', fontWeight: 600, width: '28%' }}>Type</td>
-                      <td style={{ padding: '6px 10px', borderBottom: '1px solid #F1F3F5', fontWeight: 600, width: '12%' }}>Unit</td>
-                      <td style={{ padding: '6px 10px', borderBottom: '1px solid #F1F3F5', fontWeight: 600, width: '22%' }}>Min</td>
-                      <td style={{ padding: '6px 10px', borderBottom: '1px solid #F1F3F5', fontWeight: 600, width: '22%' }}>Max</td>
-                      <td style={{ padding: '6px 10px', borderBottom: '1px solid #F1F3F5', fontWeight: 600, width: '16%', textAlign: 'right' }}>Actions</td>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {types.map(t => {
-                      const isHidden = !!t.hidden;
-                      return (
-                        <tr key={t.id} style={{ opacity: isHidden ? 0.45 : 1, transition: 'opacity .15s' }}>
-                          <td style={{ padding: '8px 10px', borderBottom: '1px solid #F1F3F5' }}>
-                            <input
-                              style={{ ...inputStyle, padding: '5px 8px' }}
-                              value={t.name}
-                              placeholder={t.isDefault ? t.name : 'e.g. Units sold'}
-                              onChange={e => patchType(t.id, { name: e.target.value })}
-                            />
-                          </td>
-                          <td style={{ padding: '8px 10px', borderBottom: '1px solid #F1F3F5' }}>
-                            <input
-                              style={{ ...inputStyle, padding: '5px 8px', textAlign: 'center' }}
-                              value={t.unit || ''}
-                              placeholder={t.isNumeric ? '—' : ''}
-                              maxLength={6}
-                              onChange={e => patchType(t.id, { unit: e.target.value })}
-                              disabled={!t.isNumeric}
-                            />
-                          </td>
-                          <td style={{ padding: '8px 10px', borderBottom: '1px solid #F1F3F5' }}>
-                            {t.isNumeric ? (
-                              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                                <input
-                                  type="checkbox"
-                                  checked={!!t.hasMin}
-                                  onChange={e => patchType(t.id, { hasMin: e.target.checked, min: e.target.checked ? (t.min ?? 0) : null })}
-                                />
-                                <input
-                                  type="number"
-                                  style={{ ...inputStyle, padding: '5px 8px', width: 90 }}
-                                  value={t.hasMin && t.min !== null && t.min !== undefined ? t.min : ''}
-                                  placeholder="—"
-                                  disabled={!t.hasMin}
-                                  onChange={e => patchType(t.id, { min: e.target.value === '' ? null : Number(e.target.value) })}
-                                />
-                              </div>
-                            ) : (
-                              <span style={{ color: '#9CA3AF', fontSize: 12 }}>—</span>
-                            )}
-                          </td>
-                          <td style={{ padding: '8px 10px', borderBottom: '1px solid #F1F3F5' }}>
-                            {t.isNumeric ? (
-                              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                                <input
-                                  type="checkbox"
-                                  checked={!!t.hasMax}
-                                  onChange={e => patchType(t.id, { hasMax: e.target.checked, max: e.target.checked ? (t.max ?? 100) : null })}
-                                />
-                                <input
-                                  type="number"
-                                  style={{ ...inputStyle, padding: '5px 8px', width: 90 }}
-                                  value={t.hasMax && t.max !== null && t.max !== undefined ? t.max : ''}
-                                  placeholder="—"
-                                  disabled={!t.hasMax}
-                                  onChange={e => patchType(t.id, { max: e.target.value === '' ? null : Number(e.target.value) })}
-                                />
-                              </div>
-                            ) : (
-                              <span style={{ color: '#9CA3AF', fontSize: 12 }}>—</span>
-                            )}
-                          </td>
-                          <td style={{ padding: '8px 10px', borderBottom: '1px solid #F1F3F5', textAlign: 'right' }}>
-                            {t.isDefault ? (
-                              <button
-                                type="button"
-                                onClick={() => toggleHidden(t.id)}
-                                title={isHidden ? 'Show this type in the dropdown' : 'Hide from the dropdown (keeps the type for existing targets)'}
-                                style={{ background: '#fff', border: '1px solid #E2E8F0', color: isHidden ? '#2563EB' : '#64748B', borderRadius: 7, padding: '4px 10px', fontSize: 12, fontWeight: 600, cursor: 'pointer', fontFamily: 'inherit' }}
-                              >
-                                {isHidden ? 'Show' : 'Hide'}
-                              </button>
-                            ) : (
-                              <button
-                                type="button"
-                                onClick={() => removeCustom(t.id)}
-                                title="Remove custom type"
-                                style={{ background: '#fff', border: '1px solid #FCA5A5', color: '#DC2626', borderRadius: 7, padding: '4px 10px', fontSize: 12, fontWeight: 600, cursor: 'pointer', fontFamily: 'inherit' }}
-                              >
-                                Remove
-                              </button>
-                            )}
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
+              {isTargetsSaved ? (
+                <div style={{ border: '1px solid #E2E8F0', borderRadius: 12, overflow: 'hidden', background: '#fff' }}>
+                  {types.map((t, idx) => {
+                    const isHidden = !!t.hidden;
+                    const numeric = !!t.isNumeric;
+                    const unitLabel = String(t.unit || '').trim();
+                    const fmtNum = (n) => Number(n).toLocaleString();
+                    const rangeText = (() => {
+                      if (!numeric) return null;
+                      const lo = t.hasMin && t.min !== null && t.min !== undefined ? fmtNum(t.min) : null;
+                      const hi = t.hasMax && t.max !== null && t.max !== undefined ? fmtNum(t.max) : null;
+                      if (lo && hi) return `Range: ${lo} – ${hi}`;
+                      if (lo) return `Min ${lo}`;
+                      if (hi) return `Max ${hi}`;
+                      return 'No range';
+                    })();
+                    const unitText = numeric
+                      ? (unitLabel
+                          ? (() => {
+                              const sep = /[a-zA-Z]/.test(unitLabel) ? ' ' : '';
+                              return t.unitPosition === 'prefix' ? `${unitLabel}${sep}x` : `x${sep}${unitLabel}`;
+                            })()
+                          : 'No unit')
+                      : 'Free-form text';
+                    const chipBase = {
+                      display: 'inline-flex', alignItems: 'center',
+                      padding: '4px 10px', borderRadius: 999,
+                      fontSize: 11.5, fontWeight: 800, whiteSpace: 'nowrap',
+                    };
+                    return (
+                      <div
+                        key={t.id}
+                        style={{
+                          display: 'grid',
+                          gridTemplateColumns: '180px minmax(0, 1fr) auto',
+                          alignItems: 'center', gap: 14,
+                          padding: '12px 14px',
+                          borderTop: idx === 0 ? 'none' : '1px solid #E2E8F0',
+                          background: isHidden ? '#F8FAFC' : '#fff',
+                          opacity: isHidden ? 0.72 : 1,
+                        }}
+                      >
+                        <div style={{ fontSize: 14, fontWeight: 800, color: '#0F172A', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                          {t.name}
+                        </div>
+                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                          <span style={{ ...chipBase, background: '#F1F5F9', color: '#475569', border: '1px solid #CBD5E1' }}>
+                            {numeric ? 'Number' : 'Text'}
+                          </span>
+                          <span style={{ ...chipBase, background: '#F1F5F9', color: '#475569', border: '1px solid #CBD5E1' }}>
+                            {unitText}
+                          </span>
+                          {numeric && (
+                            <span style={{ ...chipBase, background: '#F1F5F9', color: '#475569', border: '1px solid #CBD5E1' }}>
+                              {rangeText}
+                            </span>
+                          )}
+                          {t.lowerIsBetter && (
+                            <span style={{ ...chipBase, background: '#EFF6FF', color: '#1D4ED8', border: '1px solid #BFDBFE' }}>
+                              ↓ Lower is better
+                            </span>
+                          )}
+                        </div>
+                        {isHidden ? (
+                          <span style={{ ...chipBase, background: '#FEF3C7', color: '#92400E', border: '1px solid #FDE68A' }}>
+                            Hidden from dropdown
+                          </span>
+                        ) : <span />}
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : (
+                <>
+                  <div style={{
+                    display: 'grid',
+                    gridTemplateColumns: 'minmax(180px, 1fr) minmax(124px, auto) minmax(150px, 0.65fr) minmax(116px, auto) minmax(230px, 1fr) auto',
+                    gap: 10,
+                    padding: '0 12px 6px',
+                    color: '#64748B',
+                    fontSize: 10.5,
+                    fontWeight: 900,
+                    textTransform: 'uppercase',
+                    letterSpacing: '.04em',
+                  }}>
+                    <span>Target name</span>
+                    <span>Format</span>
+                    <span>Unit</span>
+                    <span>Position</span>
+                    <span>Range</span>
+                    <span>Action</span>
+                  </div>
 
-              <button
-                type="button"
-                onClick={addType}
-                style={{
-                  marginTop: 12, display: 'inline-flex', alignItems: 'center', gap: 6,
-                  padding: '9px 16px', border: '1.5px dashed #93C5FD', borderRadius: 9,
-                  background: '#F0F7FF', color: '#2563EB', fontWeight: 600, fontSize: 12.5,
-                  cursor: 'pointer', fontFamily: 'inherit',
-                }}
-              >
-                + Add type
-              </button>
+                  <div style={{ display: 'grid', gap: 10 }}>
+                {types.map((t) => {
+                  const isHidden = !!t.hidden;
+                  const numeric = !!t.isNumeric;
+                  const rowErrors = displayValidation.errorsById[t.id] || [];
+                  const hasError = rowErrors.length > 0;
+                  const rowBg = isHidden ? '#F8FAFC' : '#fff';
+                  const muted = isHidden ? '#94A3B8' : '#64748B';
+                  const unitLabel = String(t.unit || '').trim();
+                  const minLabel = unitLabel && t.unitPosition === 'prefix' ? `${unitLabel} min` : `Min${unitLabel ? ` ${unitLabel}` : ''}`;
+                  const maxLabel = unitLabel && t.unitPosition === 'prefix' ? `${unitLabel} max` : `Max${unitLabel ? ` ${unitLabel}` : ''}`;
+                  const capBox = (kind) => {
+                    const enabledKey = kind === 'min' ? 'hasMin' : 'hasMax';
+                    const valueKey = kind;
+                    const enabled = !!t[enabledKey];
+                    const defaultValue = kind === 'min' ? 0 : 100;
+                    const placeholder = kind === 'min' ? minLabel : maxLabel;
+                    return (
+                      <label style={{
+                        minWidth: 0,
+                        display: 'grid',
+                        gridTemplateColumns: 'auto minmax(72px, 1fr)',
+                        alignItems: 'center',
+                        gap: 6,
+                        padding: '5px 7px',
+                        borderRadius: 9,
+                        border: `1px solid ${enabled ? '#BFDBFE' : '#E2E8F0'}`,
+                        background: enabled ? '#EFF6FF' : '#F8FAFC',
+                      }}>
+                        <input
+                          type="checkbox"
+                          checked={enabled}
+                          disabled={!numeric}
+                          onChange={(e) => patchType(t.id, { [enabledKey]: e.target.checked, [valueKey]: e.target.checked ? (t[valueKey] ?? defaultValue) : null })}
+                          style={{ width: 15, height: 15, margin: 0, accentColor: '#2563EB' }}
+                        />
+                        <input
+                          type="number"
+                          style={{ ...inputStyle, padding: '5px 7px', minWidth: 0, height: 30, background: enabled ? '#fff' : '#F1F5F9' }}
+                          value={enabled && t[valueKey] !== null && t[valueKey] !== undefined ? t[valueKey] : ''}
+                          placeholder={placeholder}
+                          disabled={!numeric || !enabled}
+                          onChange={(e) => patchType(t.id, { [valueKey]: e.target.value === '' ? null : Number(e.target.value) })}
+                        />
+                      </label>
+                    );
+                  };
+
+                  return (
+                    <div
+                      key={t.id}
+                      style={{
+                        display: 'grid',
+                        gridTemplateColumns: 'minmax(180px, 1fr) minmax(124px, auto) minmax(150px, 0.65fr) minmax(116px, auto) minmax(230px, 1fr) auto',
+                        gap: 10,
+                        alignItems: 'center',
+                        padding: '10px 12px',
+                        borderRadius: 12,
+                        border: `1px solid ${hasError ? '#FCA5A5' : isHidden ? '#E5E7EB' : '#E2E8F0'}`,
+                        background: rowBg,
+                        opacity: isHidden ? 0.72 : 1,
+                      }}
+                    >
+                      <div style={{ minWidth: 0 }}>
+                        <input
+                          style={{
+                            ...inputStyle,
+                            padding: '8px 10px',
+                            fontWeight: 700,
+                            background: isHidden ? '#F8FAFC' : '#fff',
+                            borderColor: hasError ? '#FCA5A5' : inputStyle.borderColor,
+                          }}
+                          value={t.name}
+                          placeholder={t.isDefault ? t.name : 'Target name'}
+                          onChange={e => patchType(t.id, { name: e.target.value })}
+                        />
+                      </div>
+
+                      <div style={{ display: 'inline-flex', padding: 2, background: '#F1F5F9', border: '1px solid #CBD5E1', borderRadius: 999, justifySelf: 'start' }}>
+                        {t.isDefault ? (
+                          <span style={{ padding: '5px 10px', color: '#475569', fontSize: 11.5, fontWeight: 900 }}>
+                            {numeric ? 'Number' : 'Text'}
+                          </span>
+                        ) : (
+                          [
+                            { id: false, label: 'Text' },
+                            { id: true, label: 'Number' },
+                          ].map((opt) => {
+                            const active = numeric === opt.id;
+                            return (
+                              <button
+                                key={String(opt.id)}
+                                type="button"
+                                onClick={() => setTypeValueKind(t.id, opt.id)}
+                                style={{
+                                  border: 'none',
+                                  borderRadius: 999,
+                                  padding: '5px 10px',
+                                  background: active ? '#2563EB' : 'transparent',
+                                  color: active ? '#fff' : '#64748B',
+                                  fontSize: 11.5,
+                                  fontWeight: 900,
+                                  cursor: 'pointer',
+                                  fontFamily: 'inherit',
+                                }}
+                              >
+                                {opt.label}
+                              </button>
+                            );
+                          })
+                        )}
+                      </div>
+
+                      <div style={{ minWidth: 0 }}>
+                        <input
+                          style={{ ...inputStyle, padding: '8px 10px', textAlign: 'left', background: numeric ? '#fff' : '#F1F5F9' }}
+                          value={t.unit || ''}
+                          placeholder={numeric ? unitExamples : 'No unit'}
+                          maxLength={12}
+                          onChange={e => patchType(t.id, { unit: e.target.value })}
+                          disabled={!numeric}
+                          title="Optional display unit. It does not change the target name."
+                        />
+                      </div>
+
+                      <div style={{ display: 'inline-flex', padding: 2, background: '#F1F5F9', border: '1px solid #CBD5E1', borderRadius: 999, justifySelf: 'start', opacity: numeric ? 1 : 0.45 }}>
+                        {[
+                          { id: 'prefix', label: 'Before' },
+                          { id: 'suffix', label: 'After' },
+                        ].map((opt) => {
+                          const active = (t.unitPosition === 'prefix' ? 'prefix' : 'suffix') === opt.id;
+                          return (
+                            <button
+                              key={opt.id}
+                              type="button"
+                              onClick={() => numeric && patchType(t.id, { unitPosition: opt.id })}
+                              disabled={!numeric}
+                              style={{
+                                border: 'none',
+                                borderRadius: 999,
+                                padding: '5px 9px',
+                                background: active && numeric ? '#2563EB' : 'transparent',
+                                color: active && numeric ? '#fff' : '#64748B',
+                                fontSize: 11,
+                                fontWeight: 900,
+                                cursor: numeric ? 'pointer' : 'not-allowed',
+                                fontFamily: 'inherit',
+                              }}
+                            >
+                              {opt.label}
+                            </button>
+                          );
+                        })}
+                      </div>
+
+                      <div style={{ minWidth: 0 }}>
+                        {numeric ? (
+                          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+                            {capBox('min')}
+                            {capBox('max')}
+                          </div>
+                        ) : (
+                          <div style={{ height: 40, display: 'flex', alignItems: 'center', padding: '0 10px', borderRadius: 9, background: '#F8FAFC', border: '1px solid #E2E8F0', color: '#94A3B8', fontSize: 12 }}>
+                            Free-form value
+                          </div>
+                        )}
+                      </div>
+
+                      <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+                        {t.isDefault ? (
+                          <button
+                            type="button"
+                            onClick={() => toggleHidden(t.id)}
+                            title={isHidden ? 'Show this type in the dropdown' : 'Hide from the dropdown (keeps the type for existing targets)'}
+                            style={{ background: '#fff', border: '1px solid #E2E8F0', color: isHidden ? '#2563EB' : '#64748B', borderRadius: 8, padding: '7px 12px', fontSize: 12, fontWeight: 800, cursor: 'pointer', fontFamily: 'inherit', whiteSpace: 'nowrap', minWidth: 72, textAlign: 'center' }}
+                          >
+                            {isHidden ? 'Show' : 'Hide'}
+                          </button>
+                        ) : pendingRemoveTypeId === t.id ? (
+                          <div style={{ display: 'inline-flex', gap: 6 }}>
+                            <button
+                              type="button"
+                              onClick={() => removeCustom(t.id, true)}
+                              title="Confirm remove"
+                              style={{ background: '#DC2626', border: '1px solid #DC2626', color: '#fff', borderRadius: 8, padding: '7px 10px', fontSize: 12, fontWeight: 800, cursor: 'pointer', fontFamily: 'inherit', whiteSpace: 'nowrap' }}
+                            >
+                              Confirm
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setPendingRemoveTypeId(null)}
+                              title="Cancel remove"
+                              style={{ background: '#fff', border: '1px solid #E2E8F0', color: '#64748B', borderRadius: 8, padding: '7px 10px', fontSize: 12, fontWeight: 800, cursor: 'pointer', fontFamily: 'inherit', whiteSpace: 'nowrap' }}
+                            >
+                              Cancel
+                            </button>
+                          </div>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => removeCustom(t.id)}
+                            title="Remove custom type"
+                            style={{ background: '#fff', border: '1px solid #FCA5A5', color: '#DC2626', borderRadius: 8, padding: '7px 12px', fontSize: 12, fontWeight: 800, cursor: 'pointer', fontFamily: 'inherit', whiteSpace: 'nowrap', minWidth: 72, textAlign: 'center' }}
+                          >
+                            Remove
+                          </button>
+                        )}
+                      </div>
+                      {rowErrors.length > 0 && (
+                        <div style={{ gridColumn: '1 / -1', color: '#B91C1C', fontSize: 11.5, fontWeight: 700 }}>
+                          {rowErrors.join(' ')}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+                  </div>
+                </>
+              )}
+
+              <div style={{ marginTop: 12, display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+                {!isTargetsSaved && (
+                  <button
+                    type="button"
+                    onClick={addType}
+                    style={{
+                      display: 'inline-flex', alignItems: 'center', gap: 6,
+                      padding: '9px 16px', border: '1.5px dashed #93C5FD', borderRadius: 9,
+                      background: '#F0F7FF', color: '#2563EB', fontWeight: 600, fontSize: 12.5,
+                      cursor: 'pointer', fontFamily: 'inherit',
+                    }}
+                  >
+                    + Add type
+                  </button>
+                )}
+                <div style={{ flex: 1 }} />
+                {isTargetsSaved ? (
+                  <button
+                    type="button"
+                    onClick={() => update('targetTypesAppliedSnapshot', null)}
+                    title="Unlock the rows above to make changes"
+                    style={{
+                      display: 'inline-flex', alignItems: 'center', gap: 6,
+                      padding: '9px 18px', border: '1px solid #CBD5E1', borderRadius: 9,
+                      background: '#fff', color: '#1E40AF', fontWeight: 700, fontSize: 12.5,
+                      cursor: 'pointer', fontFamily: 'inherit',
+                    }}
+                  >
+                    ✎ Edit target types
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={handleSaveTargets}
+                    disabled={hasFullValidationErrors}
+                    style={{
+                      display: 'inline-flex', alignItems: 'center', gap: 6,
+                      padding: '9px 18px', border: 'none', borderRadius: 9,
+                      background: hasFullValidationErrors ? '#CBD5E1' : '#2563EB',
+                      color: '#fff', fontWeight: 700, fontSize: 12.5,
+                      cursor: hasFullValidationErrors ? 'not-allowed' : 'pointer',
+                      fontFamily: 'inherit',
+                    }}
+                    title={hasFullValidationErrors ? 'Fix the errors above before saving.' : 'Save Targets step and continue'}
+                  >
+                    Save Targets step
+                  </button>
+                )}
+              </div>
             </CardBody>
           </Card>
         </>
@@ -8195,62 +10035,921 @@ function StepTargets({ config, update, onOpenGroups }) {
   );
 }
 
-/* ── STEP 7: COMPETENCIES ──────────────────────────────────────────────── */
-function StepCompetencies({ config, update }) {
-  const toggle = (c) => {
-    const next = (config.selectedCompetencies || []).includes(c)
-      ? (config.selectedCompetencies || []).filter(x => x !== c)
-      : [...(config.selectedCompetencies || []), c];
-    update('selectedCompetencies', next);
+/* ── STEP: COMPETENCIES — helpers ────────────────────────────────────────
+   Three modes (config.competencyScope):
+     - 'org'        : one list applies to everyone (legacy default)
+     - 'group'      : per-group list + per-group KRA/Comp split
+     - 'group_role' : group baseline; specific designations can override
+   Resolution per employee (group_role mode): role > group > org.
+   Designations are read from the Employee Upload step, so this page runs
+   after that step.
+   ────────────────────────────────────────────────────────────────────── */
+function getCompetencyScope(config = {}) {
+  const v = config.competencyScope;
+  return v === 'group' || v === 'group_role' ? v : 'org';
+}
+function getOrgCompetencyEntry(config = {}) {
+  return {
+    competencies: Array.isArray(config.selectedCompetencies) ? config.selectedCompetencies : [],
+    kraShare: 100 - Math.max(0, Math.min(100, Number(config.competencyWeight ?? 20))),
+    compShare: Math.max(0, Math.min(100, Number(config.competencyWeight ?? 20))),
   };
+}
+function getGroupCompetencyEntry(config, groupId) {
+  const stored = (config.competencyByGroup || {})[groupId];
+  if (stored && Array.isArray(stored.competencies)) return stored;
+  return getOrgCompetencyEntry(config);
+}
+function getRoleCompetencyEntry(config, groupId, designation) {
+  const roleMap = (config.competencyByRole || {})[groupId] || {};
+  const stored = roleMap[designation];
+  if (stored && Array.isArray(stored.competencies)) return stored;
+  return getGroupCompetencyEntry(config, groupId);
+}
+function getDesignationsForGroup(config, groupId) {
+  const employees = config.employeeUploadData?.employees || [];
+  const group = (config.goalGroups || []).find((g) => g.id === groupId);
+  if (!group) return [];
+  const groupName = String(group.name || '').trim().toLowerCase();
+  const set = new Set();
+  employees.forEach((emp) => {
+    const empGroup = String(emp['Group Name'] || '').trim().toLowerCase();
+    if (empGroup !== groupName) return;
+    const role = String(emp['Role'] || emp['Designation'] || '').trim();
+    if (role) set.add(role);
+  });
+  return Array.from(set).sort();
+}
+function setGroupCompetencyEntry(config, groupId, patch) {
+  const current = getGroupCompetencyEntry(config, groupId);
+  const merged = { ...current, ...patch };
+  return { ...(config.competencyByGroup || {}), [groupId]: merged };
+}
+function setRoleCompetencyEntry(config, groupId, designation, patch) {
+  const prevRoleMap = (config.competencyByRole || {})[groupId] || {};
+  const current = prevRoleMap[designation] || getGroupCompetencyEntry(config, groupId);
+  const merged = { ...current, ...patch };
+  return { ...(config.competencyByRole || {}), [groupId]: { ...prevRoleMap, [designation]: merged } };
+}
+function deleteRoleCompetencyEntry(config, groupId, designation) {
+  const prevRoleMap = (config.competencyByRole || {})[groupId] || {};
+  const nextRoleMap = { ...prevRoleMap };
+  delete nextRoleMap[designation];
+  return { ...(config.competencyByRole || {}), [groupId]: nextRoleMap };
+}
+function seedGroupsFromOrg(config) {
+  const groups = config.goalGroups || [];
+  const org = getOrgCompetencyEntry(config);
+  const out = { ...(config.competencyByGroup || {}) };
+  groups.forEach((g) => {
+    if (!out[g.id] || !Array.isArray(out[g.id].competencies)) {
+      out[g.id] = { ...org };
+    }
+  });
+  return out;
+}
+function validateCompetencyConfig(config) {
+  if (config.competenciesEnabled === false) return { errors: [], byGroup: {}, byRole: {} };
+  const errors = [];
+  const byGroup = {};
+  const byRole = {};
+  const addGroupError = (gid, msg) => {
+    (byGroup[gid] = byGroup[gid] || []).push(msg);
+    errors.push(msg);
+  };
+  const addRoleError = (gid, role, msg) => {
+    const key = `${gid}::${role}`;
+    (byRole[key] = byRole[key] || []).push(msg);
+    errors.push(msg);
+  };
+  const scope = getCompetencyScope(config);
+  if (scope === 'org') {
+    const list = (config.selectedCompetencies || []).filter(Boolean);
+    if (list.length === 0) errors.push('Pick at least one competency or turn competency assessment off.');
+    const w = Number(config.competencyWeight);
+    if (!Number.isFinite(w) || w < 0 || w > 100) errors.push('Competency weight must be between 0 and 100.');
+    return { errors, byGroup, byRole };
+  }
+  const groups = config.goalGroups || [];
+  if (groups.length === 0) {
+    errors.push('Add at least one group in Step 2 before configuring competencies per group.');
+    return { errors, byGroup, byRole };
+  }
+  groups.forEach((g) => {
+    const entry = getGroupCompetencyEntry(config, g.id);
+    if (!Array.isArray(entry.competencies) || entry.competencies.length === 0) {
+      addGroupError(g.id, `Group "${g.name || g.id}" needs at least one competency.`);
+    }
+    const k = Number(entry.kraShare);
+    const c = Number(entry.compShare);
+    if (!Number.isFinite(k) || !Number.isFinite(c) || Math.round(k + c) !== 100) {
+      addGroupError(g.id, `Group "${g.name || g.id}": KRA % + Competency % must equal 100 (currently ${Number.isFinite(k) ? k : '—'} + ${Number.isFinite(c) ? c : '—'}).`);
+    }
+    if (scope === 'group_role') {
+      const roleMap = (config.competencyByRole || {})[g.id] || {};
+      Object.entries(roleMap).forEach(([role, ent]) => {
+        if (!ent) return;
+        if (!Array.isArray(ent.competencies) || ent.competencies.length === 0) {
+          addRoleError(g.id, role, `Role "${role}" in "${g.name}": pick at least one competency or remove the override.`);
+        }
+        const rk = Number(ent.kraShare);
+        const rc = Number(ent.compShare);
+        if (!Number.isFinite(rk) || !Number.isFinite(rc) || Math.round(rk + rc) !== 100) {
+          addRoleError(g.id, role, `Role "${role}" in "${g.name}": KRA % + Competency % must equal 100.`);
+        }
+      });
+    }
+  });
+  return { errors: [...new Set(errors)], byGroup, byRole };
+}
+
+export function StepCompetencies({ config, update, hideHead, hideApplyBar = false }) {
+  const enabled = config.competenciesEnabled !== false;
+  const scope = getCompetencyScope(config);
+  const groups = config.goalGroups || [];
+  const libraries = getCompetencyLibraries(config.competencyType || 'behavioural', config.customCompetencies || {});
+  const addCustom = (typeKey, name) => {
+    const clean = String(name || '').trim();
+    if (!clean) return;
+    const prev = (config.customCompetencies || {})[typeKey] || [];
+    const existsBase = (COMPETENCY_LIBRARY[typeKey] || []).some((s) => s.toLowerCase() === clean.toLowerCase());
+    const existsCustom = prev.some((s) => s.toLowerCase() === clean.toLowerCase());
+    if (existsBase || existsCustom) return;
+    update('customCompetencies', { ...(config.customCompetencies || {}), [typeKey]: [...prev, clean] });
+  };
+  const removeCustom = (typeKey, name) => {
+    const prev = (config.customCompetencies || {})[typeKey] || [];
+    update('customCompetencies', { ...(config.customCompetencies || {}), [typeKey]: prev.filter((n) => n !== name) });
+    // Strip from any selected set so we don't keep dangling references.
+    if ((config.selectedCompetencies || []).includes(name)) {
+      update('selectedCompetencies', (config.selectedCompetencies || []).filter((x) => x !== name));
+    }
+    const byGroup = { ...(config.competencyByGroup || {}) };
+    let byGroupChanged = false;
+    Object.entries(byGroup).forEach(([gid, entry]) => {
+      if (Array.isArray(entry?.competencies) && entry.competencies.includes(name)) {
+        byGroup[gid] = { ...entry, competencies: entry.competencies.filter((x) => x !== name) };
+        byGroupChanged = true;
+      }
+    });
+    if (byGroupChanged) update('competencyByGroup', byGroup);
+    const byRole = { ...(config.competencyByRole || {}) };
+    let byRoleChanged = false;
+    Object.entries(byRole).forEach(([gid, roleMap]) => {
+      const nextRoleMap = { ...roleMap };
+      let touched = false;
+      Object.entries(roleMap || {}).forEach(([role, entry]) => {
+        if (Array.isArray(entry?.competencies) && entry.competencies.includes(name)) {
+          nextRoleMap[role] = { ...entry, competencies: entry.competencies.filter((x) => x !== name) };
+          touched = true;
+        }
+      });
+      if (touched) { byRole[gid] = nextRoleMap; byRoleChanged = true; }
+    });
+    if (byRoleChanged) update('competencyByRole', byRole);
+  };
+  const allLibraryItems = libraries.flatMap((l) => l.items);
+
+  const setScope = (next) => {
+    if (next === scope) return;
+    if ((next === 'group' || next === 'group_role') && groups.length > 0) {
+      update('competencyByGroup', seedGroupsFromOrg({ ...config, competencyByGroup: config.competencyByGroup }));
+    }
+    update('competencyScope', next);
+  };
+
+  // Enforce max-competencies cap on every toggle path (org / group / role).
+  // The cap was being shown in the UI ("max 5") but not enforced — picker
+  // would let HR pick 8 with no feedback. Adding it here means the UI stays
+  // honest and the consumer pages don't have to defend against over-cap data.
+  const maxComp = Number(config.maxCompetencies) || 0;
+  const isOverCap = (list, name) => maxComp > 0 && !list.includes(name) && list.length >= maxComp;
+  const orgToggle = (name) => {
+    const list = config.selectedCompetencies || [];
+    if (isOverCap(list, name)) return;
+    update('selectedCompetencies', list.includes(name) ? list.filter((x) => x !== name) : [...list, name]);
+  };
+  const groupPatch = (gid, patch) => {
+    if (patch?.competencies && Array.isArray(patch.competencies) && maxComp > 0 && patch.competencies.length > maxComp) return;
+    update('competencyByGroup', setGroupCompetencyEntry(config, gid, patch));
+  };
+  const rolePatch = (gid, role, patch) => {
+    if (patch?.competencies && Array.isArray(patch.competencies) && maxComp > 0 && patch.competencies.length > maxComp) return;
+    update('competencyByRole', setRoleCompetencyEntry(config, gid, role, patch));
+  };
+  const removeRole = (gid, role) => update('competencyByRole', deleteRoleCompetencyEntry(config, gid, role));
+
+  const validation = enabled ? validateCompetencyConfig(config) : { errors: [], byGroup: {}, byRole: {} };
+  const competenciesValid = !enabled || validation.errors.length === 0;
+  const competenciesApplied = competenciesValid && !!config.competenciesAppliedSnapshot;
+  const competencyWeight = Math.max(0, Math.min(100, Number(config.competencyWeight ?? 20)));
+  const kraWeight = 100 - competencyWeight;
+  const competencyTypeOptions = [
+    { id: 'behavioural', label: 'Behavioural recommendations' },
+    { id: 'functional', label: 'Functional / technical recommendations' },
+    { id: 'both', label: 'Behavioural + functional recommendations' },
+    { id: 'values', label: 'Core values recommendations' },
+  ];
+  const ratedByValue = config.competencyAllowSelfRate === false
+    ? 'manager'
+    : config.competencyRatedBy === 'self-manager-peer'
+      ? 'self-manager-peer'
+      : 'self-manager';
+  const setRatedBy = (value) => {
+    update('competencyRatedBy', value);
+    update('competencyAllowSelfRate', value !== 'manager');
+  };
+  const ratedByOptions = [
+    { id: 'manager', label: 'Manager only', desc: 'Employees view the list, managers score' },
+    { id: 'self-manager', label: 'Employee + manager', desc: 'Employee self-rates first' },
+    { id: 'self-manager-peer', label: 'Employee + manager + peers', desc: 'Use when peer input is part of the cycle' },
+  ];
+
   return (
     <div>
-      <SectionHead title="Competency configuration" sub="Set which competencies are assessed and how they're weighted in the final score." />
+      {!hideHead && <SectionHead title="Competencies" sub="Pick how competencies are assigned — same for the whole org, per group, or per group + role." />}
       <Card>
         <CardHead title="Competency settings" />
         <CardBody>
-          <TogRow label="Enable competency assessment" desc="Competencies are rated as part of the appraisal" on={config.competenciesEnabled} onChange={v => update('competenciesEnabled', v)} />
-          {config.competenciesEnabled && (
+          <TogRow label="Enable competency assessment" desc="Competencies contribute to the final appraisal score." on={enabled} onChange={v => update('competenciesEnabled', v)} />
+          {enabled && (
             <div style={{ marginTop: 14 }}>
               <div style={{ height: 1, background: '#F1F3F5', margin: '10px 0 14px' }} />
-              <Grid3>
-                <Field label="Competency types included">
-                  <select style={selectStyle}><option>Behavioural only</option><option>Functional / technical only</option><option>Both behavioural + functional</option><option>Core values only</option></select>
+              <div style={{ display: 'grid', gridTemplateColumns: 'minmax(220px, .8fr) minmax(320px, 1.4fr) minmax(150px, .45fr)', gap: 14, marginBottom: 16, alignItems: 'start' }}>
+                <Field label="Recommendations" hint="Only changes suggested chips below. The final list is what you select.">
+                  <select style={selectStyle} value={config.competencyType || 'behavioural'} onChange={(e) => update('competencyType', e.target.value)}>
+                    {competencyTypeOptions.map((opt) => (
+                      <option key={opt.id} value={opt.id}>{opt.label}</option>
+                    ))}
+                  </select>
                 </Field>
-                <Field label="Competency assignment by">
-                  <select style={selectStyle}><option>Role / designation</option><option>Grade / band</option><option>Department</option><option>HR manually assigns</option></select>
+                <Field label="Who scores competencies">
+                  <ChoiceCards
+                    value={ratedByValue}
+                    options={ratedByOptions}
+                    onChange={setRatedBy}
+                    columns={3}
+                    compact
+                  />
                 </Field>
-                <Field label="Max competencies per employee">
-                  <input style={inputStyle} type="number" defaultValue={5} min={1} max={15} />
+                <Field label="Max per employee">
+                  <input style={{ ...inputStyle, maxWidth: 180 }} type="number" value={config.maxCompetencies ?? 5} min={1} max={15} onChange={(e) => update('maxCompetencies', Number(e.target.value))} />
                 </Field>
-              </Grid3>
-              <Grid2>
-                <Field label="Competency weight in final rating" hint="% — KRA weight = remaining %">
-                  <input style={inputStyle} type="number" defaultValue={20} min={0} max={100} />
-                </Field>
-                <Field label="Competency rated by">
-                  <select style={selectStyle}><option>Manager only</option><option>Self + manager</option><option>Self + manager + peers</option></select>
-                </Field>
-              </Grid2>
-              <div style={{ fontSize: 12, fontWeight: 600, color: '#374151', textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: 10 }}>Select competencies (org library)</div>
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 7 }}>
-                {COMPETENCY_CHIPS.map(c => (
-                  <button key={c} onClick={() => toggle(c)}
-                    style={{
-                      padding: '5px 13px', borderRadius: 20, fontSize: 12.5, fontWeight: 500, cursor: 'pointer', transition: 'all .15s',
-                      border: `1px solid ${(config.selectedCompetencies || []).includes(c) ? '#2563EB' : '#E2E8F0'}`,
-                      background: (config.selectedCompetencies || []).includes(c) ? '#EFF4FF' : '#fff',
-                      color: (config.selectedCompetencies || []).includes(c) ? '#2563EB' : '#6B7280',
-                    }}>
-                    {c}
-                  </button>
-                ))}
               </div>
+
+              {/* Scope picker */}
+              <div style={{ marginTop: 6, marginBottom: 14 }}>
+                <div style={{ fontSize: 11, fontWeight: 900, color: '#64748B', textTransform: 'uppercase', letterSpacing: '.04em', marginBottom: 8 }}>Assignment scope</div>
+                <div style={{ display: 'inline-flex', border: '1px solid #E2E8F0', borderRadius: 10, overflow: 'hidden', background: '#F8FAFC' }}>
+                  {[
+                    { id: 'org',         label: 'Same for whole org' },
+                    { id: 'group',       label: 'Different per group' },
+                    { id: 'group_role',  label: 'Per group + role' },
+                  ].map((opt) => (
+                    <button
+                      key={opt.id}
+                      type="button"
+                      onClick={() => setScope(opt.id)}
+                      style={{
+                        padding: '8px 16px', fontSize: 12.5, fontWeight: 700,
+                        border: 'none', background: scope === opt.id ? '#fff' : 'transparent',
+                        color: scope === opt.id ? '#2563EB' : '#64748B',
+                        borderRight: '1px solid #E2E8F0', cursor: 'pointer', fontFamily: 'inherit',
+                      }}>
+                      {opt.label}
+                    </button>
+                  ))}
+                </div>
+                {scope === 'group_role' && (config.employeeUploadData?.employees || []).length === 0 && (
+                  <div style={{ marginTop: 10, padding: '9px 12px', borderRadius: 8, background: '#FEF3C7', border: '1px solid #FDE68A', color: '#92400E', fontSize: 12, fontWeight: 600 }}>
+                    No employees uploaded yet. Role overrides only show designations that exist in the roster — finish the Employee Upload step to see them.
+                  </div>
+                )}
+              </div>
+
+              <CompetencyUploadBar config={config} update={update} scope={scope} />
+
+              {scope === 'org' && (
+                <OrgCompetencyEditor
+                  config={config}
+                  libraries={libraries}
+                  competencyWeight={competencyWeight}
+                  kraWeight={kraWeight}
+                  toggle={orgToggle}
+                  update={update}
+                  onAddCustom={addCustom}
+                  onRemoveCustom={removeCustom}
+                />
+              )}
+              {scope === 'group' && (
+                <GroupCompetencyEditor
+                  config={config}
+                  groups={groups}
+                  libraries={libraries}
+                  allLibraryItems={allLibraryItems}
+                  errorsByGroup={validation.byGroup}
+                  onPatch={groupPatch}
+                  onAddCustom={addCustom}
+                  onRemoveCustom={removeCustom}
+                />
+              )}
+              {scope === 'group_role' && (
+                <GroupRoleCompetencyEditor
+                  config={config}
+                  groups={groups}
+                  libraries={libraries}
+                  allLibraryItems={allLibraryItems}
+                  errorsByGroup={validation.byGroup}
+                  errorsByRole={validation.byRole}
+                  onGroupPatch={groupPatch}
+                  onRolePatch={rolePatch}
+                  onRoleRemove={removeRole}
+                  onAddCustom={addCustom}
+                  onRemoveCustom={removeCustom}
+                />
+              )}
+
+              {validation.errors.length > 0 && (
+                <div style={{ marginTop: 14, padding: '10px 12px', borderRadius: 9, background: '#FEF2F2', border: '1px solid #FECACA', color: '#B91C1C', fontSize: 12, fontWeight: 600 }}>
+                  Fix the issues above before saving.
+                </div>
+              )}
             </div>
+          )}
+          {!hideApplyBar && (
+            <StepStatusBar
+              applied={competenciesApplied}
+              valid={competenciesValid}
+              appliedMessage={enabled ? '✓ Competencies saved. Move to the next step, or change a field above to re-enable editing.' : '✓ Competencies turned off. Final score will come from KRAs only.'}
+              pendingMessage={enabled ? 'Review the competency setup and click Save when ready.' : 'Competencies are off. Save to confirm and continue.'}
+              invalidMessage="Fix the issues above before saving."
+              buttonLabel="Save competencies"
+              onApply={() => update('competenciesAppliedSnapshot', `confirmed_${Date.now()}`)}
+            />
           )}
         </CardBody>
       </Card>
     </div>
+  );
+}
+
+/* ── Upload / Download bar (one per scope mode) ─────────────────────── */
+function CompetencyUploadBar({ config, update, scope }) {
+  const fileRef = useRef(null);
+  const wrapRef = useRef(null);
+  const [phase, setPhase] = useState('idle');
+  const [message, setMessage] = useState('');
+  const [open, setOpen] = useState(false);
+
+  useEffect(() => {
+    if (!open) return;
+    function handlePointerDown(event) {
+      if (wrapRef.current && !wrapRef.current.contains(event.target)) {
+        setOpen(false);
+      }
+    }
+    document.addEventListener('mousedown', handlePointerDown);
+    return () => document.removeEventListener('mousedown', handlePointerDown);
+  }, [open]);
+
+  const handleDownload = async () => {
+    setMessage(''); setPhase('idle');
+    try {
+      if (scope === 'org') await downloadOrgCompetencyTemplate(config);
+      else if (scope === 'group') await downloadGroupCompetencyTemplate(config);
+      else await downloadGroupRoleCompetencyTemplate(config);
+    } catch (err) {
+      setPhase('error');
+      setMessage(err.message || 'Could not generate template.');
+    }
+  };
+
+  const handleUpload = async (event) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    setPhase('parsing'); setMessage('');
+    try {
+      if (scope === 'org') {
+        const { competencies, errors } = await parseOrgCompetencyXlsx(file);
+        if (errors.length) { setPhase('error'); setMessage(errors.join(' ')); return; }
+        update('selectedCompetencies', competencies);
+        setPhase('done'); setMessage(`Replaced org list — ${competencies.length} competencies.`); setOpen(false);
+      } else if (scope === 'group') {
+        const { byGroup, errors } = await parseGroupCompetencyXlsx(file, config.goalGroups || []);
+        if (errors.length) { setPhase('error'); setMessage(errors.join(' ')); return; }
+        update('competencyByGroup', byGroup);
+        setPhase('done'); setMessage(`Replaced per-group config for ${Object.keys(byGroup).length} groups.`); setOpen(false);
+      } else {
+        const { byGroup, byRole, errors } = await parseGroupRoleCompetencyXlsx(file, config.goalGroups || []);
+        if (errors.length) { setPhase('error'); setMessage(errors.join(' ')); return; }
+        update('competencyByGroup', byGroup);
+        update('competencyByRole', byRole);
+        const roleCount = Object.values(byRole).reduce((n, m) => n + Object.keys(m || {}).length, 0);
+        setPhase('done'); setMessage(`Replaced: ${Object.keys(byGroup).length} group baselines, ${roleCount} role overrides.`); setOpen(false);
+      }
+    } catch (err) {
+      setPhase('error');
+      setMessage(err.message || 'Could not parse the file.');
+    } finally {
+      event.target.value = '';
+    }
+  };
+
+  return (
+    <div ref={wrapRef} style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 6, marginBottom: 12 }}>
+      <input ref={fileRef} type="file" accept=".xlsx,.xls" onChange={handleUpload} style={{ display: 'none' }} />
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+        <button
+          type="button"
+          onClick={() => setOpen(prev => !prev)}
+          style={{
+            fontSize: 12.5,
+            color: phase === 'parsing' ? '#94A3B8' : '#2563EB',
+            background: open ? '#FFFFFF' : '#F8FAFC',
+            border: '1px solid #D7E3F4',
+            borderRadius: 12,
+            padding: '7px 13px',
+            minWidth: 108,
+            cursor: 'pointer',
+            fontWeight: 700,
+            fontFamily: 'inherit',
+            transform: `translateX(${open ? 8 : 0}px)`,
+            transition: 'all .18s ease',
+            boxShadow: open ? '0 10px 24px rgba(15,23,42,.08)' : 'none',
+          }}
+        >
+          {phase === 'parsing' ? 'Uploading…' : 'Upload Sheet'}
+        </button>
+        <button
+          type="button"
+          onClick={handleDownload}
+          title="Download template"
+          aria-label="Download template"
+          style={{
+            display: 'inline-flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            width: open ? 40 : 0,
+            height: 38,
+            opacity: open ? 1 : 0,
+            overflow: 'hidden',
+            padding: 0,
+            border: open ? '1px solid #D6E4FF' : '1px solid transparent',
+            background: '#FFFFFF',
+            color: '#2563EB',
+            borderRadius: 12,
+            cursor: open ? 'pointer' : 'default',
+            fontSize: 18,
+            lineHeight: 1,
+            transition: 'all .18s ease',
+            pointerEvents: open ? 'auto' : 'none',
+            boxShadow: open ? '0 4px 12px rgba(37,99,235,.10)' : 'none',
+            fontFamily: 'inherit',
+          }}
+        >
+          ⬇
+        </button>
+        <button
+          type="button"
+          onClick={() => fileRef.current?.click()}
+          title="Upload sheet"
+          aria-label="Upload sheet"
+          disabled={!open || phase === 'parsing'}
+          style={{
+            display: 'inline-flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            width: open ? 40 : 0,
+            height: 38,
+            opacity: open ? 1 : 0,
+            overflow: 'hidden',
+            padding: 0,
+            border: open ? '1px solid #D6E4FF' : '1px solid transparent',
+            background: '#F8FBFF',
+            color: phase === 'parsing' ? '#94A3B8' : '#2563EB',
+            borderRadius: 12,
+            cursor: !open || phase === 'parsing' ? 'default' : 'pointer',
+            fontSize: 18,
+            lineHeight: 1,
+            transition: 'all .18s ease',
+            pointerEvents: open ? 'auto' : 'none',
+            boxShadow: open ? '0 4px 12px rgba(37,99,235,.10)' : 'none',
+            fontFamily: 'inherit',
+          }}
+        >
+          ⬆
+        </button>
+      </div>
+      {message ? (
+        <div style={{ fontSize: 11.5, color: phase === 'error' ? '#B91C1C' : '#64748B' }}>
+          {message}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+/* ── Sub-editors for the three modes ───────────────────────────────────── */
+
+function CompetencyChipRow({ libraries, selected, onToggle, onAddCustom }) {
+  return (
+    <>
+      {libraries.map((lib) => {
+        const customs = lib.customs || [];
+        const customSet = new Set(customs.map((s) => s.toLowerCase()));
+        return (
+          <div key={lib.key} style={{ marginBottom: 10 }}>
+            <div style={{ fontSize: 11, fontWeight: 700, color: '#64748B', textTransform: 'uppercase', letterSpacing: '.04em', marginBottom: 6 }}>{lib.label}</div>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center' }}>
+              {/* Suggestion chips are the built-in library only. Custom
+                  competencies never live here — "+ Add custom" drops them
+                  straight into the Final selected list so they appear once,
+                  not as a chip you then have to click again. */}
+              {lib.items.filter((c) => !customSet.has(c.toLowerCase())).map((c) => {
+                const on = selected.includes(c);
+                return (
+                  <span key={c} style={{ position: 'relative', display: 'inline-flex' }}>
+                    <button type="button" onClick={() => onToggle(c)}
+                      style={{
+                        padding: '4px 11px', borderRadius: 18, fontSize: 12, fontWeight: 500, cursor: 'pointer',
+                        border: `1px solid ${on ? '#2563EB' : '#E2E8F0'}`,
+                        background: on ? '#EFF4FF' : '#fff',
+                        color: on ? '#2563EB' : '#6B7280',
+                        fontFamily: 'inherit',
+                      }}>{c}</button>
+                  </span>
+                );
+              })}
+              {onAddCustom && <CompetencyAddInput onAdd={(name) => { onAddCustom(lib.key, name); onToggle(name); }} />}
+            </div>
+          </div>
+        );
+      })}
+    </>
+  );
+}
+
+function CompetencyAddInput({ onAdd }) {
+  const [open, setOpen] = useState(false);
+  const [val, setVal] = useState('');
+  const commit = () => {
+    const clean = val.trim();
+    if (!clean) { setOpen(false); return; }
+    onAdd(clean);
+    setVal('');
+    setOpen(false);
+  };
+  if (!open) {
+    return (
+      <button type="button" onClick={() => setOpen(true)}
+        style={{
+          padding: '4px 11px', borderRadius: 18, fontSize: 12, fontWeight: 600, cursor: 'pointer',
+          border: '1px dashed #93C5FD', background: '#F0F7FF', color: '#2563EB',
+          fontFamily: 'inherit',
+        }}>+ Add custom</button>
+    );
+  }
+  return (
+    <input
+      autoFocus
+      value={val}
+      onChange={(e) => setVal(e.target.value)}
+      onBlur={commit}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter') commit();
+        else if (e.key === 'Escape') { setVal(''); setOpen(false); }
+      }}
+      placeholder="Name…"
+      style={{
+        padding: '4px 10px', borderRadius: 18, fontSize: 12, fontWeight: 500,
+        border: '1px solid #2563EB', background: '#fff', color: '#0F172A',
+        outline: 'none', minWidth: 140, fontFamily: 'inherit',
+      }}
+    />
+  );
+}
+
+function WeightBar({ kraShare, compShare }) {
+  const k = Math.max(0, Math.min(100, Number(kraShare) || 0));
+  const c = Math.max(0, Math.min(100, Number(compShare) || 0));
+  return (
+    <>
+      <div style={{ display: 'grid', gridTemplateColumns: `${k}% ${c || 1}%`, height: 10, borderRadius: 999, overflow: 'hidden', background: '#F1F5F9', marginBottom: 6 }}>
+        <div style={{ background: '#2563EB' }} />
+        <div style={{ background: '#16A34A' }} />
+      </div>
+      <div style={{ display: 'flex', justifyContent: 'space-between', color: '#64748B', fontSize: 11.5, fontWeight: 700 }}>
+        <span>KRA: {k}%</span>
+        <span>Competency: {c}%</span>
+      </div>
+    </>
+  );
+}
+
+function OrgCompetencyEditor({ config, libraries, competencyWeight, kraWeight, toggle, update, onAddCustom, onRemoveCustom }) {
+  const selected = config.selectedCompetencies || [];
+  // Same shell as Group / Role cards so all three modes look identical.
+  const entry = { competencies: selected, kraShare: kraWeight, compShare: competencyWeight };
+  const setKra = (val) => {
+    const k = Math.max(0, Math.min(100, Number(val) || 0));
+    update('competencyWeight', 100 - k);
+  };
+  const setComp = (val) => {
+    const c = Math.max(0, Math.min(100, Number(val) || 0));
+    update('competencyWeight', c);
+  };
+  return (
+    <CompetencyCardShell
+      title="Org-wide competencies"
+      maxComp={config.maxCompetencies}
+      entry={entry}
+      setKra={setKra}
+      setComp={setComp}
+      libraries={libraries}
+      selected={selected}
+      onToggle={toggle}
+      onAddCustom={onAddCustom}
+      onRemoveCustom={onRemoveCustom}
+    />
+  );
+}
+
+// Shared card shell used by org / group / role overrides. Keeps the three
+// modes visually identical — only what's bound differs.
+function CompetencyCardShell({ title, badge, maxComp, entry, setKra, setComp, libraries, selected, onToggle, onAddCustom, onRemoveCustom, hasError, rowErrors, headerRight, nested }) {
+  const borderColor = hasError ? '#FCA5A5' : '#E2E8F0';
+  const padding = nested ? 12 : 16;
+  const finalSelected = selected || [];
+  const finalSelectedCount = finalSelected.length;
+  // Map a custom competency name back to its library key so removing it from
+  // the Final list also purges it from the custom store (custom names live
+  // only in the final list now — no orphan suggestion chips left behind).
+  const customKeyByName = {};
+  (libraries || []).forEach((lib) => (lib.customs || []).forEach((n) => { customKeyByName[n.toLowerCase()] = lib.key; }));
+  const removeFromFinal = (name) => {
+    const libKey = customKeyByName[String(name).toLowerCase()];
+    if (libKey && onRemoveCustom) onRemoveCustom(libKey, name); // also unselects everywhere
+    else onToggle(name);
+  };
+  return (
+    <div style={{ border: `1${nested ? 'px' : '.5px'} solid ${borderColor}`, borderRadius: nested ? 10 : 12, padding, marginBottom: nested ? 10 : 14, background: nested ? '#F8FAFC' : '#fff' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12, gap: 12 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
+          <div style={{ fontSize: nested ? 13 : 14, fontWeight: 800, color: '#0F172A', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{title}</div>
+          {badge}
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0 }}>
+          <div style={{
+            fontSize: 11, fontWeight: 700,
+            color: maxComp && finalSelectedCount > maxComp ? '#B91C1C' : '#64748B',
+          }}>{finalSelectedCount} selected{maxComp ? ` · max ${maxComp}` : ''}{maxComp && finalSelectedCount > maxComp ? ` · over by ${finalSelectedCount - maxComp}` : ''}</div>
+          {headerRight}
+        </div>
+      </div>
+      <Grid2>
+        <Field label="KRA share %"><input style={inputStyle} type="number" min={0} max={100} value={entry.kraShare ?? 80} onChange={(e) => setKra(e.target.value)} /></Field>
+        <Field label="Competency share %"><input style={inputStyle} type="number" min={0} max={100} value={entry.compShare ?? 20} onChange={(e) => setComp(e.target.value)} /></Field>
+      </Grid2>
+      <div style={{ margin: '6px 0 14px' }}>
+        <WeightBar kraShare={entry.kraShare} compShare={entry.compShare} />
+      </div>
+      <CompetencyChipRow
+        libraries={libraries} selected={selected} onToggle={onToggle}
+        onAddCustom={onAddCustom}
+      />
+      <div style={{
+        marginTop: 12,
+        padding: finalSelectedCount ? '9px 10px' : '8px 10px',
+        borderRadius: 10,
+        border: `1px solid ${finalSelectedCount ? '#BFDBFE' : '#E2E8F0'}`,
+        background: finalSelectedCount ? '#F8FBFF' : '#F8FAFC',
+      }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'center', marginBottom: finalSelectedCount ? 7 : 0 }}>
+          <div style={{ fontSize: 11.5, fontWeight: 900, color: finalSelectedCount ? '#1D4ED8' : '#64748B', textTransform: 'uppercase', letterSpacing: '.05em' }}>
+            Final selected competencies
+          </div>
+          <div style={{ fontSize: 11.5, fontWeight: 800, color: maxComp && finalSelectedCount > maxComp ? '#B91C1C' : '#64748B' }}>
+            {finalSelectedCount}{maxComp ? ` / ${maxComp}` : ''} selected
+          </div>
+        </div>
+        {finalSelectedCount ? (
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+            {finalSelected.map((name) => (
+              <button
+                key={name}
+                type="button"
+                title="Remove from final list"
+                onClick={() => removeFromFinal(name)}
+                style={{ padding: '4px 9px', borderRadius: 999, background: '#EFF4FF', border: '1px solid #BFDBFE', color: '#1D4ED8', fontSize: 12, fontWeight: 700, fontFamily: 'inherit', cursor: 'pointer' }}
+              >
+                {name}
+                <span style={{ marginLeft: 6, color: '#64748B' }}>×</span>
+              </button>
+            ))}
+          </div>
+        ) : (
+          <div style={{ fontSize: 12, color: '#94A3B8', fontWeight: 600 }}>No competencies selected yet.</div>
+        )}
+      </div>
+      {hasError && (
+        <ul style={{ margin: '8px 0 0 0', padding: '0 0 0 18px', color: '#B91C1C', fontSize: 11.5, fontWeight: 600 }}>
+          {(rowErrors || []).map((m, i) => <li key={i}>{m}</li>)}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+function GroupCompetencyCard({ group, entry, libraries, rowErrors, onPatch, maxComp, onAddCustom, onRemoveCustom }) {
+  const toggle = (name) => {
+    const list = entry.competencies || [];
+    onPatch({ competencies: list.includes(name) ? list.filter((x) => x !== name) : [...list, name] });
+  };
+  const setKra = (val) => {
+    const k = Math.max(0, Math.min(100, Number(val) || 0));
+    onPatch({ kraShare: k, compShare: 100 - k });
+  };
+  const setComp = (val) => {
+    const c = Math.max(0, Math.min(100, Number(val) || 0));
+    onPatch({ compShare: c, kraShare: 100 - c });
+  };
+  const hasError = (rowErrors || []).length > 0;
+  return (
+    <CompetencyCardShell
+      title={group.name || 'Untitled group'}
+      maxComp={maxComp}
+      entry={entry}
+      setKra={setKra}
+      setComp={setComp}
+      libraries={libraries}
+      selected={entry.competencies || []}
+      onToggle={toggle}
+      onAddCustom={onAddCustom}
+      onRemoveCustom={onRemoveCustom}
+      hasError={hasError}
+      rowErrors={rowErrors}
+    />
+  );
+}
+
+function GroupCompetencyEditor({ config, groups, libraries, errorsByGroup, onPatch, onAddCustom, onRemoveCustom }) {
+  if (groups.length === 0) {
+    return <div style={{ padding: 16, color: '#B91C1C', fontSize: 12, fontWeight: 700 }}>No groups configured. Go to Step 2 — Groups & Strategy to add at least one group.</div>;
+  }
+  return (
+    <div>
+      <div style={{ fontSize: 12, color: '#64748B', marginBottom: 10 }}>Set competencies and KRA/Competency split per group. Defaults are seeded from the org list. Custom competencies added on any card show up on every card.</div>
+      {groups.map((g) => (
+        <GroupCompetencyCard
+          key={g.id}
+          group={g}
+          entry={getGroupCompetencyEntry(config, g.id)}
+          libraries={libraries}
+          rowErrors={errorsByGroup[g.id] || []}
+          onPatch={(patch) => onPatch(g.id, patch)}
+          maxComp={config.maxCompetencies}
+          onAddCustom={onAddCustom}
+          onRemoveCustom={onRemoveCustom}
+        />
+      ))}
+    </div>
+  );
+}
+
+function GroupRoleCompetencyEditor({ config, groups, libraries, errorsByGroup, errorsByRole, onGroupPatch, onRolePatch, onRoleRemove, onAddCustom, onRemoveCustom }) {
+  if (groups.length === 0) {
+    return <div style={{ padding: 16, color: '#B91C1C', fontSize: 12, fontWeight: 700 }}>No groups configured. Go to Step 2 — Groups & Strategy to add at least one group.</div>;
+  }
+  return (
+    <div>
+      <div style={{ fontSize: 12, color: '#64748B', marginBottom: 10 }}>Group sets the baseline. Override specific designations only when they need a different list or split. Resolution: role &gt; group. Custom competencies added on any card show up everywhere.</div>
+      {groups.map((g) => (
+        <GroupWithRoleOverrides
+          key={g.id}
+          config={config}
+          group={g}
+          libraries={libraries}
+          groupErrors={errorsByGroup[g.id] || []}
+          errorsByRole={errorsByRole}
+          onGroupPatch={(patch) => onGroupPatch(g.id, patch)}
+          onRolePatch={(role, patch) => onRolePatch(g.id, role, patch)}
+          onRoleRemove={(role) => onRoleRemove(g.id, role)}
+          onAddCustom={onAddCustom}
+          onRemoveCustom={onRemoveCustom}
+        />
+      ))}
+    </div>
+  );
+}
+
+function GroupWithRoleOverrides({ config, group, libraries, groupErrors, errorsByRole, onGroupPatch, onRolePatch, onRoleRemove, onAddCustom, onRemoveCustom }) {
+  const [open, setOpen] = useState(false);
+  const groupEntry = getGroupCompetencyEntry(config, group.id);
+  const designations = getDesignationsForGroup(config, group.id);
+  const roleMap = (config.competencyByRole || {})[group.id] || {};
+  const overriddenRoles = Object.keys(roleMap);
+  const unconfiguredRoles = designations.filter((d) => !overriddenRoles.includes(d));
+  const hasError = groupErrors.length > 0 || overriddenRoles.some((r) => (errorsByRole[`${group.id}::${r}`] || []).length > 0);
+
+  return (
+    <div style={{ border: `1.5px solid ${hasError ? '#FCA5A5' : '#E2E8F0'}`, borderRadius: 12, padding: 16, marginBottom: 14, background: '#fff' }}>
+      <GroupCompetencyCard
+        group={group}
+        entry={groupEntry}
+        libraries={libraries}
+        rowErrors={groupErrors}
+        onPatch={onGroupPatch}
+        maxComp={config.maxCompetencies}
+        onAddCustom={onAddCustom}
+        onRemoveCustom={onRemoveCustom}
+      />
+      <div style={{ marginTop: -6 }}>
+        <button
+          type="button"
+          onClick={() => setOpen((v) => !v)}
+          style={{
+            background: 'transparent', border: 'none', padding: 0, cursor: 'pointer',
+            color: '#2563EB', fontSize: 12.5, fontWeight: 700, fontFamily: 'inherit',
+          }}>
+          {open ? '▾' : '▸'} Role overrides ({overriddenRoles.length} of {designations.length})
+        </button>
+        {open && (
+          <div style={{ marginTop: 10, paddingTop: 12, borderTop: '1px dashed #E2E8F0' }}>
+            {designations.length === 0 && (
+              <div style={{ fontSize: 12, color: '#64748B', fontStyle: 'italic' }}>No designations in this group's roster yet.</div>
+            )}
+            {overriddenRoles.map((role) => (
+              <RoleOverrideRow
+                key={role}
+                role={role}
+                entry={roleMap[role]}
+                libraries={libraries}
+                rowErrors={errorsByRole[`${group.id}::${role}`] || []}
+                onPatch={(patch) => onRolePatch(role, patch)}
+                onRemove={() => onRoleRemove(role)}
+                onAddCustom={onAddCustom}
+                onRemoveCustom={onRemoveCustom}
+              />
+            ))}
+            {unconfiguredRoles.length > 0 && (
+              <div style={{ marginTop: 10 }}>
+                <div style={{ fontSize: 11, fontWeight: 700, color: '#64748B', textTransform: 'uppercase', letterSpacing: '.04em', marginBottom: 6 }}>Add override for</div>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                  {unconfiguredRoles.map((role) => (
+                    <button
+                      key={role}
+                      type="button"
+                      onClick={() => onRolePatch(role, { ...groupEntry })}
+                      style={{
+                        padding: '5px 11px', borderRadius: 18, fontSize: 12, fontWeight: 600,
+                        border: '1px dashed #93C5FD', background: '#F0F7FF', color: '#2563EB',
+                        cursor: 'pointer', fontFamily: 'inherit',
+                      }}>+ {role}</button>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function RoleOverrideRow({ role, entry, libraries, rowErrors, onPatch, onRemove, onAddCustom, onRemoveCustom }) {
+  const toggle = (name) => {
+    const list = entry.competencies || [];
+    onPatch({ competencies: list.includes(name) ? list.filter((x) => x !== name) : [...list, name] });
+  };
+  const setKra = (val) => {
+    const k = Math.max(0, Math.min(100, Number(val) || 0));
+    onPatch({ kraShare: k, compShare: 100 - k });
+  };
+  const setComp = (val) => {
+    const c = Math.max(0, Math.min(100, Number(val) || 0));
+    onPatch({ compShare: c, kraShare: 100 - c });
+  };
+  const hasError = rowErrors.length > 0;
+  return (
+    <CompetencyCardShell
+      title={role}
+      badge={<span style={{ padding: '2px 7px', borderRadius: 999, background: '#EEF2FF', color: '#4338CA', fontSize: 10.5, fontWeight: 700, textTransform: 'uppercase' }}>Role override</span>}
+      entry={entry}
+      setKra={setKra}
+      setComp={setComp}
+      libraries={libraries}
+      selected={entry.competencies || []}
+      onToggle={toggle}
+      onAddCustom={onAddCustom}
+      onRemoveCustom={onRemoveCustom}
+      hasError={hasError}
+      rowErrors={rowErrors}
+      nested
+      headerRight={
+        <button type="button" onClick={onRemove}
+          style={{ background: 'transparent', border: 'none', color: '#DC2626', fontSize: 11.5, fontWeight: 700, cursor: 'pointer', fontFamily: 'inherit', padding: 0 }}>Remove</button>
+      }
+    />
   );
 }
 
@@ -8337,46 +11036,324 @@ function StepQuestionnaire() {
 }
 
 /* ── STEP 9: BELL CURVE ────────────────────────────────────────────────── */
-const BELL_COLORS = ['#F0FDF4','#EFF4FF','#FFFBEB','#FEF2F2','#FEF3C7'];
-const BELL_TEXT   = ['#16A34A','#2563EB','#D97706','#DC2626','#92400e'];
-const BELL_LABELS = ['Outstanding','Exceeds','Meets','Below','Needs Improv.'];
+const BELL_COLORS = ['#F0FDF4','#EFF4FF','#FFFBEB','#FEF2F2','#FEF3C7','#F5F3FF','#ECFEFF'];
+const BELL_TEXT   = ['#16A34A','#2563EB','#D97706','#DC2626','#92400e','#7C3AED','#0891B2'];
 
-function StepBellCurve({ config, update }) {
-  const bands = config.bellBands;
-  const max   = Math.max(...bands.map(Number), 1);
+function getBellBands(config = {}) {
+  const scale = getScaleLevels(config).slice().sort((a, b) => b.n - a.n);
+  const rawBands = Array.isArray(config.bellBands) ? config.bellBands : [];
+  return scale.map((_, i) => rawBands[i] ?? (i === Math.floor(scale.length / 2) ? 40 : Math.round(60 / Math.max(scale.length - 1, 1))));
+}
+
+// Tolerances default wider in the middle (where most ratings cluster) and
+// tighter at the extremes (where over/under-rating matters most).
+function getBellTolerances(config = {}) {
+  const scale = getScaleLevels(config).slice().sort((a, b) => b.n - a.n);
+  const raw = Array.isArray(config.bellTolerances) ? config.bellTolerances : [];
+  const center = Math.floor(scale.length / 2);
+  return scale.map((_, i) => {
+    if (raw[i] !== undefined && raw[i] !== null && raw[i] !== '') {
+      const num = Number(raw[i]);
+      return Number.isFinite(num) ? num : 2;
+    }
+    const distance = Math.abs(i - center);
+    return distance === 0 ? 5 : 2;
+  });
+}
+
+const BELL_PRESETS = [
+  { id: 'standard', label: 'Standard', desc: 'Classic bell — most in middle' },
+  { id: 'strict',   label: 'Strict',   desc: 'Forces center — limits extremes' },
+  { id: 'lenient',  label: 'Lenient',  desc: 'Generous — more top performers' },
+  { id: 'flat',     label: 'Flat',     desc: 'Equal across all ranks' },
+];
+
+const BELL_PRESET_TABLE = {
+  standard: {
+    3: [20, 60, 20],
+    4: [15, 30, 35, 20],
+    5: [10, 20, 50, 15, 5],
+    6: [8, 15, 27, 25, 15, 10],
+    7: [5, 12, 20, 30, 18, 10, 5],
+  },
+  strict: {
+    3: [10, 80, 10],
+    4: [10, 35, 40, 15],
+    5: [5, 15, 60, 15, 5],
+    6: [5, 10, 35, 30, 15, 5],
+    7: [3, 7, 15, 50, 15, 7, 3],
+  },
+  lenient: {
+    3: [40, 40, 20],
+    4: [30, 30, 25, 15],
+    5: [20, 30, 30, 15, 5],
+    6: [20, 25, 25, 15, 10, 5],
+    7: [15, 20, 25, 25, 10, 3, 2],
+  },
+  flat: {
+    3: [33, 34, 33],
+    4: [25, 25, 25, 25],
+    5: [20, 20, 20, 20, 20],
+    6: [16, 17, 17, 17, 17, 16],
+    7: [14, 14, 15, 15, 14, 14, 14],
+  },
+};
+
+function getBellPresetBands(presetId, N) {
+  const table = BELL_PRESET_TABLE[presetId] || BELL_PRESET_TABLE.standard;
+  if (table[N]) return [...table[N]];
+  const center = Math.floor(N / 2);
+  const out = Array(N).fill(0);
+  for (let i = 0; i < N; i++) {
+    const distance = Math.abs(i - center);
+    out[i] = Math.max(2, 40 - distance * 8);
+  }
+  const sum = out.reduce((a, b) => a + b, 0);
+  return out.map((v) => Math.round((v * 100) / sum));
+}
+
+export function getBellCurveSnapshot(config = {}) {
+  return JSON.stringify({
+    bellEnabled: config.bellEnabled !== false,
+    bellPerDept: !!config.bellPerDept,
+    bellNotify: !!config.bellNotify,
+    bellMode: config.bellMode || 'soft',
+    bellPreset: config.bellPreset || 'standard',
+    bellBands: getBellBands(config),
+    bellTolerances: getBellTolerances(config),
+  });
+}
+
+function BellChart({ bands, tolerances, scale, max }) {
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => {
+    const t = setTimeout(() => setMounted(true), 16);
+    return () => clearTimeout(t);
+  }, []);
+  return (
+    <div style={{ padding: '8px 0 0', marginBottom: 16, position: 'relative' }}>
+      {/* Subtle grid lines for read-off */}
+      <div style={{ position: 'absolute', left: 8, right: 8, top: 30, bottom: 60, pointerEvents: 'none' }}>
+        {[0.25, 0.5, 0.75].map((p) => (
+          <div key={p} style={{
+            position: 'absolute', left: 0, right: 0, top: `${p * 100}%`,
+            height: 1, background: '#F1F5F9',
+          }} />
+        ))}
+      </div>
+      <div style={{ display: 'flex', alignItems: 'flex-end', gap: 8, height: 170, position: 'relative' }}>
+        {bands.map((b, i) => {
+          const target = Number(b) || 0;
+          const tol = Math.max(0, Number(tolerances[i]) || 0);
+          const fullScale = 120; // pixel height range for bars
+          const barHeight = mounted ? Math.max((target / max) * fullScale, 4) : 0;
+          const tolHeight = mounted ? (tol / max) * fullScale : 0;
+          const fadeIn = {
+            opacity: mounted ? 1 : 0,
+            transform: mounted ? 'translateY(0)' : 'translateY(6px)',
+            transition: `opacity .35s ease ${i * 40}ms, transform .35s ease ${i * 40}ms`,
+          };
+          return (
+            <div key={scale[i].n} style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'flex-end', minWidth: 0 }}>
+              {/* Two-line label so target and tolerance never overlap */}
+              <div style={{ height: 30, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'flex-end', ...fadeIn }}>
+                <div style={{ fontSize: 12, fontWeight: 800, color: BELL_TEXT[i % BELL_TEXT.length], lineHeight: 1.1 }}>{b}%</div>
+                {tol > 0 && (
+                  <div style={{ fontSize: 10, fontWeight: 700, color: '#16A34A', lineHeight: 1.1 }}>±{tol}%</div>
+                )}
+              </div>
+              <div style={{ position: 'relative', width: '100%', height: fullScale, display: 'flex', alignItems: 'flex-end' }}>
+                <div style={{
+                  position: 'absolute', left: 0, right: 0, bottom: 0,
+                  height: barHeight,
+                  background: BELL_COLORS[i % BELL_COLORS.length],
+                  borderRadius: '4px 4px 0 0',
+                  transition: 'height .55s cubic-bezier(.22,.61,.36,1)',
+                  boxShadow: '0 1px 0 rgba(15, 23, 42, 0.04) inset',
+                }} />
+                {tol > 0 && mounted && (
+                  <div style={{
+                    position: 'absolute', left: -3, right: -3,
+                    bottom: Math.max(0, barHeight - tolHeight),
+                    height: Math.min(tolHeight * 2, barHeight + tolHeight),
+                    border: '1.5px dashed #16A34A',
+                    background: 'rgba(22, 163, 74, 0.08)',
+                    borderRadius: 4, pointerEvents: 'none',
+                    opacity: mounted ? 1 : 0,
+                    transition: `bottom .55s cubic-bezier(.22,.61,.36,1), height .55s cubic-bezier(.22,.61,.36,1), opacity .35s ease ${(i * 40) + 200}ms`,
+                  }} />
+                )}
+              </div>
+              <div style={{
+                fontSize: 10.5, color: '#64748B', marginTop: 8, textAlign: 'center', lineHeight: 1.25,
+                maxWidth: '100%', overflow: 'hidden', textOverflow: 'ellipsis',
+                ...fadeIn,
+              }}>
+                <div style={{ fontWeight: 800, color: '#334155' }}>{scale[i].n}</div>
+                <div title={scale[i].l} style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{scale[i].l}</div>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+export function StepBellCurve({ config, update, hideHead, hideApplyBar = false }) {
+  const enabled = config.bellEnabled !== false;
+  const scale = getScaleLevels(config).slice().sort((a, b) => b.n - a.n);
+  const bands = getBellBands(config);
+  const tolerances = getBellTolerances(config);
+  const total = bands.reduce((sum, value) => sum + (Number(value) || 0), 0);
+  const max = Math.max(...bands.map(Number), 1);
+  const activePreset = config.bellPreset || 'standard';
+  const updateBand = (index, value) => {
+    const next = [...bands];
+    next[index] = value;
+    update('__mergeConfig', { bellBands: next, bellPreset: 'custom' });
+  };
+  const updateTolerance = (index, value) => {
+    const next = [...tolerances];
+    next[index] = value;
+    update('bellTolerances', next);
+  };
+  const applyBellPreset = (presetId) => {
+    update('__mergeConfig', { bellBands: getBellPresetBands(presetId, scale.length), bellPreset: presetId });
+  };
+  const toleranceErrors = tolerances.some((t) => {
+    const n = Number(t);
+    return !Number.isFinite(n) || n < 0 || n > 50;
+  });
+  const bellValid = enabled
+    ? (bands.reduce((sum, value) => sum + (Number(value) || 0), 0) === 100 && !toleranceErrors)
+    : true;
+  const bellApplied = bellValid && config.bellAppliedSnapshot === getBellCurveSnapshot(config);
   return (
     <div>
-      <SectionHead title="Bell curve / normalization" sub="Define rating distribution bands and how HR normalizes final ratings." />
+      {!hideHead && <SectionHead title="Bell curve / normalization" sub="Define rating distribution bands and how HR normalizes final ratings." />}
       <Card>
         <CardHead title="Distribution configuration" />
         <CardBody>
-          <TogRow label="Enable bell curve normalization" desc="HR reviews final distribution and can adjust ratings to fit bell curve" on={config.bellEnabled} onChange={v => update('bellEnabled', v)} />
-          <TogRow label="Apply per department (not org-wide)" desc="Normalization done independently within each department" on={config.bellPerDept} onChange={v => update('bellPerDept', v)} />
-          <TogRow label="Notify employee if rating was normalized" desc="Employee sees a note if final rating differs from manager rating" last on={config.bellNotify} onChange={v => update('bellNotify', v)} />
-          <div style={{ height: 1, background: '#F1F3F5', margin: '14px 0' }} />
-          <div style={{ fontSize: 12, fontWeight: 600, color: '#374151', textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: 14 }}>Distribution bands</div>
-          {/* Bar chart */}
-          <div style={{ display: 'flex', alignItems: 'flex-end', gap: 6, height: 90, marginBottom: 14 }}>
-            {bands.map((b, i) => (
-              <div key={i} style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'flex-end' }}>
-                <div style={{ fontSize: 11, fontWeight: 600, color: BELL_TEXT[i], marginBottom: 4 }}>{b}%</div>
-                <div style={{ width: '100%', height: Math.max((Number(b) / max) * 70, 6), background: BELL_COLORS[i], borderRadius: '4px 4px 0 0', transition: 'height .3s' }} />
-                <div style={{ fontSize: 10, color: '#9CA3AF', marginTop: 5, textAlign: 'center' }}>{BELL_LABELS[i]}</div>
+          <TogRow label="Enable bell curve normalization" desc="HR reviews final distribution and can adjust ratings to fit bands." last on={enabled} onChange={v => update('bellEnabled', v)} />
+          {enabled && (
+            <>
+              <div style={{ height: 1, background: '#F1F3F5', margin: '14px 0' }} />
+              <div style={{ fontSize: 12, fontWeight: 800, color: '#64748B', textTransform: 'uppercase', letterSpacing: '.04em', marginBottom: 8 }}>Enforcement mode</div>
+              <div style={{ display: 'flex', gap: 10, marginBottom: 18 }}>
+                {[
+                  { id: 'soft', label: 'Soft', desc: 'HR can publish even when out of tolerance — must add a reason.' },
+                  { id: 'hard', label: 'Hard', desc: 'Publish blocked until every rank is inside its tolerance window.' },
+                ].map((opt) => {
+                  const active = (config.bellMode || 'soft') === opt.id;
+                  return (
+                    <button
+                      key={opt.id} type="button"
+                      onClick={() => update('bellMode', opt.id)}
+                      style={{
+                        flex: 1,
+                        border: `1.5px solid ${active ? '#2563EB' : '#CBD5E1'}`,
+                        background: active ? '#EFF6FF' : '#fff',
+                        color: active ? '#1D4ED8' : '#475569',
+                        borderRadius: 10, padding: '10px 14px',
+                        textAlign: 'left', cursor: 'pointer', fontFamily: 'inherit',
+                      }}>
+                      <div style={{ fontSize: 13, fontWeight: 800 }}>{opt.label}</div>
+                      <div style={{ fontSize: 11.5, fontWeight: 600, marginTop: 4, color: active ? '#1E40AF' : '#64748B' }}>{opt.desc}</div>
+                    </button>
+                  );
+                })}
               </div>
-            ))}
-          </div>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: 12, marginBottom: 12 }}>
-            {['Outstanding (5) — max %', 'Exceeds (4) — max %', 'Meets (3) — target %', 'Below (2) — max %'].map((l, i) => (
-              <Field key={l} label={l}>
-                <input style={inputStyle} type="number" value={bands[i]} min={0} max={100}
-                  onChange={e => { const next = [...bands]; next[i] = e.target.value; update('bellBands', next); }} />
-              </Field>
-            ))}
-          </div>
-          <Field label="Needs improvement (1) — max %" >
-            <input style={{ ...inputStyle, maxWidth: 120 }} type="number" value={bands[4]} min={0} max={100}
-              onChange={e => { const next = [...bands]; next[4] = e.target.value; update('bellBands', next); }} />
-          </Field>
+              <div style={{ fontSize: 12, fontWeight: 800, color: '#64748B', textTransform: 'uppercase', letterSpacing: '.04em', marginBottom: 8 }}>Distribution shape</div>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 14 }}>
+                {BELL_PRESETS.map((preset) => {
+                  const active = activePreset === preset.id;
+                  return (
+                    <button
+                      key={preset.id}
+                      type="button"
+                      onClick={() => applyBellPreset(preset.id)}
+                      style={{
+                        border: `1.5px solid ${active ? '#2563EB' : '#CBD5E1'}`,
+                        background: active ? '#EFF6FF' : '#fff',
+                        color: active ? '#2563EB' : '#475569',
+                        borderRadius: 10, padding: '8px 14px',
+                        fontSize: 12.5, fontWeight: 800,
+                        cursor: 'pointer', fontFamily: 'inherit', textAlign: 'left',
+                        minWidth: 150,
+                        display: 'flex', flexDirection: 'column', gap: 2,
+                      }}
+                    >
+                      <span>{preset.label}</span>
+                      <span style={{ fontSize: 11, fontWeight: 600, color: active ? '#1E40AF' : '#94A3B8' }}>{preset.desc}</span>
+                    </button>
+                  );
+                })}
+                <div style={{
+                  border: `1.5px solid ${activePreset === 'custom' ? '#F59E0B' : '#E2E8F0'}`,
+                  background: activePreset === 'custom' ? '#FFFBEB' : '#F8FAFC',
+                  color: activePreset === 'custom' ? '#92400E' : '#94A3B8',
+                  borderRadius: 10, padding: '8px 14px',
+                  fontSize: 12.5, fontWeight: 800,
+                  minWidth: 150,
+                  display: 'flex', flexDirection: 'column', gap: 2,
+                }}>
+                  <span>Custom</span>
+                  <span style={{ fontSize: 11, fontWeight: 600, color: activePreset === 'custom' ? '#92400E' : '#94A3B8' }}>Set by editing the bands below</span>
+                </div>
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginBottom: 14 }}>
+                <div style={{ fontSize: 12, fontWeight: 700, color: '#374151', textTransform: 'uppercase', letterSpacing: '0.04em' }}>Distribution bands</div>
+                <div style={{ fontSize: 12, fontWeight: 800, color: total === 100 ? '#16A34A' : '#B91C1C' }}>Total: {total}%</div>
+              </div>
+              <BellChart bands={bands} tolerances={tolerances} scale={scale} max={max} />
+
+              <div style={{ fontSize: 11, color: '#64748B', marginBottom: 12, display: 'flex', alignItems: 'center', gap: 6 }}>
+                <span style={{ display: 'inline-block', width: 12, height: 4, border: '1.5px dashed #16A34A', background: 'rgba(22, 163, 74, 0.08)' }} />
+                Acceptable tolerance band around each target. HR review flags ranks outside this window.
+              </div>
+              <div style={{ border: '1px solid #E2E8F0', borderRadius: 10, overflow: 'hidden' }}>
+                <div style={{ display: 'grid', gridTemplateColumns: '110px 1fr 1fr', gap: 10, padding: '9px 12px', background: '#F8FAFC', color: '#64748B', fontSize: 11, fontWeight: 900, textTransform: 'uppercase', letterSpacing: '.04em' }}>
+                  <span>Rank</span>
+                  <span>Target %</span>
+                  <span>Tolerance ±%</span>
+                </div>
+                {scale.map((level, i) => {
+                  const tolNum = Number(tolerances[i]);
+                  const tolBad = !Number.isFinite(tolNum) || tolNum < 0 || tolNum > 50;
+                  return (
+                    <div key={level.n} style={{ display: 'grid', gridTemplateColumns: '110px 1fr 1fr', gap: 10, padding: '10px 12px', borderTop: '1px solid #E2E8F0', alignItems: 'center' }}>
+                      <div style={{ fontSize: 12.5, fontWeight: 800, color: '#111827' }}>{level.n} - {level.l}</div>
+                      <input style={inputStyle} type="number" value={bands[i]} min={0} max={100} onChange={e => updateBand(i, e.target.value)} />
+                      <input
+                        style={{ ...inputStyle, ...(tolBad ? { borderColor: '#DC2626', boxShadow: '0 0 0 1px #FEE2E2 inset' } : {}) }}
+                        type="number" value={tolerances[i]} min={0} max={50}
+                        onChange={e => updateTolerance(i, e.target.value)}
+                        placeholder="e.g. 2"
+                      />
+                    </div>
+                  );
+                })}
+              </div>
+              {total !== 100 && (
+                <div style={{ marginTop: 10, color: '#B91C1C', fontSize: 12, fontWeight: 700 }}>Band percentages must total 100 before launch.</div>
+              )}
+              {toleranceErrors && (
+                <div style={{ marginTop: 10, color: '#B91C1C', fontSize: 12, fontWeight: 700 }}>Tolerance must be a number between 0 and 50.</div>
+              )}
+            </>
+          )}
+          {!hideApplyBar && (
+            <StepStatusBar
+              applied={bellApplied}
+              valid={bellValid}
+              appliedMessage={enabled ? '✓ Bell curve saved. Move to the next step, or change a field above to re-enable editing.' : '✓ Bell curve turned off. Manager ratings are used as-is.'}
+              pendingMessage={enabled ? 'Pick a distribution shape, adjust bands if needed, then save.' : 'Bell curve is off. Save to confirm and continue.'}
+              invalidMessage="Distribution bands must total 100% before saving."
+              buttonLabel="Save bell curve"
+              onApply={() => update('bellAppliedSnapshot', getBellCurveSnapshot(config))}
+            />
+          )}
         </CardBody>
       </Card>
     </div>
@@ -8514,7 +11491,7 @@ function krasFromFlatPerspective(perspectives) {
   return (perspectives || []).flatMap(p => p.kras || []);
 }
 
-function AddLibraryModalFlat({ initialLibrary = null, fixedName = '', suggestedType = null, lockType = false, hideKpiWeights = false, onSave, onClose }) {
+function AddLibraryModalFlat({ initialLibrary = null, fixedName = '', suggestedType = null, lockType = false, hideKpiWeights = false, targetsOn = false, targetLevel = null, targetTypeOptions = [], onSave, onClose }) {
   const normalizedInitialLibrary = initialLibrary ? normalizeGoalLibraryRecord(initialLibrary) : null;
   const seedKras = normalizedInitialLibrary?.perspectives?.length
     ? krasFromFlatPerspective(normalizedInitialLibrary.perspectives).map(kra => ({
@@ -8675,6 +11652,31 @@ function AddLibraryModalFlat({ initialLibrary = null, fixedName = '', suggestedT
                     )}
                     <button type="button" onClick={() => removeKRA(kra.id)} style={{ background: 'none', border: 'none', color: '#DC2626', cursor: 'pointer', fontSize: 16, lineHeight: 1, padding: '0 4px' }}>×</button>
                   </div>
+                  {targetsOn && targetLevel === 'KRA' && (
+                    <div style={{ display: 'flex', gap: 6, marginBottom: type === 'kra-kpi' ? 8 : 0, alignItems: 'center' }}>
+                      <span style={{
+                        fontSize: 10.5, fontWeight: 700, color: '#64748B',
+                        textTransform: 'uppercase', letterSpacing: '.05em',
+                        minWidth: 44,
+                      }}>Target</span>
+                      <input
+                        value={kra.target || ''}
+                        onChange={e => updateKRA(kra.id, { target: e.target.value })}
+                        placeholder="blank if subjective"
+                        style={{ ...inputStyle, width: 180, fontSize: 12.5 }}
+                      />
+                      <select
+                        value={kra.targetType || ''}
+                        onChange={e => updateKRA(kra.id, { targetType: e.target.value })}
+                        style={{ ...inputStyle, width: 140, fontSize: 12.5 }}
+                      >
+                        <option value="">Type…</option>
+                        {targetTypeOptions.map((opt) => (
+                          <option key={opt.id || opt} value={opt.id || opt}>{opt.label || opt}</option>
+                        ))}
+                      </select>
+                    </div>
+                  )}
                   <div style={{ marginBottom: type === 'kra-kpi' ? 8 : 0 }}>
                     <button
                       type="button"
@@ -8714,6 +11716,31 @@ function AddLibraryModalFlat({ initialLibrary = null, fixedName = '', suggestedT
                             )}
                             <button type="button" onClick={() => removeKPI(kra.id, kpi.id)} style={{ background: 'none', border: 'none', color: '#DC2626', cursor: 'pointer', fontSize: 14, lineHeight: 1 }}>×</button>
                           </div>
+                          {targetsOn && targetLevel === 'KPI' && (
+                            <div style={{ display: 'flex', gap: 6, marginLeft: 18, alignItems: 'center', marginTop: 2 }}>
+                              <span style={{
+                                fontSize: 10.5, fontWeight: 700, color: '#64748B',
+                                textTransform: 'uppercase', letterSpacing: '.05em',
+                                minWidth: 44,
+                              }}>Target</span>
+                              <input
+                                value={kpi.target || ''}
+                                onChange={e => updateKPI(kra.id, kpi.id, { target: e.target.value })}
+                                placeholder="blank if subjective"
+                                style={{ ...inputStyle, width: 160, fontSize: 11.5 }}
+                              />
+                              <select
+                                value={kpi.targetType || ''}
+                                onChange={e => updateKPI(kra.id, kpi.id, { targetType: e.target.value })}
+                                style={{ ...inputStyle, width: 130, fontSize: 11.5 }}
+                              >
+                                <option value="">Type…</option>
+                                {targetTypeOptions.map((opt) => (
+                                  <option key={opt.id || opt} value={opt.id || opt}>{opt.label || opt}</option>
+                                ))}
+                              </select>
+                            </div>
+                          )}
                         </div>
                       ))}
                       <button type="button" onClick={() => addKPI(kra.id)} style={{ fontSize: 11.5, color: '#7C3AED', background: 'none', border: 'none', cursor: 'pointer', padding: '2px 0 2px 6px', fontFamily: 'inherit' }}>+ Add KPI</button>
@@ -8750,13 +11777,14 @@ function AddLibraryModalFlat({ initialLibrary = null, fixedName = '', suggestedT
   );
 }
 
-function StepPrefillDataFlat({ config, update }) {
+export function StepPrefillDataFlat({ config, update, readOnly = false }) {
   const groups = config.goalGroups || [];
   const groupsNeedingPrefill = groupsNeedingPrefillData(config);
   const canShowAllGroups = groupsNeedingPrefill.length > 1;
   const [selectedGroupId, setSelectedGroupId] = useState(groupsNeedingPrefill[0]?.id || '');
   const [showAllGroups, setShowAllGroups] = useState(false);
   const [editingPrefillTarget, setEditingPrefillTarget] = useState(null);
+  const [viewingLibrary, setViewingLibrary] = useState(null);
   const [phase, setPhase] = useState('idle');
   const [errors, setErrors] = useState([]);
 
@@ -8809,7 +11837,7 @@ function StepPrefillDataFlat({ config, update }) {
 
   return (
     <div style={{ maxWidth: 1180, margin: '0 auto', paddingBottom: 40 }}>
-      {editingPrefillGroup && editingPrefillAssignment && (
+      {!readOnly && editingPrefillGroup && editingPrefillAssignment && (
         <AddLibraryModalFlat
           initialLibrary={{
             id: `${editingPrefillGroup.id}_${editingPrefillAssignment.slotKey}`,
@@ -8822,6 +11850,9 @@ function StepPrefillDataFlat({ config, update }) {
           suggestedType={editingPrefillGroup.prefillType}
           lockType
           hideKpiWeights={editingPrefillGroup.kpiRatingMode === 'free-text'}
+          targetsOn={config.targetsEnabled !== false}
+          targetLevel={editingPrefillGroup.targetLevel === 'KRA' ? 'KRA' : 'KPI'}
+          targetTypeOptions={getMergedTargetTypes(config).filter((t) => !t.hidden).map((t) => ({ id: canonicalTargetTypeId(t), label: t.name }))}
           onSave={(library) => {
             updatePrefillAssignmentData(editingPrefillGroup.id, editingPrefillAssignment.slotKey, library.perspectives || []);
             setEditingPrefillTarget(null);
@@ -8829,6 +11860,7 @@ function StepPrefillDataFlat({ config, update }) {
           onClose={() => setEditingPrefillTarget(null)}
         />
       )}
+      <ReadOnlyLibraryModal library={viewingLibrary} onClose={() => setViewingLibrary(null)} targetTypes={getMergedTargetTypes(config).filter((t) => !t.hidden)} />
 
       <SectionHead title="Upload pre-filled goals" />
 
@@ -8876,13 +11908,24 @@ function StepPrefillDataFlat({ config, update }) {
                           accent={accent}
                           active={uploadedCount > 0}
                           empty={uploadedCount === 0}
-                          onSelect={() => { setSelectedGroupId(group.id); setEditingPrefillTarget({ groupId: group.id, slotKey: assignment.slotKey }); }}
-                          onEdit={() => { setSelectedGroupId(group.id); setEditingPrefillTarget({ groupId: group.id, slotKey: assignment.slotKey }); }}
-                          onDelete={uploadedCount > 0 ? () => updatePrefillAssignmentData(group.id, assignment.slotKey, []) : null}
+                          onSelect={() => {
+                            setSelectedGroupId(group.id);
+                            if (readOnly && uploadedCount > 0) {
+                              setViewingLibrary({
+                                name: assignment.label,
+                                type: group.prefillType === 'kra-kpi' ? 'kra-kpi' : 'kra-only',
+                                perspectives: assignment.data || [],
+                              });
+                            }
+                          }}
+                          onEdit={!readOnly ? () => { setSelectedGroupId(group.id); setEditingPrefillTarget({ groupId: group.id, slotKey: assignment.slotKey }); } : null}
+                          onDelete={!readOnly && uploadedCount > 0 ? () => updatePrefillAssignmentData(group.id, assignment.slotKey, []) : null}
                           showKpiPercent={group.prefillType === 'kra-kpi' && group.kpiRatingMode !== 'free-text'}
-                          selectionHint={uploadedCount > 0
-                            ? `${prefillKraCount} pre-filled KRA${prefillKraCount !== 1 ? 's' : ''} · ${prefillLabel}`
-                            : `Create or upload ${prefillLabel.toLowerCase()} for ${assignment.label}`}
+                          selectionHint={readOnly
+                            ? (uploadedCount > 0 ? `${prefillKraCount} KRA${prefillKraCount !== 1 ? 's' : ''} configured · click to view` : 'No data configured')
+                            : (uploadedCount > 0
+                                ? `${prefillKraCount} pre-filled KRA${prefillKraCount !== 1 ? 's' : ''} · ${prefillLabel}`
+                                : `Create or upload ${prefillLabel.toLowerCase()} for ${assignment.label}`)}
                         />
                       );
                     })}
@@ -8923,7 +11966,7 @@ function StepPrefillDataFlat({ config, update }) {
             </div>
 
             <div style={{ display: 'flex', flexDirection: 'column', gap: 10, alignItems: 'stretch' }}>
-              {selectedGroup && (
+              {!readOnly && selectedGroup && (
                 <>
                   <PrefillSheetControls config={config} selectedGroup={selectedGroup} onImported={importPrefillLibraries} phase={phase} setPhase={setPhase} errors={errors} setErrors={setErrors} />
                 </>
@@ -8946,29 +11989,32 @@ function StepPrefillDataFlat({ config, update }) {
         invalidMessage={phase === 'error' && errors.length > 0 ? 'Fix the upload errors shown above, then re-upload the sheet.' : 'Upload pre-fill data for every pre-fill-enabled group.'}
         buttonLabel="Confirm Pre-fill Data"
         onApply={() => update('prefillDataAppliedSnapshot', `confirmed_${Date.now()}`)}
+        readOnly={readOnly}
       />
     </div>
   );
 }
 
-function StepGoalLibrariesFlat({ config, update }) {
+export function StepGoalLibrariesFlat({ config, update, hideHead, readOnly = false }) {
   const libraries = config.goalLibraries || [];
   const groups = config.goalGroups || [];
-  const groupsNeedingLib = groups.filter(isGroupLibraryEnabled);
-  const canShowAllGroups = groupsNeedingLib.length > 1;
+  const groupsShownOnBoard = groups.filter(isGroupShownOnGoalsBoard);
+  const canShowAllGroups = groupsShownOnBoard.length > 1;
   const [showAddModal, setShowAddModal] = useState(false);
   const [editingLibraryId, setEditingLibraryId] = useState(null);
   const [showAllGroups, setShowAllGroups] = useState(false);
-  const [selectedGroupId, setSelectedGroupId] = useState(groupsNeedingLib[0]?.id || '');
+  const [selectedGroupId, setSelectedGroupId] = useState(groupsShownOnBoard[0]?.id || '');
   const [editingSlot, setEditingSlot] = useState(null);
+  const [editingPrefillTarget, setEditingPrefillTarget] = useState(null);
+  const [viewingLibrary, setViewingLibrary] = useState(null);
   const [uploadErrors, setUploadErrors] = useState([]);
 
-  const groupsWithAssignments = groupsNeedingLib.map(group => ({
+  const groupsWithAssignments = groupsShownOnBoard.map(group => ({
     ...group,
     libraryAssignments: getGroupLibraryAssignments(group),
   }));
   const allSlotsAssigned = groupsWithAssignments.length === 0 || groupsWithAssignments.every(g =>
-    g.libraryAssignments.every(a => a.libraryId && libraries.some(l => l.id === a.libraryId))
+    !isGroupLibraryEnabled(g) || g.libraryAssignments.every(a => a.libraryId && libraries.some(l => l.id === a.libraryId))
   );
   const isValid = allSlotsAssigned;
   const isApplied = !!config.goalLibrariesAppliedSnapshot && isValid;
@@ -8986,10 +12032,15 @@ function StepGoalLibrariesFlat({ config, update }) {
     : { ...config, goalGroups: [selectedGroup] };
   const selectedGroupIndex = Math.max(0, groupsWithAssignments.findIndex(g => g.id === selectedGroup?.id));
   const editingLibrary = libraries.find(l => l.id === editingLibraryId) || null;
+  const editingPrefillGroup = groupsWithAssignments.find(g => g.id === editingPrefillTarget?.groupId) || null;
+  const editingPrefillAssignment = editingPrefillGroup
+    ? getGroupPrefillAssignments(editingPrefillGroup).find(a => a.slotKey === editingPrefillTarget?.slotKey) || null
+    : null;
   const boardSlots = ((showAllGroups && canShowAllGroups) ? groupsWithAssignments : (selectedGroup ? [selectedGroup] : []))
     .flatMap((group, groupIndex) =>
       group.libraryAssignments.map((assignment, assignmentIndex) => ({
         group, assignment,
+        prefillAssignment: getGroupPrefillAssignments(group).find((item) => item.slotKey === assignment.slotKey) || null,
         accent: LIBRARY_BOARD_COLORS[(groupIndex + assignmentIndex + Math.max(selectedGroupIndex, 0)) % LIBRARY_BOARD_COLORS.length],
         library: libraries.find(l => l.id === assignment.libraryId) || null,
       }))
@@ -9030,6 +12081,28 @@ function StepGoalLibrariesFlat({ config, update }) {
     setEditingSlot({ group, assignment });
     setEditingLibraryId(libraryId);
     setShowAddModal(true);
+  }
+
+  function updatePrefillAssignments(groupId, nextAssignments) {
+    const nextGroups = setGroupPrefillAssignments(groups, groupId, nextAssignments);
+    update('goalGroups', nextGroups);
+    update('goalLibraryData', buildLegacyPrefillData(config, nextGroups));
+    update('prefillDataAppliedSnapshot', null);
+    setUploadErrors([]);
+  }
+
+  function updatePrefillAssignmentData(groupId, slotKey, nextData) {
+    const group = groups.find(item => item.id === groupId);
+    if (!group) return;
+    const nextAssignments = getGroupPrefillAssignments(group).map(a =>
+      a.slotKey === slotKey ? { ...a, data: nextData } : a
+    );
+    updatePrefillAssignments(groupId, nextAssignments);
+  }
+
+  function openPrefillEditor(group, assignment) {
+    setSelectedGroupId(group.id);
+    setEditingPrefillTarget({ groupId: group.id, slotKey: assignment.slotKey });
   }
 
   function handleImportedLibraries(nextLibraries, importedLibraries = nextLibraries) {
@@ -9090,18 +12163,45 @@ function StepGoalLibrariesFlat({ config, update }) {
 
   return (
     <div style={{ maxWidth: 1180, margin: '0 auto', paddingBottom: 40 }}>
-      {showAddModal && (
+      {!readOnly && showAddModal && (
         <AddLibraryModalFlat
           initialLibrary={editingLibrary}
           fixedName={editingSlot?.assignment?.label || ''}
           suggestedType={editingSlot?.group?.libraryType || null}
           hideKpiWeights={editingSlot?.group?.kpiRatingMode === 'free-text'}
+          targetsOn={config.targetsEnabled !== false}
+          targetLevel={editingSlot?.group?.targetLevel === 'KRA' ? 'KRA' : 'KPI'}
+          targetTypeOptions={getMergedTargetTypes(config).filter((t) => !t.hidden).map((t) => ({ id: canonicalTargetTypeId(t), label: t.name }))}
           onSave={saveLibrary}
           onClose={() => { setShowAddModal(false); setEditingLibraryId(null); setEditingSlot(null); }}
         />
       )}
+      {!readOnly && editingPrefillGroup && editingPrefillAssignment && (
+        <AddLibraryModalFlat
+          initialLibrary={{
+            id: `${editingPrefillGroup.id}_${editingPrefillAssignment.slotKey}`,
+            name: editingPrefillAssignment.label,
+            type: editingPrefillGroup.prefillType === 'kra-kpi' ? 'kra-kpi' : 'kra-only',
+            weightType: 'suggested',
+            perspectives: editingPrefillAssignment.data || [],
+          }}
+          fixedName={editingPrefillAssignment.label}
+          suggestedType={editingPrefillGroup.prefillType}
+          lockType
+          hideKpiWeights={editingPrefillGroup.kpiRatingMode === 'free-text'}
+          targetsOn={config.targetsEnabled !== false}
+          targetLevel={editingPrefillGroup.targetLevel === 'KRA' ? 'KRA' : 'KPI'}
+          targetTypeOptions={getMergedTargetTypes(config).filter((t) => !t.hidden).map((t) => ({ id: canonicalTargetTypeId(t), label: t.name }))}
+          onSave={(library) => {
+            updatePrefillAssignmentData(editingPrefillGroup.id, editingPrefillAssignment.slotKey, library.perspectives || []);
+            setEditingPrefillTarget(null);
+          }}
+          onClose={() => setEditingPrefillTarget(null)}
+        />
+      )}
+      <ReadOnlyLibraryModal library={viewingLibrary?.library || null} onClose={() => setViewingLibrary(null)} showKpiPercent={!!viewingLibrary?.showKpiPercent} targetTypes={getMergedTargetTypes(config).filter((t) => !t.hidden)} />
 
-      <SectionHead title="Build your KRA libraries" />
+      {!hideHead && <SectionHead title="Build your KRA libraries" />}
 
       <div style={{ background: 'linear-gradient(180deg, #FFFFFF 0%, #FCFDFE 100%)', border: '1px solid #E2E8F0', borderRadius: 34, padding: 30, marginBottom: 22, boxShadow: '0 20px 45px rgba(15,23,42,.05)' }}>
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 220px', gap: 24, alignItems: 'stretch' }}>
@@ -9130,24 +12230,40 @@ function StepGoalLibrariesFlat({ config, update }) {
                   )}
                   <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: 18 }}>
                     {slots.map((slot, index) => {
-                      const { group, assignment, library } = slot;
+                      const { group, assignment, library, prefillAssignment } = slot;
                       const accent = slot.accent || LIBRARY_BOARD_COLORS[(selectedGroupIndex + index) % LIBRARY_BOARD_COLORS.length];
+                      const libraryEnabled = isGroupLibraryEnabled(group);
+                      const prefillData = prefillAssignment?.data || [];
+                      const prefillOnly = !libraryEnabled && !!group.prefillType;
+                      const displayLibrary = library || (!libraryEnabled && group.prefillType
+                        ? { name: assignment.label, type: group.prefillType, perspectives: prefillData }
+                        : { name: assignment.label, type: 'kra-kpi', perspectives: [] });
                       return (
                         <LibraryCard
                           key={`${group.id}:${assignment.slotKey}`}
-                          library={library || { name: assignment.label, type: 'kra-kpi', perspectives: [] }}
+                          library={displayLibrary}
                           groupLabel={assignment.label}
-                          assignedText={null}
+                          assignedText={!readOnly ? (group.prefillType === 'kra-kpi' ? 'Pre-fill: KRA + KPI' : group.prefillType === 'kra-only' ? 'Pre-fill: KRA only' : null) : null}
                           accent={accent}
-                          active={!!library}
-                          empty={!library}
-                          onSelect={() => openSlotEditor(group, assignment, library?.id || null)}
-                          onEdit={() => openSlotEditor(group, assignment, library?.id || null)}
-                          onDelete={library ? () => deleteLibrary(library.id) : null}
-                          showKpiPercent={library?.type === 'kra-kpi' && group.kpiRatingMode !== 'free-text'}
-                          selectionHint={library
-                            ? `${group.name}${group.segmentAttr ? ` · ${group.segmentAttr}` : ''}`
-                            : `Create library for ${assignment.label}`}
+                          active={!!library || (!libraryEnabled && prefillData.length > 0)}
+                          empty={libraryEnabled ? !library : prefillData.length === 0}
+                          setupLabels={!readOnly ? getGoalSetupLabels(group) : []}
+                          onSelect={readOnly && !((libraryEnabled ? !library : prefillData.length === 0))
+                            ? () => setViewingLibrary({
+                                library: displayLibrary,
+                                showKpiPercent: displayLibrary?.type === 'kra-kpi' && group.kpiRatingMode !== 'free-text',
+                              })
+                            : null}
+                          onEdit={!readOnly ? (libraryEnabled ? () => openSlotEditor(group, assignment, library?.id || null) : prefillOnly ? () => openPrefillEditor(group, assignment) : null) : null}
+                          onDelete={!readOnly ? (library ? () => deleteLibrary(library.id) : prefillOnly && prefillData.length > 0 ? () => updatePrefillAssignmentData(group.id, assignment.slotKey, []) : null) : null}
+                          showKpiPercent={displayLibrary?.type === 'kra-kpi' && group.kpiRatingMode !== 'free-text'}
+                          selectionHint={readOnly
+                            ? ((libraryEnabled ? library : prefillData.length > 0) ? 'Click to view details' : 'No data configured')
+                            : (libraryEnabled
+                                ? (library
+                                    ? `${group.name}${group.segmentAttr ? ` · ${group.segmentAttr}` : ''}${group.prefillType ? ' · pre-fill data is in Pre-fill Goals' : ''}`
+                                    : `Create library for ${assignment.label}`)
+                                : (prefillData.length ? 'Click Edit to update pre-fill data' : `Create pre-fill data for ${assignment.label}`))}
                         />
                       );
                     })}
@@ -9187,9 +12303,11 @@ function StepGoalLibrariesFlat({ config, update }) {
               )}
             </div>
 
+            {!readOnly && (
             <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
               <GoalLibrarySheetControls config={config} downloadConfig={templateScopeConfig} existingLibraries={libraries} onImported={handleImportedLibraries} onUploadErrors={setUploadErrors} />
             </div>
+            )}
           </div>
         </div>
       </div>
@@ -9218,6 +12336,7 @@ function StepGoalLibrariesFlat({ config, update }) {
         }
         buttonLabel="Confirm Libraries"
         onApply={() => update('goalLibrariesAppliedSnapshot', `confirmed_${Date.now()}`)}
+        readOnly={readOnly}
       />
     </div>
   );
@@ -9377,7 +12496,14 @@ const INITIAL = {
   managerOverride: 'Yes — full override', peerVisibility: 'Anonymous — aggregated only',
   finalRatingOwner: 'Weighted average of all levels',
   // Scale
-  scalePoints: 5, scaleDisplay: 'Number + label', ratingAppliesAt: 'KPI level — rolled up',
+  scalePreset: '5', scalePoints: 5, scaleLabels: {}, scaleRankCodes: {}, scaleRankRanges: {}, bandPreset: 'standard', scoreInputMode: 'dropdown',
+  scorePrecision: 'half',
+  ratingChoiceDisplay: 'number-label',
+  finalRatingDisplay: 'code-label',
+  commentRequiredAt: 'lowest',
+  managerCommentMode: 'overall',
+  managerRatingVisibleFrom: 'manager-rating',
+  finalRatingVisibleFrom: 'hr-review',
   // Goal creation flow
   goalCreationMode: 'admin-library',   // 'admin-library' | 'employee-self' | 'mixed' (legacy + new)
   goalLibraryScope: 'common',          // 'common' | 'by-attribute'
@@ -9432,30 +12558,75 @@ const INITIAL = {
   freezeGoalSetting: true, managerUnlockGoals: true, freezeSelfEval: true,
   hrReopenSelf: true, midYearRevision: false,
   // Targets
-  targetsEnabled: true, autoRating: true, managerOverrideAuto: true,
+  targetsEnabled: true, autoRating: true, managerOverrideAuto: true, autoRatingBands: [],
+  targetTypesAppliedSnapshot: null,
+  autoRatingAppliedSnapshot: null,
+  // Rating scale
+  scaleAppliedSnapshot: null,
   // Competencies
-  competenciesEnabled: true,
+  competenciesEnabled: true, competencyType: 'behavioural', maxCompetencies: 5, competencyWeight: 20, competencyRatedBy: 'manager', competencyAllowSelfRate: true,
   selectedCompetencies: ['Communication', 'Problem Solving', 'Teamwork', 'Ownership', 'Technical Expertise'],
+  competencyScope: 'org', competencyByGroup: {}, competencyByRole: {},
+  customCompetencies: { behavioural: [], functional: [], values: [], leadership: [] },
+  competenciesAppliedSnapshot: null,
   // Bell curve
   bellEnabled: true, bellPerDept: true, bellNotify: false,
   bellBands: [10, 20, 50, 15, 5],
+  bellTolerances: [2, 2, 5, 2, 2],
+  bellMode: 'soft',
+  bellPreset: 'standard',
+  bellAppliedSnapshot: null,
 };
 
 /* Ensures critical array fields are never null/undefined when loading persisted state */
 function normalizeConfig(raw) {
   const merged = { ...INITIAL, ...raw };
+  // Migrate old boolean visibility toggles to phase-gated values.
+  if (raw && raw.hideManagerRatingFromEmployee !== undefined && merged.managerRatingVisibleFrom === INITIAL.managerRatingVisibleFrom) {
+    merged.managerRatingVisibleFrom = raw.hideManagerRatingFromEmployee ? 'never' : 'manager-rating';
+  }
+  if (raw && raw.hideFinalRatingFromEmployee !== undefined && merged.finalRatingVisibleFrom === INITIAL.finalRatingVisibleFrom) {
+    merged.finalRatingVisibleFrom = raw.hideFinalRatingFromEmployee ? 'never' : 'hr-review';
+  }
+  // Coerce stored values to the per-field allowed set.
+  const managerIds = new Set(['manager-rating', 'hr-review', 'never']);
+  const finalIds   = new Set(['hr-review', 'never']);
+  if (!managerIds.has(merged.managerRatingVisibleFrom)) merged.managerRatingVisibleFrom = 'manager-rating';
+  if (!finalIds.has(merged.finalRatingVisibleFrom))   merged.finalRatingVisibleFrom   = 'hr-review';
+  delete merged.hideManagerRatingFromEmployee;
+  delete merged.hideFinalRatingFromEmployee;
   // Guarantee all fields that are accessed with .filter/.map/.includes/.length
   // are always arrays — persisted state can store null for these if it was corrupted
   if (!Array.isArray(merged.perspectives))     merged.perspectives     = INITIAL.perspectives;
   if (!Array.isArray(merged.ratingLevels))     merged.ratingLevels     = INITIAL.ratingLevels;
   if (!Array.isArray(merged.enabledModules))   merged.enabledModules   = INITIAL.enabledModules;
   if (!Array.isArray(merged.bellBands))        merged.bellBands        = INITIAL.bellBands;
+  if (!Array.isArray(merged.bellTolerances))   merged.bellTolerances   = INITIAL.bellTolerances;
+  if (merged.bellMode !== 'soft' && merged.bellMode !== 'hard') merged.bellMode = INITIAL.bellMode;
   if (!Array.isArray(merged.goalGroups))       merged.goalGroups       = INITIAL.goalGroups;
   if (!Array.isArray(merged.deferredGoalGroupNames)) merged.deferredGoalGroupNames = INITIAL.deferredGoalGroupNames;
   if (!Array.isArray(merged.goalLibraries))    merged.goalLibraries    = INITIAL.goalLibraries;
   if (!Array.isArray(merged.goalSegmentValues))merged.goalSegmentValues= INITIAL.goalSegmentValues;
   if (!Array.isArray(merged.goalLimitValues))  merged.goalLimitValues  = INITIAL.goalLimitValues;
   if (!Array.isArray(merged.selectedCompetencies)) merged.selectedCompetencies = INITIAL.selectedCompetencies;
+  if (merged.competencyScope !== 'org' && merged.competencyScope !== 'group' && merged.competencyScope !== 'group_role') merged.competencyScope = INITIAL.competencyScope;
+  if (!merged.competencyByGroup || typeof merged.competencyByGroup !== 'object' || Array.isArray(merged.competencyByGroup)) merged.competencyByGroup = INITIAL.competencyByGroup;
+  if (!merged.competencyByRole || typeof merged.competencyByRole !== 'object' || Array.isArray(merged.competencyByRole)) merged.competencyByRole = INITIAL.competencyByRole;
+  if (!merged.customCompetencies || typeof merged.customCompetencies !== 'object' || Array.isArray(merged.customCompetencies)) merged.customCompetencies = INITIAL.customCompetencies;
+  ['behavioural', 'functional', 'values', 'leadership'].forEach((k) => {
+    if (!Array.isArray(merged.customCompetencies[k])) merged.customCompetencies[k] = [];
+  });
+  delete merged.competencyAssignmentBy;
+  if (!merged.scaleLabels || typeof merged.scaleLabels !== 'object') merged.scaleLabels = INITIAL.scaleLabels;
+  if (!merged.scaleRankCodes || typeof merged.scaleRankCodes !== 'object') merged.scaleRankCodes = INITIAL.scaleRankCodes;
+  if (!merged.scaleRankRanges || typeof merged.scaleRankRanges !== 'object') merged.scaleRankRanges = INITIAL.scaleRankRanges;
+  if (!merged.scalePreset) merged.scalePreset = SCALE_PRESETS.includes(Number(merged.scalePoints)) ? String(merged.scalePoints) : 'custom';
+  if (!merged.scorePrecision) merged.scorePrecision = INITIAL.scorePrecision;
+  if (!merged.ratingChoiceDisplay) merged.ratingChoiceDisplay = INITIAL.ratingChoiceDisplay;
+  if (!merged.finalRatingDisplay) merged.finalRatingDisplay = INITIAL.finalRatingDisplay;
+  if (!Array.isArray(merged.autoRatingBands)) merged.autoRatingBands = INITIAL.autoRatingBands;
+  delete merged.autoRatingRules;
+  delete merged.autoRatingSelectedType;
   if (merged.prefillDataAppliedSnapshot === undefined) merged.prefillDataAppliedSnapshot = INITIAL.prefillDataAppliedSnapshot;
   merged.goalLibraries = normalizeGoalLibraries(merged.goalLibraries);
   merged.deferredGoalGroupNames = normalizeDeferredGoalGroups(merged.deferredGoalGroupNames);
@@ -9519,10 +12690,25 @@ function isStepComplete(stepId, config) {
     case 'hierarchy':
       return (config.ratingLevels || []).length >= 1;
     case 'scale':
-      return config.scalePoints > 0;
+      return isScaleConfigValid(config)
+        && config.scaleAppliedSnapshot === getScaleSnapshot(config);
     case 'targets':
+      if (config.targetsEnabled === false) return true;
+      return getTargetTypeValidation(getMergedTargetTypes(config), true).errors.length === 0
+        && !!config.targetTypesAppliedSnapshot;
+    case 'auto_rating':
+      if (config.autoRating === false) return true;
+      return config.scalePoints > 0
+        && getTargetTypeValidation(getMergedTargetTypes(config), config.targetsEnabled !== false).errors.length === 0
+        && !!config.autoRatingAppliedSnapshot;
     case 'competencies':
+      if (config.competenciesEnabled === false) return true;
+      return validateCompetencyConfig(config).errors.length === 0
+        && !!config.competenciesAppliedSnapshot;
     case 'bellcurve':
+      if (config.bellEnabled === false) return !!config.bellAppliedSnapshot;
+      return getBellBands(config).reduce((sum, value) => sum + (Number(value) || 0), 0) === 100
+        && config.bellAppliedSnapshot === getBellCurveSnapshot(config);
     case 'phases':
       return true;
     case 'summary':
@@ -9538,7 +12724,7 @@ function computeSetupProgress(config, visitedIterable) {
   const steps = getNavSteps(config);
   const totalSteps = steps.length;
   const visitedSet = visitedIterable instanceof Set ? visitedIterable : new Set(visitedIterable || []);
-  const completedCount = steps.filter((s, i) => visitedSet.has(i) && isStepComplete(s.id, config)).length;
+  const completedCount = steps.filter((s) => visitedSet.has(s.id) && isStepComplete(s.id, config)).length;
   const pct = totalSteps > 0 ? Math.round((completedCount / totalSteps) * 100) : 0;
   return { pct, completedCount, totalSteps };
 }
@@ -9547,7 +12733,7 @@ export default function PMSWizard({ onLaunched, orgKeyOverride, orgNameOverride 
   const persistedState = useMemo(() => loadWizardState(orgKeyOverride), [orgKeyOverride]);
   const [step, setStep]       = useState(() => persistedState && typeof persistedState.step === 'number' ? persistedState.step : 0);
   const [config, setConfig]   = useState(() => persistedState?.config ? normalizeConfig(persistedState.config) : INITIAL);
-  const [visited, setVisited] = useState(() => new Set(Array.isArray(persistedState?.visited) ? persistedState.visited : []));
+  const [visited, setVisited] = useState(() => new Set(Array.isArray(persistedState?.visited) ? persistedState.visited.filter((id) => typeof id === 'string') : []));
   const [stepNotice, setStepNotice] = useState(null); // { message, type: 'warn'|'info' }
   const [remoteHydrated, setRemoteHydrated] = useState(false);
   const workspace = useMemo(() => {
@@ -9569,7 +12755,7 @@ export default function PMSWizard({ onLaunched, orgKeyOverride, orgNameOverride 
       if (remoteState) {
         if (typeof remoteState.step === 'number') setStep(remoteState.step);
         if (remoteState.config) setConfig(normalizeConfig(remoteState.config));
-        if (Array.isArray(remoteState.visited)) setVisited(new Set(remoteState.visited));
+        if (Array.isArray(remoteState.visited)) setVisited(new Set(remoteState.visited.filter((id) => typeof id === 'string')));
       }
       setRemoteHydrated(true);
     });
@@ -9625,45 +12811,64 @@ export default function PMSWizard({ onLaunched, orgKeyOverride, orgNameOverride 
       setVisited(new Set());
     }
     setConfig(prev => {
-      const next = { ...prev, [key]: val };
-      if (key === 'goalLibraries') {
-        next.goalLibraries = normalizeGoalLibraries(val);
+      const patch = key === '__mergeConfig' && val && typeof val === 'object' ? val : { [key]: val };
+      const changedKeys = Object.keys(patch);
+      const next = { ...prev, ...patch };
+      if (changedKeys.includes('goalLibraries')) {
+        next.goalLibraries = normalizeGoalLibraries(next.goalLibraries);
       }
       const shouldResetLibraryData =
-        (key === 'frameworkId' && val !== prev.frameworkId) ||
-        key === 'perspectives' ||
-        (key === 'goalCreationMode' && val !== prev.goalCreationMode) ||
-        (key === 'goalSegmentAttr' && val !== prev.goalSegmentAttr) ||
-        (key === 'goalKpiMode' && val !== prev.goalKpiMode) ||
-        key === 'goalSegmentValues' ||
-        (key === 'goalLibraryScope' && val !== prev.goalLibraryScope);
+        (changedKeys.includes('frameworkId') && next.frameworkId !== prev.frameworkId) ||
+        changedKeys.includes('perspectives') ||
+        (changedKeys.includes('goalCreationMode') && next.goalCreationMode !== prev.goalCreationMode) ||
+        (changedKeys.includes('goalSegmentAttr') && next.goalSegmentAttr !== prev.goalSegmentAttr) ||
+        (changedKeys.includes('goalKpiMode') && next.goalKpiMode !== prev.goalKpiMode) ||
+        changedKeys.includes('goalSegmentValues') ||
+        (changedKeys.includes('goalLibraryScope') && next.goalLibraryScope !== prev.goalLibraryScope);
 
-      if (key === 'frameworkId') {
-        next.enabledModules = syncEnabledModules(val, prev.enabledModules);
+      if (changedKeys.includes('frameworkId')) {
+        next.enabledModules = syncEnabledModules(next.frameworkId, prev.enabledModules);
         next.perspectivesConfirmed = false;
         next.lastDeletedPerspective = null;
       }
-      if (key === 'perspectives') {
+      if (changedKeys.includes('perspectives')) {
         next.perspectivesConfirmed = false;
       }
-      if (key === 'goalSegmentAttr' && val !== prev.goalSegmentAttr) {
+      if (changedKeys.includes('goalSegmentAttr') && next.goalSegmentAttr !== prev.goalSegmentAttr) {
         next.goalSegmentValues = [];
         next.goalSegmentValuesConfirmed = false;
       }
-      if (key === 'goalKpiMode' && val !== prev.goalKpiMode) {
+      if (changedKeys.includes('goalKpiMode') && next.goalKpiMode !== prev.goalKpiMode) {
         next.goalEmployeeEdit = null;
       }
-      if (key === 'goalSegmentValues') {
+      if (changedKeys.includes('goalSegmentValues')) {
         next.goalSegmentValuesConfirmed = false;
       }
-      if (key === 'goalLibraryScope' && val !== prev.goalLibraryScope) {
+      if (changedKeys.includes('goalLibraryScope') && next.goalLibraryScope !== prev.goalLibraryScope) {
         next.goalSegmentValuesConfirmed = false;
       }
-      if (key === 'targetsEnabled' && val === false) {
+      if (changedKeys.includes('targetsEnabled') && next.targetsEnabled === false) {
         next.autoRating = false;
         next.managerOverrideAuto = false;
       }
-      if ((key === 'managerLevels' && val !== prev.managerLevels) || (key === 'requireEmail' && val !== prev.requireEmail)) {
+      if (changedKeys.includes('targetTypes') || changedKeys.includes('targetsEnabled')) {
+        next.targetTypesAppliedSnapshot = null;
+        next.autoRatingAppliedSnapshot = null;
+      }
+      if (changedKeys.some((item) => ['scalePreset','scalePoints','scaleLabels','scaleRankCodes','scaleRankRanges','scoreInputMode','scorePrecision','ratingChoiceDisplay','finalRatingDisplay','commentRequiredAt','managerRatingVisibleFrom','finalRatingVisibleFrom'].includes(item))) {
+        next.scaleAppliedSnapshot = null;
+        next.autoRatingAppliedSnapshot = null;
+      }
+      if (changedKeys.some((item) => ['autoRating','managerOverrideAuto','autoRatingBands'].includes(item))) {
+        next.autoRatingAppliedSnapshot = null;
+      }
+      if (changedKeys.some((item) => ['competenciesEnabled','competencyType','maxCompetencies','competencyWeight','competencyRatedBy','competencyAllowSelfRate','selectedCompetencies','competencyScope','competencyByGroup','competencyByRole','customCompetencies'].includes(item))) {
+        next.competenciesAppliedSnapshot = null;
+      }
+      if (
+        (changedKeys.includes('managerLevels') && next.managerLevels !== prev.managerLevels) ||
+        (changedKeys.includes('requireEmail') && next.requireEmail !== prev.requireEmail)
+      ) {
         next.empSettingsAppliedSnapshot = null;
         // Column structure of the upload sheet changes — old data is now incompatible
         if (prev.employeeUploadData) {
@@ -9671,17 +12876,20 @@ export default function PMSWizard({ onLaunched, orgKeyOverride, orgNameOverride 
           setStepNotice({ type: 'warn', message: 'Employee upload data was cleared because the column structure changed. Re-confirm settings and re-upload.' });
         }
       }
-      if ((key === 'goalGroups' || key === 'goalLibraries') && prev.employeeUploadData) {
+      if (changedKeys.some((item) => item === 'goalGroups' || item === 'goalLibraries') && prev.employeeUploadData) {
         // Only clear uploaded data if the value actually changed — a no-op write
         // (same reference or deep-equal) shouldn't invalidate a prior upload.
-        const changed = JSON.stringify(prev[key]) !== JSON.stringify(val);
+        const changed = changedKeys.some((item) => (
+          (item === 'goalGroups' || item === 'goalLibraries') &&
+          JSON.stringify(prev[item]) !== JSON.stringify(next[item])
+        ));
         if (changed) {
           next.employeeUploadData = null;
           setStepNotice({ type: 'warn', message: 'Employee upload data was cleared because group or library allotment changed. Re-upload to recalculate assignment.' });
         }
       }
-      if (key === 'deferredGoalGroupNames') {
-        next.deferredGoalGroupNames = normalizeDeferredGoalGroups(val);
+      if (changedKeys.includes('deferredGoalGroupNames')) {
+        next.deferredGoalGroupNames = normalizeDeferredGoalGroups(next.deferredGoalGroupNames);
         if (prev.employeeUploadData) {
           next.employeeUploadData = attachGoalLibraryToEmployees(prev.employeeUploadData, next);
         }
@@ -9698,10 +12906,12 @@ export default function PMSWizard({ onLaunched, orgKeyOverride, orgNameOverride 
   // Mark the step we're leaving as visited so the sidebar keeps its
   // ✓ status when the user navigates away (back, sidebar, or sideways).
   function markCurrentVisited() {
+    const stepId = navSteps[step]?.id;
+    if (!stepId) return;
     setVisited(prev => {
-      if (prev.has(step)) return prev;
+      if (prev.has(stepId)) return prev;
       const s = new Set(prev);
-      s.add(step);
+      s.add(stepId);
       return s;
     });
   }
@@ -9783,10 +12993,10 @@ export default function PMSWizard({ onLaunched, orgKeyOverride, orgNameOverride 
         return <StepHierarchy key="hierarchy" config={config} update={update} />;
       case 'scale':
         return <StepScale key="scale" config={config} update={update} />;
-      case 'targets': {
-        const groupsStepIdx = navSteps.findIndex(s => s.id === 'groups');
-        return <StepTargets key="targets" config={config} update={update} onOpenGroups={groupsStepIdx >= 0 ? () => setStep(groupsStepIdx) : null} />;
-      }
+      case 'targets':
+        return <StepTargets key="targets" config={config} update={update} />;
+      case 'auto_rating':
+        return <StepAutoRating key="auto_rating" config={config} update={update} />;
       case 'competencies':
         return <StepCompetencies key="competencies" config={config} update={update} />;
       case 'bellcurve':
@@ -9800,7 +13010,7 @@ export default function PMSWizard({ onLaunched, orgKeyOverride, orgNameOverride 
     }
   });
 
-  const completedCount = navSteps.filter((s, i) => visited.has(i) && isStepComplete(s.id, config)).length;
+  const completedCount = navSteps.filter((s) => visited.has(s.id) && isStepComplete(s.id, config)).length;
   const pct = Math.round((completedCount / totalSteps) * 100);
   const currentStepId = navSteps[safeStep]?.id;
   const canProceed = isStepComplete(currentStepId, config);
@@ -9853,10 +13063,14 @@ export default function PMSWizard({ onLaunched, orgKeyOverride, orgNameOverride 
       <aside style={{ width: 230, minWidth: 230, background: '#fff', borderRight: '1.5px solid #E9EDF2', display: 'flex', flexDirection: 'column', position: 'sticky', top: 0, height: '100vh', overflowY: 'auto' }}>
         <div style={{ padding: '20px 18px', borderBottom: '1px solid #E9EDF2' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-            <img src={zaroLogo} alt="Zaro HR" style={{ width: 34, height: 34, borderRadius: 10, objectFit: 'cover' }} />
-            <div>
-              <div style={{ fontSize: 14, fontWeight: 700, color: '#0D1117' }}>Zaro HR</div>
-              <div style={{ fontSize: 11, color: '#9CA3AF', marginTop: 2 }}>Organization admin / PMS configuration wizard</div>
+            <img src={zaroLogo} alt="Zaro HR" style={{ width: 36, height: 36, borderRadius: 9, objectFit: 'cover' }} />
+            <div style={{ minWidth: 0 }}>
+              <div style={{ fontSize: 16, fontWeight: 700, color: '#0D1117', lineHeight: 1.1 }}>
+                Zaro<span style={{ color: '#FFBF00' }}>HR</span>
+              </div>
+              <div style={{ fontSize: 10, color: '#64748B', marginTop: 4, letterSpacing: '1.1px', textTransform: 'uppercase', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }} title={workspace.orgName || ''}>
+                {workspace.orgName || 'PMS Configuration'}
+              </div>
             </div>
           </div>
           <div style={{ marginTop: 12 }}>
@@ -9871,7 +13085,7 @@ export default function PMSWizard({ onLaunched, orgKeyOverride, orgNameOverride 
         <div style={{ padding: '10px 0', flex: 1 }}>
           {navSteps.map((s, i) => {
             const isActive   = i === safeStep;
-            const wasVisited = visited.has(i);
+            const wasVisited = visited.has(s.id);
             const isDone     = wasVisited && isStepComplete(s.id, config);
             const isInvalid  = wasVisited && !isStepComplete(s.id, config);
             return (
@@ -9901,33 +13115,35 @@ export default function PMSWizard({ onLaunched, orgKeyOverride, orgNameOverride 
           })}
         </div>
         <div style={{ padding: '14px 16px', borderTop: '1px solid #E9EDF2', fontSize: 11.5, color: '#9CA3AF' }}>
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
-            <div>
-              <div style={{ fontWeight: 600, color: '#374151', marginBottom: 1 }}>HR Admin</div>
-              <div>{workspace.orgName}</div>
-            </div>
-            <button
-              type="button"
-              onClick={saveAndExitSetup}
-              style={{
-                padding: '7px 12px',
-                borderRadius: 8,
-                border: '1px solid #CBD5E1',
-                background: '#F8FAFC',
-                color: '#374151',
-                fontSize: 12,
-                fontWeight: 700,
-                cursor: 'pointer',
-                fontFamily: 'inherit',
-                whiteSpace: 'nowrap',
-                display: 'flex',
-                alignItems: 'center',
-                gap: 5,
-              }}
-            >
-              💾 Save & Exit
-            </button>
-          </div>
+          <button
+            type="button"
+            onClick={saveAndExitSetup}
+            title="Sign out"
+            style={{
+              width: '100%',
+              padding: '8px 12px',
+              borderRadius: 8,
+              border: '1px solid #CBD5E1',
+              background: '#F8FAFC',
+              color: '#374151',
+              fontSize: 12,
+              fontWeight: 700,
+              cursor: 'pointer',
+              fontFamily: 'inherit',
+              whiteSpace: 'nowrap',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              gap: 6,
+            }}
+          >
+            <svg width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
+              <polyline points="16 17 21 12 16 7" />
+              <line x1="21" y1="12" x2="9" y2="12" />
+            </svg>
+            <span>Sign out</span>
+          </button>
         </div>
       </aside>
 
@@ -9963,7 +13179,7 @@ export default function PMSWizard({ onLaunched, orgKeyOverride, orgNameOverride 
         )}
 
         {/* CHANGES DETECTED STRIP — shown when revisiting a step and changes are pending */}
-        {visited.has(safeStep) && !canProceed && (
+        {currentStepId !== 'scale' && visited.has(currentStepId) && !canProceed && (
           <div style={{ padding: '9px 32px', background: '#FEF3C7', borderTop: '1.5px solid #FDE68A', display: 'flex', alignItems: 'center', gap: 10 }}>
             <span style={{ fontSize: 12.5, color: '#78350F', fontWeight: 500 }}>
               You've made changes — confirm them below before continuing. Downstream steps that depend on this configuration will need to be completed again.

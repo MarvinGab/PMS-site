@@ -19,6 +19,10 @@ import {
   subscribeToScopedState,
 } from '../backend/stateStore';
 import { sendCustomBroadcast } from '../backend/emailService';
+import { getCurrentSubPhase, SUB_PHASE } from '../backend/cyclePhase';
+import { hydrateRatings, readRatings, submitEmployeeStage, setEmployeeStage, subscribeToRatings } from '../backend/ratingsStore';
+import SelfEvalPage from './SelfEvalPage';
+import ManagerEvalPage from './ManagerEvalPage';
 
 const EMP_SESSION_KEY = 'zarohr_emp_session';
 const WIZARD_STATE_KEY = 'zarohr_pms_wizard_state_v1';
@@ -26,6 +30,7 @@ const APP_DATA_KEY = 'zarohr_app_data_v1';
 const GOAL_WORKFLOW_KEY = 'zarohr_goal_workflow_v1';
 const GOAL_DELETE_UNDO_MS = 5000;
 const GOAL_MOVE_ANIM_MS = 320;
+const KPI_ARM_RESET_MS = 4000;
 const MESSAGES_KEY = 'zarohr_messages_v1';
 const REMINDER_COOLDOWN_MS = 4 * 60 * 60 * 1000;
 
@@ -111,7 +116,7 @@ Thanks,
 // Flip to `true` to re-enable the self-evaluation phase, rating widgets, and scale-colour UI.
 // Every rating-specific code path checks this flag, so the surfaces can come back without a
 // code-archaeology exercise.
-const RATING_ENABLED = false;
+const RATING_ENABLED = true;
 
 const ALL_PHASES = [
   { id: 'goal-setting', label: 'Goal setting', icon: '🎯' },
@@ -126,11 +131,38 @@ const PHASES = RATING_ENABLED ? ALL_PHASES : ALL_PHASES.filter((p) => !p.ratingO
 const SCALE_DEFAULTS = {
   3: [{ n: 1, l: 'Below Expectations' }, { n: 2, l: 'Meets Expectations' }, { n: 3, l: 'Exceeds Expectations' }],
   4: [{ n: 1, l: 'Below Expectations' }, { n: 2, l: 'Meets Expectations' }, { n: 3, l: 'Exceeds Expectations' }, { n: 4, l: 'Outstanding' }],
+  7: [{ n: 1, l: 'Unsatisfactory' }, { n: 2, l: 'Needs Improvement' }, { n: 3, l: 'Partially Meets' }, { n: 4, l: 'Meets Expectations' }, { n: 5, l: 'Exceeds Expectations' }, { n: 6, l: 'Strong Performance' }, { n: 7, l: 'Outstanding' }],
   5: [{ n: 1, l: 'Needs Improvement' }, { n: 2, l: 'Below Expectations' }, { n: 3, l: 'Meets Expectations' }, { n: 4, l: 'Exceeds Expectations' }, { n: 5, l: 'Outstanding' }],
-  10: Array.from({ length: 10 }, (_, i) => ({ n: i + 1, l: `Level ${i + 1}` })),
+  10: Array.from({ length: 10 }, (_, i) => ({ n: i + 1, l: '' })),
 };
 
 const SCALE_COLORS = ['#DC2626', '#F97316', '#FBBF24', '#84CC16', '#22C55E', '#10B981', '#14B8A6', '#3B82F6', '#8B5CF6', '#EC4899'];
+
+function getConfiguredScale(config = {}) {
+  const cfg = config || {};
+  const points = Math.max(2, Math.min(10, Number(cfg.scalePoints) || 5));
+  const defaults = SCALE_DEFAULTS[points] || Array.from({ length: points }, (_, i) => ({ n: i + 1, l: '' }));
+  const labels = cfg.scaleLabels || {};
+  const codes = cfg.scaleRankCodes || {};
+  return defaults.map((item) => ({
+    ...item,
+    l: String(labels[item.n] || item.l),
+    code: String(codes[item.n] ?? item.n),
+  }));
+}
+
+function getScoreStep(config = {}) {
+  const cfg = config || {};
+  if (cfg.scorePrecision === 'integer') return 1;
+  if (cfg.scorePrecision === 'one-decimal') return 0.1;
+  return 0.5;
+}
+
+function roundToStep(value, step) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return 1;
+  return Math.round((Math.round(n / step) * step) * 100) / 100;
+}
 // Perspective colours — intentionally EXCLUDE red / orange / green families. Those hues are
 // reserved for status semantics (rejected / pending / approved) elsewhere in the app, so
 // using them for decorative perspective stripes makes a blue-coded goal look "approved" or
@@ -244,6 +276,47 @@ function dedupeGoals(goals = []) {
     if (seen.has(key)) return false;
     seen.add(key);
     return true;
+  });
+}
+
+function mergeUploadedTargetsIntoGoals(currentGoals = [], configuredGoals = []) {
+  if (!Array.isArray(currentGoals) || currentGoals.length === 0 || !Array.isArray(configuredGoals) || configuredGoals.length === 0) {
+    return currentGoals || [];
+  }
+  const configuredByKey = new Map();
+  configuredGoals.forEach((goal) => {
+    const keys = getGoalLibraryClaimKeys(goal).map((key) => sanitizeText(key).toLowerCase()).filter(Boolean);
+    keys.forEach((key) => configuredByKey.set(key, goal));
+  });
+
+  return currentGoals.map((goal) => {
+    const goalKeys = getGoalLibraryClaimKeys(goal).map((key) => sanitizeText(key).toLowerCase()).filter(Boolean);
+    const configuredGoal = goalKeys.map((key) => configuredByKey.get(key)).find(Boolean);
+    if (!configuredGoal) return goal;
+
+    const nextGoal = { ...goal };
+    if (!sanitizeText(nextGoal.target) && sanitizeText(configuredGoal.target)) nextGoal.target = configuredGoal.target;
+    if ((!nextGoal.targetType || nextGoal.targetType === 'none') && configuredGoal.targetType) nextGoal.targetType = configuredGoal.targetType;
+
+    const configuredKpis = Array.isArray(configuredGoal.kpis) ? configuredGoal.kpis : [];
+    if (Array.isArray(nextGoal.kpis) && nextGoal.kpis.length > 0 && configuredKpis.length > 0) {
+      const configuredKpisByKey = new Map();
+      configuredKpis.forEach((kpi) => {
+        [kpi.id, kpi.name, sanitizeText(kpi.name)].map((key) => sanitizeText(key).toLowerCase()).filter(Boolean)
+          .forEach((key) => configuredKpisByKey.set(key, kpi));
+      });
+      nextGoal.kpis = nextGoal.kpis.map((kpi) => {
+        const kpiKeys = [kpi.id, kpi.name, sanitizeText(kpi.name)].map((key) => sanitizeText(key).toLowerCase()).filter(Boolean);
+        const configuredKpi = kpiKeys.map((key) => configuredKpisByKey.get(key)).find(Boolean);
+        if (!configuredKpi) return kpi;
+        const nextKpi = { ...kpi };
+        if (!sanitizeText(nextKpi.target) && sanitizeText(configuredKpi.target)) nextKpi.target = configuredKpi.target;
+        if ((!nextKpi.targetType || nextKpi.targetType === 'none') && configuredKpi.targetType) nextKpi.targetType = configuredKpi.targetType;
+        return nextKpi;
+      });
+    }
+
+    return nextGoal;
   });
 }
 
@@ -418,6 +491,9 @@ function createKpi(base = {}, source = 'employee') {
     name: sanitizeText(base.name || ''),
     weight: String(base.weight ?? '').trim(),
     target: sanitizeText(base.target || ''),
+    // Blank target type defaults to Free text so target values are never orphaned.
+    // Users can still explicitly choose "No target" from the picker.
+    targetType: base.targetType || 'text',
     source,
   };
 }
@@ -428,6 +504,9 @@ function createKra(base = {}) {
     name: sanitizeText(base.name || ''),
     weight: String(base.weight ?? '').trim(),
     perspName: sanitizeText(base.perspName || ''),
+    // KRA-level target (only shown/used when the group's targetLevel === 'KRA').
+    target: sanitizeText(base.target || ''),
+    targetType: base.targetType || 'text',
     kpis: (base.kpis || []).map((kpi) => createKpi(kpi, kpi.source || 'library')),
   };
 }
@@ -440,10 +519,13 @@ function resolveGroupAccess(group) {
   const prefill = group.prefillType || null; // null | 'kras-only' | 'kra-kpi'
   const canEdit = group.canEditOwn !== false;
   const kpiRatingMode = group.kpiRatingMode === 'free-text' ? 'free-text' : 'rated';
+  // KPI is the default level. Legacy 'inherit' / blank values fall back to KPI here;
+  // the org-default merge in effectiveConfig still wins if the group doesn't set its own.
+  const targetLevel = group.targetLevel === 'KRA' ? 'KRA' : (group.targetLevel === 'KPI' ? 'KPI' : null);
 
   if (!prefill) {
     // No pre-fill: employee creates from scratch (Open Canvas / Guided Scratch)
-    return { goalCreationMode: 'employee-self', goalEmployeeEdit: 'edit-freely', goalKpiMode: group.libraryType || 'kra-kpi', kpiRatingMode };
+    return { goalCreationMode: 'employee-self', goalEmployeeEdit: 'edit-freely', goalKpiMode: group.libraryType || 'kra-kpi', kpiRatingMode, targetLevel };
   }
   if (!canEdit) {
     // Pre-filled, no editing allowed
@@ -454,10 +536,11 @@ function resolveGroupAccess(group) {
       goalEmployeeEdit: prefill === 'kra-kpi' ? 'locked' : 'add-kpis',
       goalKpiMode: prefill,
       kpiRatingMode,
+      targetLevel,
     };
   }
   // Pre-filled + can edit (Prefill+Customize / Prefill+Guided)
-  return { goalCreationMode: 'admin-library', goalEmployeeEdit: 'edit-freely', goalKpiMode: prefill, kpiRatingMode };
+  return { goalCreationMode: 'admin-library', goalEmployeeEdit: 'edit-freely', goalKpiMode: prefill, kpiRatingMode, targetLevel };
 }
 
 function buildInitialGoals(config, employee, group, libraries) {
@@ -711,23 +794,101 @@ function getPerspectiveColor(kra, perspectives, goalIndex = 0) {
 }
 
 const TARGET_TYPES = [
+  // 'none' is the default — picks "No target" so the value box hides and nothing is required.
+  { id: 'none',       icon: '∅',  label: 'No target',   example: '' },
   { id: 'text',       icon: 'Aa', label: 'Free text',   example: 'Target outcome (e.g. signed MoU)' },
-  { id: 'number',     icon: '#',  label: 'Number',      example: 'Target number (e.g. 5000)' },
-  { id: 'currency',   icon: '₹',  label: 'Currency',    example: 'Target amount (e.g. 5 Cr)' },
-  { id: 'percentage', icon: '%',  label: 'Percentage',  example: 'Target % (e.g. 95)' },
+  { id: 'number',     icon: '#',  label: 'Number',      example: 'Target number (e.g. 5000)', unitPosition: 'suffix' },
+  { id: 'currency',   icon: '₹',  label: 'Currency',    example: 'Target amount (e.g. 5 Cr)', unit: '₹', unitPosition: 'prefix' },
+  { id: 'neg_number',   icon: '#↓',  label: 'Negative number',   example: 'Lower is better (e.g. 3 defects)', unitPosition: 'suffix', lowerIsBetter: true },
+  { id: 'neg_currency', icon: '₹↓',  label: 'Negative currency', example: 'Lower is better (e.g. cost ₹5000)', unit: '₹', unitPosition: 'prefix', lowerIsBetter: true },
+  { id: 'percentage', icon: '%',  label: 'Percentage',  example: 'Target % (e.g. 95)', unit: '%', unitPosition: 'suffix' },
   { id: 'duration',   icon: '⧗',  label: 'Duration',    example: 'Target duration (e.g. < 24 hrs)' },
   { id: 'date',       icon: '📅', label: 'Date',        example: 'Target date' },
   { id: 'rating',     icon: '★',  label: 'Rating',      example: 'Target rating (e.g. 4.5 / 5)' },
   { id: 'milestone',  icon: '✓',  label: 'Milestone',   example: 'Target milestone (e.g. Phase 2 live)' },
 ];
 
-function TargetField({ value, onValueChange, type, onTypeChange }) {
+function canonicalTargetTypeId(type = {}) {
+  const rawId = String(type?.id || '').trim().toLowerCase();
+  const name = String(type?.name || '').trim().toLowerCase();
+  if (rawId === 'tt_default_number' || name === 'number') return 'number';
+  if (rawId === 'tt_default_percentage' || name === 'percentage' || name === '%' || name === 'percent') return 'percentage';
+  if (rawId === 'tt_default_currency' || name === 'currency' || name === '₹' || name === 'inr') return 'currency';
+  if (rawId === 'tt_neg_number' || name === 'negative number') return 'neg_number';
+  if (rawId === 'tt_neg_currency' || name === 'negative currency') return 'neg_currency';
+  if (rawId === 'tt_default_yesno' || name === 'yes / no' || name === 'yes/no' || name === 'yes-no') return 'yesno';
+  if (rawId === 'tt_default_text' || name === 'text' || name === 'free text') return 'text';
+  return rawId || name.replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '') || 'text';
+}
+
+function buildTargetTypeOptions(config = {}) {
+  const baseById = new Map(TARGET_TYPES.map((type) => [type.id, type]));
+  const configured = Array.isArray(config?.targetTypes) ? config.targetTypes : [];
+  const visibleConfigured = configured
+    .filter((targetType) => !targetType?.hidden && String(targetType?.name || '').trim())
+    .map((targetType) => {
+      const id = canonicalTargetTypeId(targetType);
+      const base = baseById.get(id) || {};
+      const unit = String(targetType?.unit || '').trim();
+      return {
+        id,
+        icon: base.icon || (targetType?.isNumeric ? '#' : 'Aa'),
+        label: String(targetType.name).trim(),
+        example: base.example || (targetType?.isNumeric
+          ? `Target value${unit ? ` (${unit})` : ''}`
+          : 'Target outcome'),
+        unit,
+        unitPosition: targetType?.unitPosition === 'prefix' ? 'prefix' : (base.unitPosition || 'suffix'),
+        isNumeric: !!targetType?.isNumeric,
+        lowerIsBetter: !!(targetType?.lowerIsBetter ?? base.lowerIsBetter),
+        hasMin: !!targetType?.hasMin,
+        min: targetType?.min,
+        hasMax: !!targetType?.hasMax,
+        max: targetType?.max,
+      };
+    });
+
+  const source = visibleConfigured.length > 0 ? visibleConfigured : TARGET_TYPES.slice(1);
+  const seen = new Set(['none']);
+  const deduped = source.filter((targetType) => {
+    const key = String(targetType.id || targetType.label || '').toLowerCase();
+    if (!key || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  return [TARGET_TYPES[0], ...deduped];
+}
+
+function getTargetCapIssues(targetValue, targetTypeId, targetTypes = [], label = 'Target') {
+  const value = sanitizeText(targetValue);
+  if (!value || targetTypeId === 'none') return [];
+  const targetType = targetTypes.find((type) => type.id === targetTypeId);
+  if (!targetType?.isNumeric || (!targetType.hasMin && !targetType.hasMax)) return [];
+  const numericValue = Number(String(value).replace(/,/g, ''));
+  const unit = sanitizeText(targetType.unit || '');
+  const suffix = unit ? ` ${unit}` : '';
+  const issues = [];
+  if (!Number.isFinite(numericValue)) {
+    issues.push({ kind: 'error', text: `${label} must be numeric for ${targetType.label}` });
+    return issues;
+  }
+  if (targetType.hasMin && Number.isFinite(Number(targetType.min)) && numericValue < Number(targetType.min)) {
+    issues.push({ kind: 'error', text: `${label} must be at least ${targetType.min}${suffix}` });
+  }
+  if (targetType.hasMax && Number.isFinite(Number(targetType.max)) && numericValue > Number(targetType.max)) {
+    issues.push({ kind: 'error', text: `${label} must be at most ${targetType.max}${suffix}` });
+  }
+  return issues;
+}
+
+function TargetField({ value, onValueChange, type, onTypeChange, targetTypes }) {
   const [open, setOpen] = useState(false);
   const [pos, setPos] = useState(null);
   const wrapRef = useRef(null);
   const btnRef = useRef(null);
   const popRef = useRef(null);
-  const current = TARGET_TYPES.find((t) => t.id === type) || TARGET_TYPES[0];
+  const options = targetTypes?.length ? targetTypes : TARGET_TYPES;
+  const current = options.find((t) => t.id === type) || TARGET_TYPES.find((t) => t.id === type) || options[0] || TARGET_TYPES[0];
 
   const POP_W = 220;
   const POP_H = 320;
@@ -775,8 +936,10 @@ function TargetField({ value, onValueChange, type, onTypeChange }) {
     };
   }, [open]);
 
-  const showPrefix = type === 'currency';
-  const showSuffix = type === 'percentage';
+  const isNone = type === 'none';
+  const currentUnit = String(current.unit || '').trim();
+  const showPrefix = !!currentUnit && (current.unitPosition === 'prefix' || (type === 'currency' && current.unitPosition !== 'suffix'));
+  const showSuffix = !!currentUnit && !showPrefix;
   const inputType = type === 'date' ? 'date' : 'text';
 
   return (
@@ -791,18 +954,25 @@ function TargetField({ value, onValueChange, type, onTypeChange }) {
       >
         {current.icon}
       </button>
-      {showPrefix && (
-        <span style={{ padding: '0 2px 0 8px', display: 'flex', alignItems: 'center', color: '#64748B', fontSize: 13, fontWeight: 600 }}>₹</span>
+      {showPrefix && !isNone && (
+        <span style={{ padding: '0 2px 0 8px', display: 'flex', alignItems: 'center', color: '#64748B', fontSize: 13, fontWeight: 600 }}>{currentUnit || '₹'}</span>
       )}
-      <input
-        type={inputType}
-        value={value}
-        onChange={(e) => onValueChange(e.target.value)}
-        placeholder={current.example}
-        style={{ flex: 1, minWidth: 0, width: '100%', padding: '9px 10px', border: 'none', outline: 'none', fontFamily: 'inherit', fontSize: 13, background: 'transparent' }}
-      />
-      {showSuffix && (
-        <span style={{ padding: '0 8px 0 2px', display: 'flex', alignItems: 'center', color: '#64748B', fontSize: 13, fontWeight: 600 }}>%</span>
+      {isNone ? (
+        // "No target" — picker stays so user can switch types, but no value box is shown.
+        <span style={{ flex: 1, minWidth: 0, padding: '9px 10px', color: '#94A3B8', fontSize: 13, fontStyle: 'italic', fontFamily: 'inherit' }}>
+          No target set
+        </span>
+      ) : (
+        <input
+          type={inputType}
+          value={value}
+          onChange={(e) => onValueChange(e.target.value)}
+          placeholder={current.example}
+          style={{ flex: 1, minWidth: 0, width: '100%', padding: '9px 10px', border: 'none', outline: 'none', fontFamily: 'inherit', fontSize: 13, background: 'transparent' }}
+        />
+      )}
+      {showSuffix && !isNone && (
+        <span style={{ padding: '0 8px 0 2px', display: 'flex', alignItems: 'center', color: '#64748B', fontSize: 13, fontWeight: 600 }}>{currentUnit}</span>
       )}
       {open && pos && typeof document !== 'undefined' && createPortal(
         <div
@@ -816,13 +986,26 @@ function TargetField({ value, onValueChange, type, onTypeChange }) {
           }}
           onWheel={(e) => e.stopPropagation()}
         >
-          {TARGET_TYPES.map((t) => {
+          {options.map((t) => {
             const active = t.id === type;
+            const capText = t.isNumeric
+              ? [
+                  t.unit ? `Unit: ${t.unit}` : '',
+                  t.hasMin ? `Min ${t.min}` : '',
+                  t.hasMax ? `Max ${t.max}` : '',
+                ].filter(Boolean).join(' · ')
+              : '';
             return (
               <button
                 key={t.id}
                 type="button"
-                onClick={() => { onTypeChange(t.id); setOpen(false); }}
+                onClick={() => {
+                  onTypeChange(t.id);
+                  // Switching to "No target" clears any leftover value so it doesn't
+                  // resurface if the user later switches back to a typed mode.
+                  if (t.id === 'none' && value) onValueChange('');
+                  setOpen(false);
+                }}
                 style={{ width: '100%', display: 'flex', alignItems: 'center', gap: 10, padding: '7px 8px', borderRadius: 8, border: 'none', background: active ? '#EFF6FF' : 'transparent', cursor: 'pointer', fontFamily: 'inherit', textAlign: 'left' }}
                 onMouseEnter={(e) => { if (!active) e.currentTarget.style.background = '#F8FAFC'; }}
                 onMouseLeave={(e) => { if (!active) e.currentTarget.style.background = 'transparent'; }}
@@ -830,7 +1013,7 @@ function TargetField({ value, onValueChange, type, onTypeChange }) {
                 <span style={{ width: 24, height: 24, display: 'flex', alignItems: 'center', justifyContent: 'center', borderRadius: 7, background: active ? '#DBEAFE' : '#F1F5F9', fontSize: 12.5, fontWeight: 700, color: active ? '#1D4ED8' : '#475569', flexShrink: 0 }}>{t.icon}</span>
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ fontSize: 12.5, fontWeight: 600, color: '#0F172A', lineHeight: 1.2 }}>{t.label}</div>
-                  <div style={{ fontSize: 10.5, color: '#94A3B8', marginTop: 1 }}>{t.example}</div>
+                  <div style={{ fontSize: 10.5, color: '#94A3B8', marginTop: 1 }}>{capText || t.example}</div>
                 </div>
               </button>
             );
@@ -1003,6 +1186,7 @@ function getGoalIssues(goal, { config, accessMode, perspectives, isEditableStruc
   const kpis = goal.kpis || [];
   const shouldValidateKpiWeights = config?.kpiRatingMode !== 'free-text';
   const kpiRowIssues = getKpiRowIssues(goal, { requireWeights: shouldValidateKpiWeights });
+  const targetTypes = buildTargetTypeOptions(config);
 
   // Structural checks on a locked (already-approved) goal still surface as a card-level
   // error so a broken prior-round approval shows up on its own card instead of only as a
@@ -1039,6 +1223,10 @@ function getGoalIssues(goal, { config, accessMode, perspectives, isEditableStruc
     issues.push({ kind: 'error', text: 'Add at least one KPI' });
   }
 
+  if (config?.targetsEnabled !== false && config?.targetLevel === 'KRA') {
+    issues.push(...getTargetCapIssues(goal.target, goal.targetType || (goal.target ? 'text' : 'none'), targetTypes, 'KRA target'));
+  }
+
   // KPI-level checks — run in ALL modes. The sum-vs-goal-weight check was previously
   // gated behind add-kpis mode; that gap let library-driven plans submit with mismatched
   // KPI weights. It now runs universally.
@@ -1048,6 +1236,12 @@ function getGoalIssues(goal, { config, accessMode, perspectives, isEditableStruc
     kpis.forEach((kpi) => {
       const kpiWeight = Number(kpi.weight);
       if (Number.isFinite(kpiWeight) && kpiWeight > 0) kpiWeightTotal += kpiWeight;
+    });
+  }
+  if (config?.targetsEnabled !== false && config?.targetLevel !== 'KRA') {
+    kpis.forEach((kpi, index) => {
+      const kpiName = sanitizeText(kpi.name) || `KPI ${index + 1}`;
+      issues.push(...getTargetCapIssues(kpi.target, kpi.targetType || (kpi.target ? 'text' : 'none'), targetTypes, `${kpiName} target`));
     });
   }
   if (shouldValidateKpiWeights && kpis.length > 0 && Number.isFinite(goalWeight) && goalWeight > 0 &&
@@ -1940,6 +2134,19 @@ export default function EmployeePage() {
     const org = (appData?.organizationsData || []).find((item) => item.key === (session?.orgKey || ''));
     return org?.currentPhase || 'goal-setting';
   }, [appData, session]);
+  // Calendar-driven sub-phase — source of truth for which rating page is open.
+  // Distinct from `currentPhase` (DB flag, legacy) so we can roll forward
+  // without breaking the existing goal-plan UI.
+  const calendarSubPhase = useMemo(() => {
+    const org = (appData?.organizationsData || []).find((item) => item.key === (session?.orgKey || ''));
+    return getCurrentSubPhase(org);
+  }, [appData, session]);
+  const isManagerForSomeone = useMemo(() => {
+    if (!session?.empCode) return false;
+    const code = String(session.empCode).trim().toUpperCase();
+    const employees = config?.employeeUploadData?.employees || [];
+    return employees.some((e) => String(e['Reporting Manager Code'] || '').trim().toUpperCase() === code);
+  }, [config, session]);
   const orgBrand = useMemo(() => {
     const org = (appData?.organizationsData || []).find((item) => item.key === (session?.orgKey || ''));
     const cachedBrand = readOrgBrandCacheSync(session?.orgKey);
@@ -1976,6 +2183,43 @@ export default function EmployeePage() {
   const [workflow, setWorkflow] = useState(() => loadWorkflow(session?.orgKey || ''));
   const [configHydrated, setConfigHydrated] = useState(() => !!config && Array.isArray(config?.employeeUploadData?.employees));
   const [workflowHydrated, setWorkflowHydrated] = useState(() => !session?.orgKey);
+  const [ratingsTick, setRatingsTick] = useState(0);
+
+  // Per-employee phase signals — declared after `workflow` so it's
+  // initialized. Self-eval available once goals are approved; manager-eval
+  // available once any report has SUBMITTED self-eval (ratings store).
+  const mySubmissionStatus = useMemo(() => {
+    if (!session?.empCode || !workflow) return null;
+    const key = normalizeCode(session.empCode);
+    return workflow?.submissions?.[key]?.status || null;
+  }, [workflow, session]);
+  const reportsReadyForManagerEval = useMemo(() => {
+    if (!session?.empCode) return 0;
+    const myCode = String(session.empCode).trim().toUpperCase();
+    const employees = config?.employeeUploadData?.employees || [];
+    const ratings = (session?.orgKey ? readRatings(session.orgKey) : { ratings: {} }).ratings || {};
+    let count = 0;
+    employees.forEach((e) => {
+      if (String(e['Reporting Manager Code'] || '').trim().toUpperCase() !== myCode) return;
+      const code = String(e['Employee Code'] || '').trim().toUpperCase();
+      if (ratings[code]?.self?.submittedAt) count += 1;
+    });
+    return count;
+  }, [config, session, ratingsTick]);
+
+  useEffect(() => {
+    if (!session?.orgKey) return undefined;
+    const refreshRatings = () => setRatingsTick((tick) => tick + 1);
+    void hydrateRatings(session.orgKey).then(refreshRatings);
+    const unsubscribeRatings = subscribeToRatings(session.orgKey, refreshRatings);
+    window.addEventListener('zarohr-ratings-changed', refreshRatings);
+    return () => {
+      window.removeEventListener('zarohr-ratings-changed', refreshRatings);
+      unsubscribeRatings();
+    };
+  }, [session?.orgKey]);
+  const myInSelfEvalPhase = mySubmissionStatus === 'approved';
+  const myInManagerEvalPhase = isManagerForSomeone && reportsReadyForManagerEval > 0;
   // Persist the active tab so refresh stays on the same tab.
   const activeSectionKey = `zarohr_emp_active_section:${session?.orgKey || 'default'}:${session?.empCode || 'anon'}`;
   const [activeSection, setActiveSectionInner] = useState(() => {
@@ -2013,7 +2257,9 @@ export default function EmployeePage() {
     try { localStorage.setItem(activeSectionKey, next); } catch { /* ignore */ }
   };
   const [selfRatings, setSelfRatings] = useState({});
+  const [selfAchievements, setSelfAchievements] = useState({});
   const [selfEvalSubmitted, setSelfEvalSubmitted] = useState(false);
+  const [selfEvalSubmitError, setSelfEvalSubmitError] = useState('');
   const [goalSubmitError, setGoalSubmitError] = useState('');
   const [managerNotes, setManagerNotes] = useState({});
   // Transient per-goal review picks, keyed by employeeCode → { [goalId]: { status, note } }.
@@ -2034,9 +2280,13 @@ export default function EmployeePage() {
   const [undoRecoverGoal, setUndoRecoverGoal] = useState(null); // { id, name, token } | null
   const [confirmPurgeGoal, setConfirmPurgeGoal] = useState(null); // { id, name } | null
   const [movingGoalIds, setMovingGoalIds] = useState(() => new Map()); // id -> 'delete' | 'recover'
+  const [armedKpi, setArmedKpi] = useState(null);      // { goalId, kpiId } — the ✕ that morphed into a red Delete
+  const [undoDeleteKpi, setUndoDeleteKpi] = useState(null); // { goalId, kpi, index, token } | null
   const moveGoalTimersRef = useRef(new Map());
   const undoDeleteTimerRef = useRef(null);
   const undoRecoverTimerRef = useRef(null);
+  const armKpiTimerRef = useRef(null);
+  const undoKpiTimerRef = useRef(null);
   const ignoreWorkflowEchoUntilRef = useRef(0);
   const syncedWorkflowRawRef = useRef(workflowRaw(loadWorkflow(session?.orgKey || '')));
   const workflowDirtyRef = useRef(false);
@@ -2055,6 +2305,8 @@ export default function EmployeePage() {
     moveGoalTimersRef.current.clear();
     if (undoDeleteTimerRef.current) clearTimeout(undoDeleteTimerRef.current);
     if (undoRecoverTimerRef.current) clearTimeout(undoRecoverTimerRef.current);
+    if (armKpiTimerRef.current) clearTimeout(armKpiTimerRef.current);
+    if (undoKpiTimerRef.current) clearTimeout(undoKpiTimerRef.current);
   }, []);
   // When jumping to My Team from a notification or CTA, remember which report's review panel to
   // expand + scroll + flash once.
@@ -2188,11 +2440,70 @@ export default function EmployeePage() {
   // falling back to whatever the wizard stored directly in config.
   const effectiveConfig = useMemo(() => {
     const overrides = resolveGroupAccess(employeeGroup);
-    return overrides ? { ...config, ...overrides } : config;
+    if (!overrides) return config;
+    // Strip null/undefined overrides so the org-level target default survives
+    // when the group hasn't set its own value.
+    const cleanedOverrides = Object.fromEntries(
+      Object.entries(overrides).filter(([, value]) => value !== null && value !== undefined)
+    );
+    const orgTargetLevel = config?.targetLevelMode === 'KRA'
+      ? 'KRA'
+      : config?.targetLevelMode === 'KPI'
+        ? 'KPI'
+        : config?.targetLevel === 'KRA'
+          ? 'KRA'
+          : 'KPI';
+    const merged = { ...config, targetLevel: orgTargetLevel, ...cleanedOverrides };
+    // targetLevel is binary now: 'KPI' (default) or 'KRA'.
+    merged.targetLevel = merged.targetLevel === 'KRA' ? 'KRA' : 'KPI';
+    return merged;
   }, [employeeGroup, config]);
 
   const accessMode = useMemo(() => getGoalAccessMode(effectiveConfig), [effectiveConfig]);
-  const currentScale = useMemo(() => SCALE_DEFAULTS[config?.scalePoints] || SCALE_DEFAULTS[5], [config]);
+  const targetTypeOptions = useMemo(() => buildTargetTypeOptions(effectiveConfig), [effectiveConfig]);
+  const getTargetTypeMeta = (typeId) => targetTypeOptions.find((type) => type.id === typeId)
+    || TARGET_TYPES.find((type) => type.id === typeId)
+    || TARGET_TYPES.find((type) => type.id === 'text');
+  const formatGoalTargetValue = (value, typeId) => {
+    const meta = getTargetTypeMeta(typeId);
+    const unit = String(meta?.unit || '').trim();
+    const text = String(value || '').trim();
+    if (!text) return '';
+    if (!unit) return text;
+    return meta?.unitPosition === 'prefix' ? `${unit} ${text}` : `${text} ${unit}`;
+  };
+  const renderGoalTargetDisplay = (value, typeId, label = 'Target') => {
+    const displayValue = formatGoalTargetValue(value, typeId);
+    if (!displayValue) return null;
+    const meta = getTargetTypeMeta(typeId);
+    return (
+      <div
+        title={`${label}${meta?.label ? ` (${meta.label})` : ''}: ${displayValue}`}
+        style={{
+          marginTop: 8,
+          border: '1px solid #D9E2EC',
+          background: '#F8FAFC',
+          borderRadius: 10,
+          padding: '8px 10px',
+          minWidth: 140,
+          maxWidth: 280,
+        }}
+      >
+        <div style={{ fontSize: 10, fontWeight: 900, color: '#94A3B8', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 4 }}>
+          {label}
+        </div>
+        <div style={{ fontSize: 14, lineHeight: 1.2, fontWeight: 800, color: '#0F172A', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          {displayValue}
+        </div>
+      </div>
+    );
+  };
+  const currentScale = useMemo(() => getConfiguredScale(config), [config]);
+  const ratingInputMode = config?.scoreInputMode || 'dropdown';
+  const effectiveRatingInputMode = ratingInputMode === 'stars' ? 'number' : ratingInputMode;
+  const ratingChoiceDisplay = config?.ratingChoiceDisplay || 'number-label';
+  const ratingStep = getScoreStep(config);
+  const formatRatingScore = (value) => Number(value || 0).toFixed(ratingStep === 1 ? 0 : 1);
   const phaseIndex = PHASES.findIndex((phase) => phase.id === currentPhase);
   const isFlatFramework = config?.frameworkId === 'kra-kpi' || config?.frameworkId === 'kra';
   const activePerspectives = useMemo(() => (isFlatFramework ? [] : perspectives), [isFlatFramework, perspectives]);
@@ -2271,12 +2582,10 @@ export default function EmployeePage() {
         // If submission exists but has no goals yet, try to backfill from pre-fill config.
         // This handles employees whose submission was created before pre-fill data was uploaded.
         const hasNoGoals = !current.goals || current.goals.length === 0;
-        const backfilled = hasNoGoals
-          ? buildInitialGoals(config, employee, employeeGroup, config?.goalLibraries)
-          : null;
-        const cleanedGoals = backfilled && backfilled.length > 0
-          ? dedupeGoals(backfilled)
-          : dedupeGoals(current.goals || []);
+        const configuredGoals = buildInitialGoals(config, employee, employeeGroup, config?.goalLibraries);
+        const cleanedGoals = hasNoGoals && configuredGoals.length > 0
+          ? dedupeGoals(configuredGoals)
+          : dedupeGoals(mergeUploadedTargetsIntoGoals(current.goals || [], configuredGoals));
 
         const patched = {
           ...current,
@@ -2424,6 +2733,15 @@ export default function EmployeePage() {
     return () => window.removeEventListener('keydown', onKey);
   }, [editingGoalId]);
 
+  // ESC closes the manager review confirmation modal (acts as Revert) when not mid-commit.
+  useEffect(() => {
+    if (!reviewConfirm) return undefined;
+    function onKey(e) { if (e.key === 'Escape') revertReviewConfirm(); }
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [reviewConfirm]);
+
   if (!session) {
     return null;
   }
@@ -2437,6 +2755,7 @@ export default function EmployeePage() {
   // They have no PMS goal plan of their own — the dashboard should skip all goal UI for them.
   const isExternalManager = !employee;
   const mySubmission = workflow?.submissions?.[employeeCodeKey] || null;
+  const selfEvaluationSaved = mySubmission?.selfEvaluationStatus === 'submitted' || !!mySubmission?.selfEvaluationSubmittedAt;
   // Active goals exclude anything currently sitting in the Deleted Goals
   // trash. The deletedGoals derivation also applies the 7-day retention
   // filter so expired entries are invisible in the UI even before the
@@ -2524,6 +2843,25 @@ export default function EmployeePage() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeSection, canSetOwnGoals, configHydrated, directReports.length]);
+
+  // When the phase shifts into evaluation for this employee, auto-migrate
+  // them to the new tab — but only once per role transition so they can
+  // navigate back to 'goals' / 'team' if they want.
+  const migrateKey = `zarohr_emp_eval_migrated:${session?.orgKey || 'default'}:${session?.empCode || 'anon'}`;
+  useEffect(() => {
+    if (!configHydrated) return;
+    if (!myInSelfEvalPhase && !myInManagerEvalPhase) return;
+    let migrated = '';
+    try { migrated = localStorage.getItem(migrateKey) || ''; } catch (_) {}
+    if (myInSelfEvalPhase && activeSection === 'goals' && !migrated.includes('self')) {
+      setActiveSection('self-eval');
+      try { localStorage.setItem(migrateKey, `${migrated}|self`); } catch (_) {}
+    } else if (myInManagerEvalPhase && activeSection === 'team' && !migrated.includes('mgr')) {
+      setActiveSection('manager-eval');
+      try { localStorage.setItem(migrateKey, `${migrated}|mgr`); } catch (_) {}
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [configHydrated, myInSelfEvalPhase, myInManagerEvalPhase]);
   const canEditGoalPlan = canSetOwnGoals && currentPhase === 'goal-setting' && mySubmission && !['pending-manager', 'approved'].includes(mySubmission.status);
   const canAddKra = canEditGoalPlan && (
     effectiveConfig?.goalCreationMode === 'employee-self' ||
@@ -2535,12 +2873,44 @@ export default function EmployeePage() {
   const canEditExistingKpi = canEditGoalPlan && (effectiveConfig?.goalCreationMode === 'employee-self' || accessMode === 'edit-freely' || (accessMode === 'add-kpis' && effectiveConfig?.goalKpiMode === 'kra-only'));
   const hasKpis = myGoals.some((goal) => (goal.kpis || []).length > 0);
   const rateAtGoalLevel = effectiveConfig?.kpiRatingMode === 'free-text' || !hasKpis;
+  const evaluationKey = (goalName, kpiName) => kpiName ? `${goalName}::${kpiName}` : goalName;
+  const hasTargetForEvaluation = (target, targetType) => effectiveConfig?.targetsEnabled !== false
+    && String(target || '').trim()
+    && (targetType || 'text') !== 'none';
 
-  const totalRatable = rateAtGoalLevel
-    ? myGoals.length
-    : myGoals.reduce((sum, goal) => sum + (goal.kpis || []).length, 0);
-  const totalRated = Object.keys(selfRatings).filter((key) => selfRatings[key] > 0).length;
-  const selfEvalPct = totalRatable > 0 ? Math.round((totalRated / totalRatable) * 100) : 0;
+  const requiredRatingItems = rateAtGoalLevel
+    ? myGoals.map((goal) => ({
+        key: evaluationKey(goal.name, null),
+        id: goal.id,
+        label: goal.name || 'this goal',
+      }))
+    : myGoals.flatMap((goal) => (goal.kpis || []).map((kpi) => ({
+        key: evaluationKey(goal.name, kpi.name),
+        id: kpi.id,
+        label: kpi.name || 'this KPI',
+      })));
+  const totalRatable = requiredRatingItems.length;
+  const totalRated = requiredRatingItems.filter((item) => Number(selfRatings[item.key]) > 0).length;
+  const targetAchievementItems = rateAtGoalLevel
+    ? myGoals
+        .filter((goal) => hasTargetForEvaluation(goal.target, goal.targetType))
+        .map((goal) => ({ key: evaluationKey(goal.name, null), id: goal.id }))
+    : myGoals.flatMap((goal) => (goal.kpis || [])
+        .filter((kpi) => hasTargetForEvaluation(kpi.target, kpi.targetType))
+        .map((kpi) => ({ key: evaluationKey(goal.name, kpi.name), id: kpi.id })));
+  const totalAchievementsRequired = targetAchievementItems.length;
+  const totalAchievementsFilled = targetAchievementItems.filter((item) => String(selfAchievements[item.key] || '').trim()).length;
+  const totalSelfEvalItems = totalRatable + totalAchievementsRequired;
+  const completedSelfEvalItems = totalRated + totalAchievementsFilled;
+  const selfEvalPct = totalSelfEvalItems > 0 ? Math.round((completedSelfEvalItems / totalSelfEvalItems) * 100) : 0;
+  const selfEvalMissingItems = [
+    ...requiredRatingItems
+      .filter((item) => !(Number(selfRatings[item.key]) > 0))
+      .map((item) => `Rate "${item.label}".`),
+    ...targetAchievementItems
+      .filter((item) => !String(selfAchievements[item.key] || '').trim())
+      .map(() => 'Enter required achievement.'),
+  ];
 
   function logout() {
     try {
@@ -2626,6 +2996,8 @@ export default function EmployeePage() {
       setActiveSection('team');
     } else if (n.type === 'goal-approved' || n.type === 'goal-rejected' || n.type === 'goal-reminder') {
       setActiveSection('goals');
+    } else if (n.type === 'self-completion-requested') {
+      setActiveSection('self-eval');
     } else {
       setActiveSection('notifications');
     }
@@ -2900,16 +3272,56 @@ export default function EmployeePage() {
     });
   }
 
-  function removeKpi(goalId, kpiId) {
+  // First click on a KPI's ✕ arms it — the button morphs into a small red
+  // "Delete". A second click actually removes it. The armed state auto-resets
+  // after a few seconds so a stray first click never leaves a primed button.
+  function armKpiDelete(goalId, kpiId) {
     if (!canEditGoalPlan) return;
+    setArmedKpi({ goalId, kpiId });
+    if (armKpiTimerRef.current) clearTimeout(armKpiTimerRef.current);
+    armKpiTimerRef.current = setTimeout(() => {
+      setArmedKpi((cur) => (cur?.goalId === goalId && cur?.kpiId === kpiId ? null : cur));
+    }, KPI_ARM_RESET_MS);
+  }
+
+  // Actually remove the KPI, remembering it (and its position) so the undo
+  // strip can put it back exactly where it was.
+  function removeKpi(goalId, kpi, index) {
+    if (!canEditGoalPlan || !kpi?.id) return;
     updateMySubmission((record) => {
       record.goals = (record.goals || []).map((goal) => (
         goal.id === goalId
-          ? { ...goal, kpis: (goal.kpis || []).filter((kpi) => kpi.id !== kpiId) }
+          ? { ...goal, kpis: (goal.kpis || []).filter((k) => k.id !== kpi.id) }
           : goal
       ));
       return record;
     });
+    setArmedKpi(null);
+    if (armKpiTimerRef.current) { clearTimeout(armKpiTimerRef.current); armKpiTimerRef.current = null; }
+    const token = `${kpi.id}:${Date.now()}`;
+    setUndoDeleteKpi({ goalId, kpi, index, token });
+    if (undoKpiTimerRef.current) clearTimeout(undoKpiTimerRef.current);
+    undoKpiTimerRef.current = setTimeout(() => {
+      setUndoDeleteKpi((cur) => (cur?.token === token ? null : cur));
+    }, GOAL_DELETE_UNDO_MS);
+  }
+
+  function undoKpiDelete() {
+    const target = undoDeleteKpi;
+    if (!target?.kpi?.id) return;
+    updateMySubmission((record) => {
+      record.goals = (record.goals || []).map((goal) => {
+        if (goal.id !== target.goalId) return goal;
+        const kpis = [...(goal.kpis || [])];
+        if (kpis.some((k) => k.id === target.kpi.id)) return goal; // already restored
+        const at = Math.max(0, Math.min(target.index ?? kpis.length, kpis.length));
+        kpis.splice(at, 0, target.kpi);
+        return { ...goal, kpis };
+      });
+      return record;
+    });
+    setUndoDeleteKpi(null);
+    if (undoKpiTimerRef.current) { clearTimeout(undoKpiTimerRef.current); undoKpiTimerRef.current = null; }
   }
 
   function reorderGoals(fromId, toId) {
@@ -3392,13 +3804,176 @@ export default function EmployeePage() {
   }
 
   function setRating(goalName, kpiName, value) {
-    const key = kpiName ? `${goalName}::${kpiName}` : goalName;
+    const key = evaluationKey(goalName, kpiName);
+    if (selfEvalSubmitError) setSelfEvalSubmitError('');
     setSelfRatings((prev) => ({ ...prev, [key]: value }));
   }
 
   function getRating(goalName, kpiName) {
-    const key = kpiName ? `${goalName}::${kpiName}` : goalName;
+    const key = evaluationKey(goalName, kpiName);
     return selfRatings[key] || 0;
+  }
+
+  function setAchievement(goalName, kpiName, value) {
+    const key = evaluationKey(goalName, kpiName);
+    if (selfEvalSubmitError) setSelfEvalSubmitError('');
+    setSelfAchievements((prev) => ({ ...prev, [key]: value }));
+  }
+
+  function getAchievement(goalName, kpiName) {
+    const key = evaluationKey(goalName, kpiName);
+    return selfAchievements[key] || '';
+  }
+
+  function getRankForRating(value) {
+    const n = Number(value) || 0;
+    const nearest = currentScale.reduce((best, item) => (
+      Math.abs(item.n - n) < Math.abs(best.n - n) ? item : best
+    ), currentScale[0] || { n: 1, l: '', code: '1' });
+    return nearest;
+  }
+
+  function renderRatingControl(goalName, kpiName = null, compact = false) {
+    const value = Number(getRating(goalName, kpiName)) || 0;
+    const setValue = (next) => setRating(goalName, kpiName, Math.max(1, Math.min(currentScale.length, roundToStep(next, ratingStep))));
+    const selectedRank = value ? getRankForRating(value) : null;
+    const formatChoice = (score, rank = getRankForRating(score)) => {
+      if (ratingChoiceDisplay === 'number-only') return String(rank?.code || rank?.n || score);
+      if (ratingChoiceDisplay === 'label-only') return rank?.l || '';
+      return `${rank?.code || rank?.n || score} - ${rank?.l || ''}`;
+    };
+    const commonSummary = value ? (
+      <div style={{ fontSize: 11.5, fontWeight: 800, color: '#2563EB', whiteSpace: 'nowrap' }}>
+        Score {formatRatingScore(value)} · Band {formatChoice(value, selectedRank)}
+      </div>
+    ) : null;
+
+    if (effectiveRatingInputMode === 'slider') {
+      return (
+        <div style={{ width: compact ? 210 : 260, maxWidth: '100%', display: 'grid', gap: 5 }}>
+          <input
+            type="range"
+            min={1}
+            max={currentScale.length}
+            step={ratingStep}
+            value={value || 1}
+            onChange={(e) => setValue(e.target.value)}
+            style={{ width: '100%', accentColor: '#2563EB' }}
+          />
+          <div style={{ display: 'flex', justifyContent: 'space-between', color: '#94A3B8', fontSize: 10.5, fontWeight: 800 }}>
+            {currentScale.map((step) => <span key={step.n}>{step.code || step.n}</span>)}
+          </div>
+          {commonSummary}
+        </div>
+      );
+    }
+
+    if (effectiveRatingInputMode === 'number') {
+      return (
+        <div style={{ display: 'inline-flex', alignItems: 'center', gap: 8, border: '1.5px solid #E2E8F0', borderRadius: 10, background: '#fff', padding: '7px 10px', flexWrap: 'wrap' }}>
+          <span style={{ fontSize: 11.5, color: '#64748B', fontWeight: 850 }}>Score</span>
+          <input
+            type="number"
+            min={1}
+            max={currentScale.length}
+            step={ratingStep}
+            value={value ? formatRatingScore(value) : ''}
+            onChange={(e) => setValue(e.target.value)}
+            placeholder="--"
+            style={{ width: 64, border: 'none', outline: 'none', fontFamily: 'inherit', fontSize: 13.5, fontWeight: 850, color: '#0F172A' }}
+          />
+          {commonSummary}
+        </div>
+      );
+    }
+
+    if (effectiveRatingInputMode === 'segmented') {
+      return (
+        <div style={{ display: 'inline-flex', flexWrap: 'wrap', gap: 4, padding: 4, background: '#F8FAFC', border: '1px solid #E2E8F0', borderRadius: 999 }}>
+          {currentScale.map((rank) => {
+            const active = selectedRank?.n === rank.n;
+            return (
+              <button
+                key={rank.n}
+                type="button"
+                onClick={() => setValue(rank.n)}
+                title={`${rank?.code || rank.n} - ${rank?.l || ''}`}
+                style={{
+                  border: 'none',
+                  borderRadius: 999,
+                  padding: compact ? '5px 9px' : '7px 11px',
+                  background: active ? '#2563EB' : 'transparent',
+                  color: active ? '#fff' : '#475569',
+                  fontSize: 11.5,
+                  fontWeight: 850,
+                  cursor: 'pointer',
+                  fontFamily: 'inherit',
+                }}
+              >
+                {formatChoice(rank.n, rank)}
+              </button>
+            );
+          })}
+        </div>
+      );
+    }
+
+    return (
+      <select
+        value={selectedRank?.n || ''}
+        onChange={(e) => setValue(e.target.value)}
+        style={{ minWidth: compact ? 190 : 230, border: '1.5px solid #E2E8F0', borderRadius: 9, padding: '8px 10px', background: '#fff', color: '#0F172A', fontSize: 12.5, fontWeight: 750, fontFamily: 'inherit' }}
+      >
+        <option value="">Select rating</option>
+        {currentScale.map((rank) => <option key={rank.n} value={rank.n}>{formatChoice(rank.n, rank)}</option>)}
+      </select>
+    );
+  }
+
+  function submitSelfEvaluation() {
+    if (selfEvalMissingItems.length > 0) {
+      setSelfEvalSubmitError(`${selfEvalMissingItems[0]}${selfEvalMissingItems.length > 1 ? ` +${selfEvalMissingItems.length - 1} more required item${selfEvalMissingItems.length - 1 === 1 ? '' : 's'}.` : ''}`);
+      const itemScores = {};
+      requiredRatingItems.forEach((item) => {
+        if (Number(selfRatings[item.key]) > 0) itemScores[item.id] = selfRatings[item.key];
+      });
+      const achievementPayload = {};
+      targetAchievementItems.forEach((item) => {
+        if (String(selfAchievements[item.key] || '').trim()) achievementPayload[item.id] = selfAchievements[item.key];
+      });
+      setEmployeeStage(session.orgKey, session.empCode, 'self', {
+        itemScores,
+        achievements: achievementPayload,
+        submittedAt: null,
+        submittedBy: null,
+      });
+      return;
+    }
+    const submittedAt = new Date().toISOString();
+    const itemScores = {};
+    requiredRatingItems.forEach((item) => {
+      itemScores[item.id] = selfRatings[item.key];
+    });
+    const achievementPayload = {};
+    targetAchievementItems.forEach((item) => {
+      achievementPayload[item.id] = selfAchievements[item.key];
+    });
+    submitEmployeeStage(session.orgKey, session.empCode, 'self', {
+      itemScores,
+      achievements: achievementPayload,
+      overallComment: '',
+    }, session.empCode);
+    updateMySubmission((record) => ({
+      ...record,
+      selfEvaluation: {
+        ratings: { ...selfRatings },
+        achievements: { ...selfAchievements },
+        submittedAt,
+      },
+      selfEvaluationStatus: 'submitted',
+      selfEvaluationSubmittedAt: submittedAt,
+    }));
+    setSelfEvalSubmitted(true);
   }
 
   // Count unread messages only from conversations visible in the current inbox.
@@ -4159,6 +4734,19 @@ export default function EmployeePage() {
                             </div>
                           </div>
 
+                          {effectiveConfig?.targetsEnabled !== false && effectiveConfig?.targetLevel === 'KRA' && (
+                            <div style={{ marginTop: 12 }}>
+                              <div style={{ fontSize: 11, fontWeight: 700, color: '#64748B', textTransform: 'uppercase', letterSpacing: '.07em', marginBottom: 6 }}>Target (KRA-level)</div>
+                              <TargetField
+                                value={goal.target || ''}
+                                onValueChange={(v) => updateGoal(goal.id, 'target', v)}
+                                type={goal.targetType || 'text'}
+                                onTypeChange={(t) => updateGoal(goal.id, 'targetType', t)}
+                                targetTypes={targetTypeOptions}
+                              />
+                            </div>
+                          )}
+
                           {isRewriting && (
                             <div style={{ marginTop: 10, background: '#F5F3FF', border: '1px solid #DDD6FE', borderRadius: 10, padding: '10px 12px' }}>
                               <div style={{ fontSize: 11.5, fontWeight: 700, color: '#6D28D9', marginBottom: 8 }}>✨ Click a suggestion to apply:</div>
@@ -4180,7 +4768,10 @@ export default function EmployeePage() {
                         <div style={{ marginBottom: 14, padding: '12px 14px', borderRadius: 12, background: '#F8FAFC', border: '1px solid #E9EDF2' }}>
                           {!isFlatFramework && goal.perspName && goal.perspName !== 'All KRAs' && <div style={{ fontSize: 10.5, fontWeight: 700, color, textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 4 }}>{goal.perspName}</div>}
                           <div style={{ fontSize: 15, fontWeight: 800, color: '#0D1117' }}>{goal.name}</div>
-                          <span style={{ fontSize: 12, fontWeight: 700, color, background: `${color}14`, padding: '4px 10px', borderRadius: 999, display: 'inline-block', marginTop: 6 }}>Weight: {goal.weight || 0}%</span>
+                          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 6 }}>
+                            <span style={{ fontSize: 12, fontWeight: 700, color, background: `${color}14`, padding: '4px 10px', borderRadius: 999 }}>Weight: {goal.weight || 0}%</span>
+                          </div>
+                          {effectiveConfig?.targetsEnabled !== false && effectiveConfig?.targetLevel === 'KRA' && goal.target && renderGoalTargetDisplay(goal.target, goal.targetType || 'text', 'KRA target')}
                         </div>
                       )}
 
@@ -4189,10 +4780,11 @@ export default function EmployeePage() {
                         {(goal.kpis || []).length > 0 && (
                           <div style={{ fontSize: 11, fontWeight: 700, color: '#64748B', textTransform: 'uppercase', letterSpacing: '.07em', marginBottom: 8 }}>KPIs</div>
                         )}
-                        {(goal.kpis || []).map((kpi) => {
+                        {(goal.kpis || []).map((kpi, kpiIndex) => {
                           const isEmployeeAdded = kpi.source !== 'library';
                           const kpiEditable = canEditExistingKpiNow || (canAddKpiNow && isEmployeeAdded);
                           const isSuggestionMode = effectiveConfig?.goalCreationMode === 'admin-library' && effectiveConfig?.goalKpiMode === 'kra-kpi' && accessMode === 'add-kpis';
+                          const isArmed = armedKpi?.goalId === goal.id && armedKpi?.kpiId === kpi.id;
                           return (
                             <div key={kpi.id} style={{ padding: '12px', borderRadius: 12, background: '#fff', border: '1px solid #E9EDF2', marginBottom: 8, display: 'flex', gap: 12, alignItems: 'flex-start', flexWrap: 'wrap' }}>
                               <div style={{ flex: 1, minWidth: 220 }}>
@@ -4228,7 +4820,7 @@ export default function EmployeePage() {
                                         </div>
                                       )}
                                     </div>
-                                    {effectiveConfig?.targetsEnabled !== false && (
+                                    {effectiveConfig?.targetsEnabled !== false && effectiveConfig?.targetLevel !== 'KRA' && (
                                       <div style={{ marginTop: 10 }}>
                                         <div style={{ fontSize: 10.5, fontWeight: 700, color: '#94A3B8', textTransform: 'uppercase', letterSpacing: '.07em', marginBottom: 5 }}>Target</div>
                                         <TargetField
@@ -4236,6 +4828,7 @@ export default function EmployeePage() {
                                           onValueChange={(v) => updateKpi(goal.id, kpi.id, 'target', v)}
                                           type={kpi.targetType || 'text'}
                                           onTypeChange={(t) => updateKpi(goal.id, kpi.id, 'targetType', t)}
+                                          targetTypes={targetTypeOptions}
                                         />
                                       </div>
                                     )}
@@ -4252,15 +4845,19 @@ export default function EmployeePage() {
                                       // text "Additional KPI" duplicated the badge
                                       // and confused readers.
                                       const showWeight = effectiveConfig?.kpiRatingMode !== 'free-text' && kpi.weight;
-                                      const showTarget = effectiveConfig?.targetsEnabled !== false && kpi.target;
+                                      const showTarget = effectiveConfig?.targetsEnabled !== false && effectiveConfig?.targetLevel !== 'KRA' && kpi.target;
                                       if (!showWeight && !showTarget) return null;
                                       const parts = [];
                                       if (showWeight) parts.push(`Weight: ${kpi.weight}%`);
-                                      if (showTarget) parts.push(`Target: ${kpi.target}`);
                                       return (
-                                        <div style={{ fontSize: 12.5, color: '#94A3B8', marginTop: 4 }}>
-                                          {parts.join(' · ')}
-                                        </div>
+                                        <>
+                                          {parts.length > 0 && (
+                                            <div style={{ fontSize: 12.5, color: '#94A3B8', marginTop: 4 }}>
+                                              {parts.join(' · ')}
+                                            </div>
+                                          )}
+                                          {showTarget && renderGoalTargetDisplay(kpi.target, kpi.targetType || 'text', 'KPI target')}
+                                        </>
                                       );
                                     })()}
                                   </div>
@@ -4275,7 +4872,18 @@ export default function EmployeePage() {
                                 </span>
                               )}
                               {kpiEditable && (
-                                <button type="button" onClick={() => removeKpi(goal.id, kpi.id)} style={{ padding: '7px 9px', borderRadius: 8, border: '1px solid #E2E8F0', background: '#fff', color: '#94A3B8', cursor: 'pointer', fontFamily: 'inherit', fontSize: 12 }}>✕</button>
+                                isArmed ? (
+                                  <button
+                                    type="button"
+                                    onClick={() => removeKpi(goal.id, kpi, kpiIndex)}
+                                    onMouseLeave={() => setArmedKpi((cur) => (cur?.goalId === goal.id && cur?.kpiId === kpi.id ? null : cur))}
+                                    style={{ padding: '7px 12px', borderRadius: 8, border: '1px solid #DC2626', background: '#DC2626', color: '#fff', cursor: 'pointer', fontFamily: 'inherit', fontSize: 12, fontWeight: 700, whiteSpace: 'nowrap' }}
+                                  >
+                                    Delete
+                                  </button>
+                                ) : (
+                                  <button type="button" onClick={() => armKpiDelete(goal.id, kpi.id)} title="Remove KPI" style={{ padding: '7px 9px', borderRadius: 8, border: '1px solid #E2E8F0', background: '#fff', color: '#94A3B8', cursor: 'pointer', fontFamily: 'inherit', fontSize: 12 }}>✕</button>
+                                )
                               )}
                             </div>
                           );
@@ -5325,15 +5933,15 @@ export default function EmployeePage() {
                           })}
                           title={hasNote ? 'Edit overall note' : 'Add overall note'}
                           style={{
-                            display: 'inline-flex', alignItems: 'center', gap: 4,
-                            padding: '4px 9px', borderRadius: 7,
+                            display: 'inline-flex', alignItems: 'center', gap: 5,
+                            padding: '9px 16px', borderRadius: 8,
                             border: `1.5px solid ${noteOpen ? '#0F172A' : '#E2E8F0'}`,
                             background: noteOpen ? '#0F172A' : '#fff',
                             color: noteOpen ? '#fff' : '#475569',
-                            cursor: 'pointer', fontFamily: 'inherit', fontSize: 11.5, fontWeight: 700,
+                            cursor: 'pointer', fontFamily: 'inherit', fontSize: 13, fontWeight: 700,
                           }}
                         >
-                          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z"/></svg>
+                          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z"/></svg>
                           Note{hasNote && <span style={{ width: 5, height: 5, borderRadius: '50%', background: noteOpen ? '#86EFAC' : '#16A34A' }} />}
                         </button>
                         {/* Reject all — always shown unless approves marked
@@ -5342,7 +5950,7 @@ export default function EmployeePage() {
                           <button
                             type="button"
                             onClick={stop(() => setReviewConfirm(confirmPayload('reject-all')))}
-                            style={{ padding: '4px 10px', borderRadius: 7, border: '1.5px solid #FECACA', background: '#fff', color: '#DC2626', cursor: 'pointer', fontFamily: 'inherit', fontSize: 11.5, fontWeight: 700, whiteSpace: 'nowrap' }}
+                            style={{ padding: '9px 18px', borderRadius: 8, border: '1.5px solid #FECACA', background: '#fff', color: '#DC2626', cursor: 'pointer', fontFamily: 'inherit', fontSize: 13, fontWeight: 700, whiteSpace: 'nowrap' }}
                           >
                             Reject all
                           </button>
@@ -5353,7 +5961,7 @@ export default function EmployeePage() {
                           <button
                             type="button"
                             onClick={stop(() => setReviewConfirm(confirmPayload('approve-all')))}
-                            style={{ padding: '4px 10px', borderRadius: 7, border: 'none', background: '#16A34A', color: '#fff', cursor: 'pointer', fontFamily: 'inherit', fontSize: 11.5, fontWeight: 700, whiteSpace: 'nowrap', boxShadow: '0 4px 10px rgba(22,163,74,.28)' }}
+                            style={{ padding: '9px 18px', borderRadius: 8, border: 'none', background: '#16A34A', color: '#fff', cursor: 'pointer', fontFamily: 'inherit', fontSize: 13, fontWeight: 700, whiteSpace: 'nowrap', boxShadow: '0 4px 10px rgba(22,163,74,.28)' }}
                           >
                             Approve all
                           </button>
@@ -5367,9 +5975,9 @@ export default function EmployeePage() {
                           <button
                             type="button"
                             onClick={stop(() => setReviewConfirm(confirmPayload('commit')))}
-                            style={{ padding: '4px 10px', borderRadius: 7, border: 'none', background: '#2563EB', color: '#fff', cursor: 'pointer', fontFamily: 'inherit', fontSize: 11.5, fontWeight: 700, whiteSpace: 'nowrap', boxShadow: '0 4px 10px rgba(37,99,235,.28)' }}
+                            style={{ padding: '9px 20px', borderRadius: 8, border: 'none', background: '#2563EB', color: '#fff', cursor: 'pointer', fontFamily: 'inherit', fontSize: 13, fontWeight: 700, whiteSpace: 'nowrap', boxShadow: '0 4px 10px rgba(37,99,235,.28)' }}
                           >
-                            Submit · {rejectedCount} send back
+                            Submit
                           </button>
                         )}
                       </div>
@@ -5441,8 +6049,64 @@ export default function EmployeePage() {
     const reviewEmployee = employees.find((row) => normalizeCode(row['Employee Code']) === normalizeCode(submission.employeeCode));
     const reviewGroup = getEmployeeGoalGroup(config, reviewEmployee);
     const reviewOverrides = resolveGroupAccess(reviewGroup);
-    const reviewEffectiveConfig = reviewOverrides ? { ...config, ...reviewOverrides } : config;
+    const reviewEffectiveConfig = (() => {
+      if (!reviewOverrides) return config;
+      const cleanedOverrides = Object.fromEntries(
+        Object.entries(reviewOverrides).filter(([, value]) => value !== null && value !== undefined)
+      );
+      const orgTargetLevel = config?.targetLevelMode === 'KRA'
+        ? 'KRA'
+        : config?.targetLevelMode === 'KPI'
+          ? 'KPI'
+          : config?.targetLevel === 'KRA'
+            ? 'KRA'
+            : 'KPI';
+      const merged = { ...config, targetLevel: orgTargetLevel, ...cleanedOverrides };
+      merged.targetLevel = merged.targetLevel === 'KRA' ? 'KRA' : 'KPI';
+      return merged;
+    })();
     const reviewTracksKpiWeights = reviewEffectiveConfig?.kpiRatingMode !== 'free-text';
+    const reviewShowsKpiTarget = reviewEffectiveConfig?.targetsEnabled !== false && reviewEffectiveConfig?.targetLevel !== 'KRA';
+    const reviewShowsKraTarget = reviewEffectiveConfig?.targetsEnabled !== false && reviewEffectiveConfig?.targetLevel === 'KRA';
+    const getReviewTargetTypeMeta = (typeId) => targetTypeOptions.find((type) => type.id === typeId)
+      || TARGET_TYPES.find((type) => type.id === typeId)
+      || TARGET_TYPES.find((type) => type.id === 'text');
+    const formatReviewTargetValue = (value, typeId) => {
+      const meta = getReviewTargetTypeMeta(typeId);
+      const unit = String(meta?.unit || '').trim();
+      const text = String(value || '').trim();
+      if (!text) return '';
+      if (!unit) return text;
+      return meta?.unitPosition === 'prefix' ? `${unit} ${text}` : `${text} ${unit}`;
+    };
+    const renderReviewTargetBlock = (value, typeId, label = 'Target') => {
+      const displayValue = formatReviewTargetValue(value, typeId);
+      if (!displayValue) return null;
+      const meta = getReviewTargetTypeMeta(typeId);
+      const targetTitle = `${label}${meta?.label ? ` (${meta.label})` : ''}: ${displayValue}`;
+      return (
+        <div
+          title={targetTitle}
+          style={{
+            minWidth: label === 'KPI target' ? 132 : 96,
+            maxWidth: label === 'KPI target' ? 280 : 220,
+            padding: label === 'KPI target' ? '6px 10px' : '5px 9px',
+            borderRadius: 7,
+            border: '1px solid #D9E2EC',
+            background: '#F8FAFC',
+            textAlign: label === 'KPI target' ? 'left' : 'right',
+            flexShrink: 0,
+          }}
+        >
+          <div style={{ fontSize: 9.5, lineHeight: 1, fontWeight: 900, color: '#94A3B8', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 3 }}>
+            {label}
+          </div>
+          <div style={{ fontSize: label === 'KPI target' ? 13 : 12.5, lineHeight: 1.15, fontWeight: 800, color: '#0F172A', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {displayValue}
+          </div>
+        </div>
+      );
+    };
     const readOnly = bucket !== 'pending';
     const setPick = (empCode, goalId, status) => {
       setGoalReviewPicks((prev) => {
@@ -5544,10 +6208,13 @@ export default function EmployeePage() {
                     {goal.name || <span style={{ color: '#94A3B8', fontStyle: 'italic' }}>Untitled goal</span>}
                   </span>
                 </div>
-                <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexShrink: 0 }}>
+                <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexShrink: 0, flexWrap: 'wrap' }}>
                   <div style={{ fontSize: 11, fontWeight: 800, color, background: `${color}14`, padding: '3px 9px', borderRadius: 999 }}>
                     {goal.weight || 0}%
                   </div>
+                  {reviewShowsKraTarget && goal.target && (
+                    renderReviewTargetBlock(goal.target, goal.targetType || 'text', 'KRA target')
+                  )}
                   {locked ? (
                     <div style={{ display: 'inline-flex', alignItems: 'center', gap: 3, padding: '3px 8px', borderRadius: 999, background: '#DCFCE7', border: '1px solid #86EFAC', color: '#15803D', fontSize: 11, fontWeight: 700 }}>
                       <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
@@ -5573,16 +6240,16 @@ export default function EmployeePage() {
                         disabled={broken}
                         title={broken ? 'Missing required fields — ask employee to fix and resubmit' : (markedApprove ? 'Click again to clear' : 'Mark approve')}
                         style={{
-                          display: 'inline-flex', alignItems: 'center', gap: 3,
-                          padding: '4px 9px', borderRadius: 7,
+                          display: 'inline-flex', alignItems: 'center', gap: 5,
+                          padding: '8px 16px', borderRadius: 8,
                           border: `1.5px solid ${markedApprove ? '#16A34A' : '#E2E8F0'}`,
                           background: markedApprove ? '#16A34A' : '#fff',
                           color: markedApprove ? '#fff' : '#64748B',
                           cursor: broken ? 'not-allowed' : 'pointer',
                           opacity: broken ? 0.45 : 1,
-                          fontFamily: 'inherit', fontSize: 11.5, fontWeight: 700,
+                          fontFamily: 'inherit', fontSize: 13, fontWeight: 700,
                         }}>
-                        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
                         Approve
                       </button>
                       <button
@@ -5591,14 +6258,14 @@ export default function EmployeePage() {
                         onClick={() => setPick(submission.employeeCode, goal.id, 'reject')}
                         title={markedReject ? 'Click again to clear' : 'Mark reject'}
                         style={{
-                          display: 'inline-flex', alignItems: 'center', gap: 3,
-                          padding: '4px 9px', borderRadius: 7,
+                          display: 'inline-flex', alignItems: 'center', gap: 5,
+                          padding: '8px 16px', borderRadius: 8,
                           border: `1.5px solid ${markedReject ? '#DC2626' : '#E2E8F0'}`,
                           background: markedReject ? '#DC2626' : '#fff',
                           color: markedReject ? '#fff' : '#64748B',
-                          cursor: 'pointer', fontFamily: 'inherit', fontSize: 11.5, fontWeight: 700,
+                          cursor: 'pointer', fontFamily: 'inherit', fontSize: 13, fontWeight: 700,
                         }}>
-                        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
                         Reject
                       </button>
                     </>
@@ -5608,20 +6275,39 @@ export default function EmployeePage() {
 
               {(goal.kpis || []).length > 0 ? (
                 <div style={{ display: 'grid', gap: 4 }}>
-                  {(goal.kpis || []).map((kpi) => (
-                    <div key={kpi.id} style={{ padding: '5px 10px', background: '#fff', borderRadius: 6, border: '1px solid #E9EDF2', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
-                      <div style={{ fontSize: 12.5, color: '#1E293B', fontWeight: 600, minWidth: 0, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                        {kpi.name || <span style={{ color: '#94A3B8', fontStyle: 'italic' }}>Unnamed KPI</span>}
-                        {kpi.source !== 'library' && kpi.source !== undefined && (
-                          <span style={{ marginLeft: 6, fontSize: 10, fontWeight: 700, color: '#2563EB', background: '#EFF6FF', padding: '1px 6px', borderRadius: 999 }}>Self added</span>
-                        )}
+                  {(goal.kpis || []).map((kpi) => {
+                    const selfAdded = kpi.source !== 'library' && kpi.source !== undefined;
+                    return (
+                      <div key={kpi.id} title={!reviewTracksKpiWeights ? 'Reference KPI. Rating is captured at KRA level.' : undefined} style={{ padding: '6px 10px', background: '#fff', borderRadius: 7, border: '1px solid #E9EDF2', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, flexWrap: 'wrap' }}>
+                        <div style={{ fontSize: 12.5, color: '#1E293B', fontWeight: 650, minWidth: 220, flex: '1 1 360px', display: 'flex', alignItems: 'center', gap: 7, overflow: 'hidden' }}>
+                          <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                            {kpi.name || <span style={{ color: '#94A3B8', fontStyle: 'italic' }}>Unnamed KPI</span>}
+                          </span>
+                          {selfAdded && (
+                            <span
+                              title="Self added"
+                              aria-label="Self added"
+                              style={{
+                                width: 6,
+                                height: 6,
+                                borderRadius: '50%',
+                                background: '#64748B',
+                                flexShrink: 0,
+                              }}
+                            />
+                          )}
+                        </div>
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 8, flex: '0 0 auto', marginLeft: 'auto' }}>
+                          {reviewTracksKpiWeights ? (
+                            <div title="KPI weight" style={{ minWidth: 48, textAlign: 'right', fontSize: 12, fontWeight: 800, color: kpi.weight ? '#334155' : '#94A3B8' }}>
+                              {kpi.weight ? `${kpi.weight}%` : '—'}
+                            </div>
+                          ) : null}
+                          {reviewShowsKpiTarget && kpi.target && renderReviewTargetBlock(kpi.target, kpi.targetType || 'text', 'KPI target')}
+                        </div>
                       </div>
-                      <div style={{ fontSize: 11, color: '#64748B', flexShrink: 0 }}>
-                        {reviewTracksKpiWeights ? (kpi.weight ? `${kpi.weight}%` : '—') : 'Reference KPI'}
-                        {effectiveConfig?.targetsEnabled !== false && kpi.target ? ` · ${kpi.target}` : ''}
-                      </div>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               ) : null}
 
@@ -5644,6 +6330,57 @@ export default function EmployeePage() {
             </div>
           );
         })}
+
+        {/* Bottom action bar — mirrors the toolbar at the top so the manager can
+            commit decisions right after the last goal without scrolling back up.
+            Same buttons, same confirm flow. */}
+        {!readOnly && pendingGoals.length > 0 && (() => {
+          const noteValueLocal = managerNotes[submission.employeeCode] || '';
+          const bottomConfirm = (action) => ({
+            action,
+            employeeCode: submission.employeeCode,
+            employeeName: submission.employeeName,
+            approvedPickCount,
+            rejectedPickCount,
+            ...(action === 'approve-all' ? { brokenPendingCount } : {}),
+            pendingTotal: pendingGoals.length,
+            lockedCount: lockedGoals.length,
+            planNote: sanitizeText(noteValueLocal),
+            stage: 'confirm',
+            loading: false,
+          });
+          return (
+            <div style={{ marginTop: 14, paddingTop: 14, borderTop: '1px solid #E2E8F0', display: 'flex', justifyContent: 'flex-end', gap: 8, flexWrap: 'wrap' }}>
+              {approvedPickCount === 0 && (
+                <button
+                  type="button"
+                  onClick={() => setReviewConfirm(bottomConfirm('reject-all'))}
+                  style={{ padding: '9px 18px', borderRadius: 8, border: '1.5px solid #FECACA', background: '#fff', color: '#DC2626', cursor: 'pointer', fontFamily: 'inherit', fontSize: 13, fontWeight: 700, whiteSpace: 'nowrap' }}
+                >
+                  Reject all
+                </button>
+              )}
+              {rejectedPickCount === 0 && brokenPendingCount === 0 && (
+                <button
+                  type="button"
+                  onClick={() => setReviewConfirm(bottomConfirm('approve-all'))}
+                  style={{ padding: '9px 18px', borderRadius: 8, border: 'none', background: '#16A34A', color: '#fff', cursor: 'pointer', fontFamily: 'inherit', fontSize: 13, fontWeight: 700, whiteSpace: 'nowrap', boxShadow: '0 4px 10px rgba(22,163,74,.28)' }}
+                >
+                  Approve all
+                </button>
+              )}
+              {rejectedPickCount > 0 && (
+                <button
+                  type="button"
+                  onClick={() => setReviewConfirm(bottomConfirm('commit'))}
+                  style={{ padding: '9px 20px', borderRadius: 8, border: 'none', background: '#2563EB', color: '#fff', cursor: 'pointer', fontFamily: 'inherit', fontSize: 13, fontWeight: 700, whiteSpace: 'nowrap', boxShadow: '0 4px 10px rgba(37,99,235,.28)' }}
+                >
+                  Submit
+                </button>
+              )}
+            </div>
+          );
+        })()}
 
         {readOnly && submission.managerNote && (
           <div style={{ marginTop: 14, fontSize: 13, color: '#7C2D12', background: '#FFF7ED', border: '1px solid #FED7AA', borderRadius: 8, padding: '10px 12px' }}>
@@ -5791,7 +6528,7 @@ export default function EmployeePage() {
   }
 
   function renderSelfEvaluation() {
-    if (selfEvalSubmitted) {
+    if (selfEvalSubmitted || selfEvaluationSaved) {
       return (
         <div style={{ textAlign: 'center', padding: '60px 20px' }}>
           <div style={{ fontSize: 48, marginBottom: 12 }}>✅</div>
@@ -5805,13 +6542,72 @@ export default function EmployeePage() {
       return <EmptyState title="No goals available" subtitle="There are no approved goals to evaluate for this phase." />;
     }
 
+    const getTargetTypeMeta = (typeId) => targetTypeOptions.find((type) => type.id === typeId)
+      || TARGET_TYPES.find((type) => type.id === typeId)
+      || TARGET_TYPES.find((type) => type.id === 'text');
+    const formatTargetValue = (value, typeId) => {
+      const meta = getTargetTypeMeta(typeId);
+      const unit = String(meta?.unit || '').trim();
+      const text = String(value || '').trim();
+      if (!text) return '—';
+      if (!unit) return text;
+      return meta?.unitPosition === 'prefix' ? `${unit} ${text}` : `${text} ${unit}`;
+    };
+    const getAchievementPercent = (target, achievement, typeId) => {
+      const meta = getTargetTypeMeta(typeId);
+      if (!meta?.isNumeric) return null;
+      const targetNum = Number(String(target || '').replace(/,/g, ''));
+      const achievedNum = Number(String(achievement || '').replace(/,/g, ''));
+      if (!Number.isFinite(targetNum) || !Number.isFinite(achievedNum) || targetNum === 0) return null;
+      if (meta?.lowerIsBetter) {
+        if (achievedNum <= 0) return 200;
+        return Math.round((targetNum / achievedNum) * 100);
+      }
+      return Math.round((achievedNum / targetNum) * 100);
+    };
+    const renderAchievementFields = ({ goalName, kpiName = null, target, targetType = 'text' }) => {
+      if (!hasTargetForEvaluation(target, targetType)) return null;
+      const meta = getTargetTypeMeta(targetType);
+      const achievement = getAchievement(goalName, kpiName);
+      const percent = getAchievementPercent(target, achievement, targetType);
+      const inputType = targetType === 'date' ? 'date' : 'text';
+      return (
+        <div style={{ display: 'grid', gridTemplateColumns: 'minmax(150px, 1fr) minmax(150px, 1fr) minmax(84px, auto)', gap: 8, alignItems: 'stretch', minWidth: 320, flex: '1 1 420px' }}>
+          <div style={{ border: '1px solid #E2E8F0', borderRadius: 8, background: '#F8FAFC', padding: '7px 9px' }}>
+            <div style={{ fontSize: 10, fontWeight: 800, color: '#94A3B8', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 3 }}>Target</div>
+            <div style={{ fontSize: 12.5, fontWeight: 700, color: '#0F172A', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{formatTargetValue(target, targetType)}</div>
+          </div>
+          <div style={{ border: '1px solid #CBD5E1', borderRadius: 8, background: '#fff', padding: '6px 9px' }}>
+            <div style={{ fontSize: 10, fontWeight: 800, color: '#64748B', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 3 }}>Achievement</div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+              {meta?.unit && meta.unitPosition === 'prefix' && <span style={{ fontSize: 12, color: '#64748B', fontWeight: 700 }}>{meta.unit}</span>}
+              <input
+                type={inputType}
+                value={achievement}
+                onChange={(e) => setAchievement(goalName, kpiName, e.target.value)}
+                placeholder={targetType === 'date' ? '' : 'Enter achieved'}
+                style={{ minWidth: 0, width: '100%', border: 'none', outline: 'none', padding: '2px 0', fontFamily: 'inherit', fontSize: 12.5, fontWeight: 700, color: '#0F172A', background: 'transparent' }}
+              />
+              {meta?.unit && meta.unitPosition !== 'prefix' && <span style={{ fontSize: 12, color: '#64748B', fontWeight: 700 }}>{meta.unit}</span>}
+            </div>
+          </div>
+          <div style={{ border: '1px solid #E2E8F0', borderRadius: 8, background: percent === null ? '#F8FAFC' : '#EFF6FF', padding: '7px 9px', minWidth: 84 }}>
+            <div style={{ fontSize: 10, fontWeight: 800, color: '#94A3B8', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 3 }}>Achieved</div>
+            <div style={{ fontSize: 12.5, fontWeight: 800, color: percent === null ? '#64748B' : '#1D4ED8' }}>{percent === null ? '—' : `${percent}%`}</div>
+          </div>
+        </div>
+      );
+    };
+
     return (
       <div>
         {totalRatable > 0 ? (
           <div style={{ marginBottom: 20, padding: '14px 18px', background: '#fff', borderRadius: 10, border: '1.5px solid #E9EDF2' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12.5, marginBottom: 8 }}>
-              <span style={{ color: '#6B7280' }}>Self-rating progress</span>
-              <span style={{ fontWeight: 700, color: selfEvalPct === 100 ? '#16A34A' : '#2563EB' }}>{totalRated} / {totalRatable} rated</span>
+              <span style={{ color: '#6B7280' }}>Self-evaluation progress</span>
+              <span style={{ fontWeight: 700, color: selfEvalPct === 100 ? '#16A34A' : '#2563EB' }}>
+                {totalRated} / {totalRatable} rated{totalAchievementsRequired > 0 ? ` · ${totalAchievementsFilled} / ${totalAchievementsRequired} achievements` : ''}
+              </span>
             </div>
             <div style={{ height: 6, background: '#F1F5F9', borderRadius: 4 }}>
               <div style={{ height: '100%', width: `${selfEvalPct}%`, background: selfEvalPct === 100 ? '#16A34A' : 'linear-gradient(90deg,#2563EB,#6366F1)', borderRadius: 4, transition: 'width .3s' }} />
@@ -5848,29 +6644,13 @@ export default function EmployeePage() {
                   <div style={{ fontSize: 14, fontWeight: 700, color: '#0D1117' }}>{goal.name}</div>
                 </div>
                 <span style={{ fontSize: 12, fontWeight: 700, color, background: `${color}14`, padding: '3px 10px', borderRadius: 6 }}>Weight: {goal.weight}%</span>
+                {goalRatedAtKraLevel && renderAchievementFields({
+                  goalName: goal.name,
+                  target: goal.target,
+                  targetType: goal.targetType || (goal.target ? 'text' : 'none'),
+                })}
                 {goalRatedAtKraLevel ? (
-                  <div style={{ display: 'flex', gap: 5 }}>
-                    {currentScale.map((step) => (
-                      <button
-                        key={step.n}
-                        onClick={() => setRating(goal.name, null, step.n)}
-                        style={{
-                          width: 32,
-                          height: 32,
-                          borderRadius: '50%',
-                          border: `2px solid ${getRating(goal.name, null) === step.n ? SCALE_COLORS[step.n - 1] : '#E2E8F0'}`,
-                          background: getRating(goal.name, null) === step.n ? SCALE_COLORS[step.n - 1] : '#fff',
-                          color: getRating(goal.name, null) === step.n ? '#fff' : '#9CA3AF',
-                          fontSize: 12,
-                          fontWeight: 700,
-                          cursor: 'pointer',
-                          fontFamily: 'inherit',
-                        }}
-                      >
-                        {step.n}
-                      </button>
-                    ))}
-                  </div>
+                  renderRatingControl(goal.name, null)
                 ) : null}
               </div>
 
@@ -5884,30 +6664,14 @@ export default function EmployeePage() {
                         : `Weight: ${kpi.weight}%`}
                     </div>
                   </div>
+                  {!goalRatedAtKraLevel && renderAchievementFields({
+                    goalName: goal.name,
+                    kpiName: kpi.name,
+                    target: kpi.target,
+                    targetType: kpi.targetType || (kpi.target ? 'text' : 'none'),
+                  })}
                   {!goalRatedAtKraLevel ? (
-                    <div style={{ display: 'flex', gap: 5, alignItems: 'center' }}>
-                      {currentScale.map((step) => (
-                        <button
-                          key={step.n}
-                          onClick={() => setRating(goal.name, kpi.name, step.n)}
-                          title={`${step.n} — ${step.l}`}
-                          style={{
-                            width: 30,
-                            height: 30,
-                            borderRadius: '50%',
-                            border: `2px solid ${getRating(goal.name, kpi.name) === step.n ? SCALE_COLORS[step.n - 1] : '#E2E8F0'}`,
-                            background: getRating(goal.name, kpi.name) === step.n ? SCALE_COLORS[step.n - 1] : '#fff',
-                            color: getRating(goal.name, kpi.name) === step.n ? '#fff' : '#9CA3AF',
-                            fontSize: 11,
-                            fontWeight: 700,
-                            cursor: 'pointer',
-                            fontFamily: 'inherit',
-                          }}
-                        >
-                          {step.n}
-                        </button>
-                      ))}
-                    </div>
+                    renderRatingControl(goal.name, kpi.name, true)
                   ) : (
                     <div style={{ fontSize: 11.5, color: '#94A3B8', fontWeight: 600 }}>
                       Context only
@@ -5920,14 +6684,21 @@ export default function EmployeePage() {
         })}
 
         <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 8 }}>
-          <button
-            type="button"
-            onClick={() => setSelfEvalSubmitted(true)}
-            disabled={selfEvalPct < 100}
-            style={{ padding: '10px 28px', background: selfEvalPct === 100 ? '#16A34A' : '#CBD5E1', color: '#fff', border: 'none', borderRadius: 9, fontSize: 14, fontWeight: 700, cursor: selfEvalPct === 100 ? 'pointer' : 'not-allowed', fontFamily: 'inherit' }}
-          >
-            {selfEvalPct === 100 ? '✓ Submit Self-Evaluation' : `Rate all goals to submit (${selfEvalPct}%)`}
-          </button>
+          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 8 }}>
+            {selfEvalSubmitError && (
+              <div style={{ maxWidth: 520, fontSize: 12, color: '#991B1B', background: '#FEF2F2', border: '1px solid #FECACA', borderRadius: 8, padding: '7px 10px', fontWeight: 700 }}>
+                {selfEvalSubmitError}
+              </div>
+            )}
+            <button
+              type="button"
+              onClick={submitSelfEvaluation}
+              disabled={selfEvalPct < 100}
+              style={{ padding: '10px 28px', background: selfEvalPct === 100 ? '#16A34A' : '#CBD5E1', color: '#fff', border: 'none', borderRadius: 9, fontSize: 14, fontWeight: 700, cursor: selfEvalPct === 100 ? 'pointer' : 'not-allowed', fontFamily: 'inherit' }}
+            >
+              {selfEvalPct === 100 ? '✓ Submit Self-Evaluation' : `Complete ratings and achievements (${selfEvalPct}%)`}
+            </button>
+          </div>
         </div>
       </div>
     );
@@ -6180,9 +6951,16 @@ export default function EmployeePage() {
   if (!isExternalManager && canSetOwnGoals) {
     tabs.push({
       id: 'goals',
-      label: currentPhase === 'self-evaluation' ? 'Self-Eval' : 'My Goals',
-      count: currentPhase === 'self-evaluation' ? totalRatable : myGoals.length,
+      label: 'My Goals',
+      count: myGoals.length,
     });
+    // My Goal Evaluation — visible once goals are approved (per-employee).
+    if (myInSelfEvalPhase) {
+      tabs.push({
+        id: 'self-eval',
+        label: 'My Goal Evaluation',
+      });
+    }
     // Deleted Goals tab — surfaced when there's trash, and kept visible while
     // the user is already on it so recovering the last goal does not leave the
     // page on a section with no active tab.
@@ -6200,6 +6978,14 @@ export default function EmployeePage() {
 	      label: 'My Team Goals',
 	      count: directReports.length,
 	    });
+	    // Team Goal Evaluation — visible once at least one direct report has submitted self-eval.
+	    if (myInManagerEvalPhase) {
+	      tabs.push({
+	        id: 'manager-eval',
+	        label: 'Team Goal Evaluation',
+	        count: reportsReadyForManagerEval,
+	      });
+	    }
 	    tabs.push({
 	      id: 'send-mail',
 	      label: 'Reminders',
@@ -6248,15 +7034,6 @@ export default function EmployeePage() {
     } catch (_) { /* commit failures fall through; modal still closes */ }
     setReviewConfirm(null);
   }
-  // ESC closes the modal (acts as Revert) when not mid-commit.
-  useEffect(() => {
-    if (!reviewConfirm) return undefined;
-    function onKey(e) { if (e.key === 'Escape') revertReviewConfirm(); }
-    document.addEventListener('keydown', onKey);
-    return () => document.removeEventListener('keydown', onKey);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [reviewConfirm]);
-
   return (
     <div style={{ height: '100vh', overflow: 'hidden', display: 'flex', flexDirection: 'column', background: '#F0F4F8', fontFamily: "'Geist','Inter','Segoe UI',Arial,sans-serif", fontSize: 15, color: '#0D1117' }}>
 
@@ -6278,6 +7055,7 @@ export default function EmployeePage() {
             : 'HR dual-role mode is active. Changes here behave exactly like the employee experience for this record.'}
         </div>
       )}
+
 
       {reviewConfirm && createPortal(
         <ReviewConfirmModal
@@ -6603,6 +7381,12 @@ export default function EmployeePage() {
           {activeSection === 'messages' && renderMessages()}
           {activeSection === 'notifications' && renderNotifications()}
           {activeSection === 'profile' && renderProfile()}
+          {activeSection === 'self-eval' && (
+            <SelfEvalPage embedded overrideEmpCode={session?.empCode || ''} overrideOrgKey={session?.orgKey || ''} />
+          )}
+          {activeSection === 'manager-eval' && (
+            <ManagerEvalPage embedded overrideMgrCode={session?.empCode || ''} overrideOrgKey={session?.orgKey || ''} />
+          )}
           </div>
         </div>
       </div>
@@ -6723,6 +7507,59 @@ export default function EmployeePage() {
               <button
                 type="button"
                 onClick={undoGoalDelete}
+                style={{
+                  border: '1px solid #BFDBFE', background: '#FFFFFF', color: '#1D4ED8',
+                  borderRadius: 10, padding: '8px 13px',
+                  fontFamily: 'inherit', fontSize: 12.5, fontWeight: 800,
+                  cursor: 'pointer', boxShadow: '0 1px 2px rgba(15,23,42,.06)', flexShrink: 0,
+                }}
+              >
+                Undo
+              </button>
+            </div>
+          </div>
+        </>
+      ), document.body)}
+      {undoDeleteKpi && createPortal((
+        <>
+          <style>{`
+            @keyframes goalUndoIn { from { opacity: 0; transform: translate(-50%, 18px) scale(.97); } to { opacity: 1; transform: translate(-50%, 0) scale(1); } }
+            @keyframes goalUndoBorder { from { transform: scaleX(1); } to { transform: scaleX(0); } }
+          `}</style>
+          <div key={undoDeleteKpi.token} role="status" aria-live="polite" style={{
+            position: 'fixed', left: '50%', bottom: 22, zIndex: 9500,
+            transform: 'translateX(-50%)',
+            width: 'min(520px, calc(100vw - 28px))',
+            animation: 'goalUndoIn 220ms cubic-bezier(.2,.9,.25,1)',
+            fontFamily: 'inherit',
+          }}>
+            <div style={{
+              position: 'relative', overflow: 'hidden',
+              borderRadius: 14, background: '#EFF6FF',
+              border: '1.5px solid #EF4444',
+              boxShadow: '0 18px 42px rgba(15,23,42,.20)',
+              padding: '12px 14px',
+              display: 'flex', alignItems: 'center', gap: 12,
+            }}>
+              <div style={{
+                position: 'absolute', left: 0, right: 0, bottom: 0, height: 3,
+                background: '#EF4444', transformOrigin: 'left center',
+                animation: `goalUndoBorder ${GOAL_DELETE_UNDO_MS}ms linear forwards`,
+              }} />
+              <div style={{
+                width: 32, height: 32, borderRadius: 10,
+                background: '#DBEAFE', color: '#1D4ED8',
+                display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0,
+              }}>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-2 14a2 2 0 0 1-2 2H9a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M8 6V4h8v2"/></svg>
+              </div>
+              <div style={{ minWidth: 0, flex: 1 }}>
+                <div style={{ fontSize: 13.5, fontWeight: 800, color: '#0F172A', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>KPI removed</div>
+                <div style={{ marginTop: 2, fontSize: 12.2, color: '#475569', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{undoDeleteKpi.kpi?.name || 'Untitled KPI'}</div>
+              </div>
+              <button
+                type="button"
+                onClick={undoKpiDelete}
                 style={{
                   border: '1px solid #BFDBFE', background: '#FFFFFF', color: '#1D4ED8',
                   borderRadius: 10, padding: '8px 13px',

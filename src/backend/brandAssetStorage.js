@@ -96,53 +96,29 @@ export async function uploadEmailLogoAsset(file, { orgKey = 'global', folder = '
 
 export async function ensureDefaultZaroLogoUrl(bundledUrl) {
   if (!supabase) return bundledUrl;
-  // Only honor the cached URL if it's a real public HTTPS asset; older
-  // sessions may have cached a local dev URL that would fail to render in
-  // email clients.
+  // The client cannot upload to the `brand-assets` bucket — the bucket's RLS
+  // policy requires a Supabase Auth user (we use a custom server-session
+  // model instead). So we simply return the public URL for the bundled Zaro
+  // logo path; the file has been uploaded once via the Supabase dashboard at:
+  //   brand-assets/defaults/zaro-logo-email.jpg
+  // Emails that go out reference this stable URL, so they always render the
+  // logo regardless of the recipient's mail client. If the file is missing
+  // from Storage, the image will simply 404 in the email — to fix, drop
+  // the bundled Zaro logo (final zaro logo.png) at that exact path in the
+  // bucket via the Supabase dashboard.
   try {
     const cached = localStorage.getItem(DEFAULT_LOGO_CACHE_KEY);
     if (cached && isPublicBrandAssetUrl(cached)) return cached;
     if (cached) localStorage.removeItem(DEFAULT_LOGO_CACHE_KEY);
-  } catch (_) { /* ignore */ }
+  } catch { /* ignore */ }
 
   const { data: publicData } = supabase.storage.from(BUCKET).getPublicUrl(DEFAULT_LOGO_PATH);
   const publicUrl = publicData?.publicUrl;
-
   if (publicUrl) {
-    try {
-      const head = await fetch(publicUrl, { method: 'HEAD', cache: 'no-store' });
-      if (head.ok) {
-        try { localStorage.setItem(DEFAULT_LOGO_CACHE_KEY, publicUrl); } catch (_) { /* ignore */ }
-        return publicUrl;
-      }
-    } catch (_) { /* fall through to upload */ }
+    try { localStorage.setItem(DEFAULT_LOGO_CACHE_KEY, publicUrl); } catch { /* ignore */ }
+    return publicUrl;
   }
-
-  try {
-    const res = await fetch(bundledUrl);
-    if (!res.ok) throw new Error(`fetch bundled logo failed: ${res.status}`);
-    const blob = await res.blob();
-    const optimizedBlob = await resizeToBlob(blob, {
-      maxDim: 240,
-      quality: 0.72,
-      mimeType: 'image/jpeg',
-      background: '#ffffff',
-    });
-    const { error } = await supabase.storage.from(BUCKET).upload(DEFAULT_LOGO_PATH, optimizedBlob, {
-      cacheControl: '31536000',
-      upsert: true,
-      contentType: 'image/jpeg',
-    });
-    if (error && !/exists|duplicate/i.test(error.message || '')) throw error;
-    if (publicUrl) {
-      try { localStorage.setItem(DEFAULT_LOGO_CACHE_KEY, publicUrl); } catch (_) { /* ignore */ }
-      return publicUrl;
-    }
-    return bundledUrl;
-  } catch (err) {
-    console.warn('[brandAssetStorage] default Zaro logo upload failed, using bundled URL', err);
-    return bundledUrl;
-  }
+  return bundledUrl;
 }
 
 export function isPublicBrandAssetUrl(url) {
@@ -159,7 +135,7 @@ export function isPublicBrandAssetUrl(url) {
     // Reject the dev server's bundler asset paths (e.g. /src/, /@fs/, /@vite/).
     if (/^\/(?:src|@fs|@vite|@id|node_modules)\//.test(parsed.pathname)) return false;
     return true;
-  } catch (_) {
+  } catch {
     return false;
   }
 }

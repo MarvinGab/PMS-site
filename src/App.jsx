@@ -13,6 +13,9 @@ const EMP_CREDENTIALS_KEY = 'zarohr_emp_credentials';
 
 const PMSWizard = lazy(() => import('./PMSWizard'));
 const HRCycleDashboard = lazy(() => import('./pages/HRCycleDashboard'));
+const SelfEvalPage = lazy(() => import('./pages/SelfEvalPage'));
+const ManagerEvalPage = lazy(() => import('./pages/ManagerEvalPage'));
+const HRReviewPage = lazy(() => import('./pages/HRReviewPage'));
 
 class ErrorBoundary extends Component {
   constructor(props) {
@@ -159,6 +162,8 @@ function Router() {
   // Public routes (no auth needed)
   if (route === 'login') return <LoginPage />;
   if (route === 'employee') return <EmployeePage />;
+  if (route === 'self-eval') return <Suspense fallback={<BootScreen />}><SelfEvalPage /></Suspense>;
+  if (route === 'manager-eval') return <Suspense fallback={<BootScreen />}><ManagerEvalPage /></Suspense>;
 
   // Not logged in → redirect to login
   if (!role) {
@@ -167,6 +172,9 @@ function Router() {
 
   // HR admin
   if (role === 'hr-admin') {
+    if (route === 'hr-review') {
+      return <Suspense fallback={<BootScreen />}><HRReviewPage /></Suspense>;
+    }
     const org = orgs.find((o) => o.key === orgKey);
     const orgName = org?.name || 'Assigned Organization';
     if (org?.launched) {

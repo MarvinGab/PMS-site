@@ -1,6 +1,6 @@
 import { shouldUseSupabase } from './config';
 import { supabase } from './supabaseClient';
-import { readAuthSessionSync } from './stateStore';
+import { readAuthSessionSync, persistAuthSession } from './stateStore';
 
 async function invokeAuthFunction(body) {
   if (!shouldUseSupabase || !supabase) {
@@ -83,6 +83,51 @@ export async function revokeEmployeeSessions({ organizationKey = '', employees =
         }))
       : [],
   });
+}
+
+// Best-effort re-auth for the local Super Admin when their server session has
+// expired in the middle of a 12h day of dev work. Reads credentials from
+// VITE_SUPER_ADMIN_EMAIL / VITE_SUPER_ADMIN_PASSWORD; if either is missing the
+// helper returns null and the caller falls back to surfacing the error.
+// On success it persists the freshly-minted authSession to localStorage so
+// the very next readAuthSessionSync() returns the new token.
+let refreshSuperAdminInFlight = null;
+export async function tryRefreshSuperAdminSession() {
+  if (typeof import.meta === 'undefined') return null;
+  const email = String(import.meta.env?.VITE_SUPER_ADMIN_EMAIL || '').trim();
+  const password = String(import.meta.env?.VITE_SUPER_ADMIN_PASSWORD || '');
+  if (!email || !password) return null;
+
+  // Coalesce concurrent callers (e.g. a bulk send firing ten sendOne() at
+  // once) onto a single in-flight refresh promise so we don't hammer the
+  // app-auth function with N parallel logins.
+  if (refreshSuperAdminInFlight) return refreshSuperAdminInFlight;
+  refreshSuperAdminInFlight = (async () => {
+    try {
+      const result = await loginWithServerSession(email, password, '', false, '');
+      if (!result?.ok || !result.serverSessionToken) return null;
+      const existing = readAuthSessionSync() || {};
+      // Only overwrite when the existing session is the super-admin (avoid
+      // accidentally wiping an HR-admin who happened to have the env vars
+      // present on their dev machine).
+      const role = String(existing.role || result.user?.role || '').toLowerCase();
+      if (role && role !== 'super-admin') return null;
+      persistAuthSession({
+        ...existing,
+        isLoggedIn: true,
+        role: 'super-admin',
+        userName: existing.userName || result.user?.userName || 'Super Admin',
+        userEmail: existing.userEmail || email.toLowerCase(),
+        serverSessionToken: result.serverSessionToken,
+      });
+      return { token: result.serverSessionToken, user: result.user };
+    } catch {
+      return null;
+    } finally {
+      refreshSuperAdminInFlight = null;
+    }
+  })();
+  return refreshSuperAdminInFlight;
 }
 
 export async function resetEmployeePmsOnServer({ organizationKey = '', employees = [] } = {}) {

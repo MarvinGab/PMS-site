@@ -95,27 +95,25 @@ export default function PhaseSettingsEditor({
       />
 
       {!validation.ok && (
-        <div role="alert" style={{ ...alertStyles.error, display: 'flex', alignItems: 'center', gap: 10 }}>
+        <div role="alert" style={{ ...alertStyles.error, display: 'flex', alignItems: 'flex-start', gap: 10 }}>
           <span style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: 18, height: 18, borderRadius: '50%', background: '#DC2626', color: '#fff', fontSize: 11, fontWeight: 800, flexShrink: 0 }}>!</span>
-          <span>
-            <strong style={{ marginRight: 6 }}>Action required.</strong>
-            {validation.errors[0]}
-            {validation.errors.length > 1 && (
-              <span style={{ color: '#B91C1C', marginLeft: 6 }}>(+{validation.errors.length - 1} more)</span>
-            )}
-          </span>
+          <div>
+            <strong>Action required.</strong>
+            <ul style={{ margin: '5px 0 0 18px', padding: 0, lineHeight: 1.45 }}>
+              {validation.errors.map((msg) => <li key={msg}>{msg}</li>)}
+            </ul>
+          </div>
         </div>
       )}
       {validation.ok && review.warnings.length > 0 && (
-        <div style={{ ...alertStyles.warn, display: 'flex', alignItems: 'center', gap: 10 }}>
+        <div style={{ ...alertStyles.warn, display: 'flex', alignItems: 'flex-start', gap: 10 }}>
           <span style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: 18, height: 18, borderRadius: '50%', background: '#F59E0B', color: '#fff', fontSize: 11, fontWeight: 800, flexShrink: 0 }}>i</span>
-          <span>
-            <strong style={{ marginRight: 6 }}>Notice.</strong>
-            {review.warnings[0]}
-            {review.warnings.length > 1 && (
-              <span style={{ color: '#92400E', marginLeft: 6 }}>(+{review.warnings.length - 1} more)</span>
-            )}
-          </span>
+          <div>
+            <strong>Notice.</strong>
+            <ul style={{ margin: '5px 0 0 18px', padding: 0, lineHeight: 1.45 }}>
+              {review.warnings.map((msg) => <li key={msg}>{msg}</li>)}
+            </ul>
+          </div>
         </div>
       )}
 

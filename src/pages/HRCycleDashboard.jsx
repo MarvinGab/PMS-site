@@ -1,6 +1,9 @@
 import { useState, useMemo, useEffect, useRef } from 'react';
 import { useApp } from '../AppContext';
-import { LaunchOverview, OrgChartPanel } from '../PMSWizard';
+import { LaunchOverview, OrgChartPanel, StepScale, StepAutoRating, StepCompetencies, StepBellCurve, StepGoalLibraries, StepGoalLibrariesFlat, StepPrefillData, StepPrefillDataFlat, getScaleSnapshot, getBellCurveSnapshot } from '../PMSWizard';
+import PhaseSettingsEditor from '../components/PhaseSettingsEditor';
+import { readCycleWindows, defaultWindowsForFiscalYear, resolveOrgFiscalRange, getActiveSubPhases, SUB_PHASE } from '../backend/cyclePhase';
+import HRReviewPage from './HRReviewPage';
 import zaroLogo from '../../images/final zaro logo.png';
 import { downloadEmployeeTemplate, parseEmployeeXlsx, employeeTemplateMeta } from '../templateUtils';
 import { BRAND_PALETTES, resolveBrandPalette, deriveCustomPalette, buildHeroGradient, buildSwatchGradient, buildHeroBackground, resolveHero, fillAccent, CARD_ACCENT_MODES, CARD_PREVIEW_TINTS, normalizeCardsMode, cardStripeWidth } from '../brandPalettes';
@@ -18,11 +21,13 @@ import {
   persistEmployeeSession,
   readOrgBrandCacheSync,
   persistOrgBrandCache,
+  saveOrganizationRecord,
   rotateEmployeeOtpsForSend,
   clearPendingEmployeeOtps,
 } from '../backend/stateStore';
 import { resetUserPasswordByAdmin } from '../backend/authService';
 import { sendCustomBroadcast } from '../backend/emailService';
+import { hydrateRatings, readRatings, subscribeToRatings, writeRatings } from '../backend/ratingsStore';
 import { shouldUseSupabase } from '../backend/config';
 import { supabase } from '../backend/supabaseClient';
 import { hashPasswordValue } from '../backend/passwordCrypto';
@@ -281,6 +286,7 @@ const EMP_STAGES = [
   { id: 'pending-approval', label: 'Approval pending',    short: 'Approval pending', color: '#D97706', bg: '#FFFBEB', border: '#FDE68A' },
   { id: 'self-evaluation',  label: 'Self evaluation',     short: 'Self eval',        color: '#0891B2', bg: '#ECFEFF', border: '#A5F3FC' },
   { id: 'mgr-evaluation',   label: 'Manager evaluation',  short: 'Manager eval',     color: '#7C3AED', bg: '#F5F3FF', border: '#DDD6FE' },
+  { id: 'hr-review',        label: 'HR review',           short: 'HR review',        color: '#EA580C', bg: '#FFF7ED', border: '#FED7AA' },
   { id: 'completed',        label: 'Completed',           short: 'Completed',        color: '#16A34A', bg: '#F0FDF4', border: '#BBF7D0' },
   // "Exempt" = roster row that can't participate this cycle (outside-PMS rows
   // tagged NONE, or in-PMS employees whose RM isn't in the roster). Counted
@@ -664,11 +670,20 @@ function applyEmailPatch(employees, code, newEmail) {
 const NAV_MODULES = [
   { id: 'overview',    icon: '🏠', label: 'Overview',            group: 'main' },
   { id: 'emp-status',  icon: '👥', label: 'Employee Status',     group: 'main' },
+  { id: 'calendar',    icon: '📅', label: 'Cycle Calendar',      group: 'main' },
   { id: 'comms',       icon: '✉️',  label: 'Communications',      group: 'ops' },
   { id: 'stage',       icon: '🔀', label: 'Stage Control',       group: 'ops' },
+  { id: 'hr-review',   icon: '🔍', label: 'HR Review',           group: 'main' },
   { id: 'mgr-change',  icon: '👤', label: 'Manager Change',      group: 'ops' },
   { id: 'grp-transfer',icon: '📦', label: 'Group Transfer',      group: 'ops' },
   { id: 'roster',      icon: '📋', label: 'Add / Remove',        group: 'ops' },
+  { id: 'q-goals',         icon: '🎯', label: 'Goals',            group: 'quick' },
+  // Pre-fill Goals tile removed — the Goals board already shows + edits prefill
+  // data per role slot, so a separate tile was a duplicate view.
+  { id: 'q-scale',         icon: '🎚', label: 'Rating Scale',     group: 'quick' },
+  { id: 'q-auto',          icon: '🤖', label: 'Auto-Rating',      group: 'quick' },
+  { id: 'q-comp',          icon: '🧭', label: 'Competencies',     group: 'quick' },
+  { id: 'q-bell',          icon: '🔔', label: 'Bell Curve',       group: 'quick' },
   { id: 'test-creds',  icon: '👁',  label: 'View as Proxy',       group: 'dev' },
   { id: 'hr-team',     icon: '🛡',  label: 'HR Team',             group: 'dev' },
   { id: 'email-settings', icon: '📨', label: 'Email Settings',    group: 'dev' },
@@ -710,6 +725,15 @@ function NavIcon({ id, color = 'currentColor' }) {
     ),
     config: (
       <svg {...common}><circle cx="12" cy="12" r="3" /><path d="M12 2.8v3" /><path d="M12 18.2v3" /><path d="M4 4l2.1 2.1" /><path d="m17.9 17.9 2.1 2.1" /><path d="M2.8 12h3" /><path d="M18.2 12h3" /><path d="m4 20 2.1-2.1" /><path d="m17.9 6.1 2.1-2.1" /></svg>
+    ),
+    calendar: (
+      <svg {...common}><rect x="3.5" y="5" width="17" height="15" rx="2" /><path d="M3.5 9.5h17" /><path d="M8 3.5v3" /><path d="M16 3.5v3" /></svg>
+    ),
+    'q-goals': (
+      <svg {...common}><circle cx="12" cy="12" r="8" /><circle cx="12" cy="12" r="4" /><circle cx="12" cy="12" r="0.6" fill={color} /></svg>
+    ),
+    'q-prefill': (
+      <svg {...common}><path d="M7 4h8l2 2v14H7z" /><path d="M15 4v4h4" /><path d="M9.5 12h5" /><path d="M9.5 15.5h5" /></svg>
     ),
   };
   return icons[id] || <svg {...common}><circle cx="12" cy="12" r="7" /></svg>;
@@ -787,6 +811,7 @@ function ModuleOverview({ employees, groups, orgName, congratsDismissed, onDismi
   const total = pmsEmployees.length;
   const completed = stageSummary['completed'] || 0;
   const inEvaluation = (stageSummary['self-evaluation'] || 0) + (stageSummary['mgr-evaluation'] || 0);
+  const inHrReview = stageSummary['hr-review'] || 0;
   const completionPct = total > 0 ? Math.round((completed / total) * 100) : 0;
 
   const statCards = [
@@ -794,6 +819,7 @@ function ModuleOverview({ employees, groups, orgName, congratsDismissed, onDismi
     { label: 'In goal creation', value: stageSummary['goal-creation'] || 0, color: '#4F46E5', bg: 'linear-gradient(135deg,#EEF2FF 0%,#FFFFFF 100%)' },
     { label: 'Approval pending', value: stageSummary['pending-approval'] || 0, color: '#D97706', bg: 'linear-gradient(135deg,#FFFBEB 0%,#FFFFFF 100%)' },
     { label: 'In evaluation',    value: inEvaluation,                       color: '#0891B2', bg: 'linear-gradient(135deg,#ECFEFF 0%,#FFFFFF 100%)' },
+    { label: 'HR review',        value: inHrReview,                          color: '#EA580C', bg: 'linear-gradient(135deg,#FFF7ED 0%,#FFFFFF 100%)' },
     { label: 'Completed',        value: completed,                          color: '#16A34A', bg: 'linear-gradient(135deg,#F0FDF4 0%,#FFFFFF 100%)' },
     ...(exemptEmployees.length > 0 ? [
       { label: 'Exempt',          value: exemptEmployees.length,             color: '#64748B', bg: 'linear-gradient(135deg,#F1F5F9 0%,#FFFFFF 100%)' },
@@ -2996,6 +3022,49 @@ function ModuleComms({ employees, groups, org, config, onUpdate, onConfigPatch, 
 
 /* ── Stage Control ──────────────────────────────────────────── */
 function ModuleStageControl({ employees, onUpdate, orgKey }) {
+  // The live stage is DERIVED from the ratings store (self/manager/final submitted),
+  // and that derivation overrides a manual _pmsStage. So a forced stage change must
+  // also reset the ratings submissions to match the target — otherwise a stale
+  // "manager submitted" keeps the row stuck on "Completed".
+  function syncRatingsForStageChange(codeToTarget) {
+    if (!orgKey || !codeToTarget || codeToTarget.size === 0) return;
+    const all = readRatings(orgKey);
+    const ratings = { ...(all.ratings || {}) };
+    const nowIso = new Date().toISOString();
+    const keyByNorm = {};
+    Object.keys(ratings).forEach((k) => { keyByNorm[normalizeCodeStr(k)] = k; });
+    let changed = false;
+    codeToTarget.forEach((targetStage, rawCode) => {
+      const norm = normalizeCodeStr(rawCode);
+      const storeKey = keyByNorm[norm] || String(rawCode).trim();
+      const cur = ratings[storeKey] || {};
+      const self = { ...(cur.self || {}) };
+      const manager = { ...(cur.manager || {}) };
+      const final = { ...(cur.final || {}) };
+      if (targetStage === 'mgr-evaluation') {
+        if (!self.submittedAt) self.submittedAt = nowIso; // employee considered done
+        manager.submittedAt = null;
+        final.submittedAt = null;
+      } else if (targetStage === 'hr-review') {
+        if (!self.submittedAt) self.submittedAt = nowIso;
+        if (!manager.submittedAt) manager.submittedAt = nowIso;
+        final.submittedAt = null;
+      } else if (targetStage === 'completed') {
+        if (!self.submittedAt) self.submittedAt = nowIso;
+        if (!manager.submittedAt) manager.submittedAt = nowIso;
+        if (!final.submittedAt) final.submittedAt = nowIso;
+      } else {
+        // goal-creation / pending-approval / self-evaluation → nothing rated yet
+        self.submittedAt = null;
+        manager.submittedAt = null;
+        final.submittedAt = null;
+      }
+      ratings[storeKey] = { ...cur, self, manager, final };
+      changed = true;
+    });
+    if (changed) writeRatings(orgKey, { ...all, ratings });
+  }
+
   // When HR forces a stage change, also update the goal workflow so the manager's approvals queue
   // and notifications fire — otherwise stage and submission.status drift apart.
   function syncWorkflowForStageChange(codeToTarget) {
@@ -3153,6 +3222,7 @@ function ModuleStageControl({ employees, onUpdate, orgKey }) {
     const codeToTarget = new Map();
     validSelected.forEach((code) => { codeToTarget.set(code, targetStage); });
     syncWorkflowForStageChange(codeToTarget);
+    syncRatingsForStageChange(codeToTarget);
     showToast(blockedCount
       ? `${validSelected.length} moved · ${blockedCount} skipped until goals total 100%`
       : `${validSelected.length} employee${validSelected.length !== 1 ? 's' : ''} moved to "${EMP_STAGES.find((s) => s.id === targetStage)?.label}"`);
@@ -3340,6 +3410,7 @@ function ModuleStageControl({ employees, onUpdate, orgKey }) {
     });
     onUpdate(updated);
     syncWorkflowForStageChange(codeToTarget);
+    syncRatingsForStageChange(codeToTarget);
     showToast(blockedCount ? `${validRows.length} updated · ${blockedCount} skipped until goals total 100%` : `${validRows.length} employee${validRows.length !== 1 ? 's' : ''} updated`);
     setBulkPreview(null);
   }
@@ -6317,6 +6388,188 @@ function cardAccentStylePreview(mode, tint) {
   };
 }
 
+// Cycle Calendar — lets HR set the goal-setting and evaluation date windows
+// for the whole org. The calendar is the single source of truth: phases switch
+// on and off automatically from these dates, so there's no manual stage flag to
+// flip. Saving writes back to the org record (local + backend).
+function ModuleCalendar({ org, orgKey, orgs, setOrgs, userName }) {
+  const fiscal = resolveOrgFiscalRange(org);
+  const stored = readCycleWindows(org);
+  const value = stored || defaultWindowsForFiscalYear(fiscal);
+  const [savedAt, setSavedAt] = useState(null);
+
+  async function handleSave(next) {
+    const stamp = new Date().toISOString();
+    const nextOrg = {
+      ...org,
+      cyclePhaseWindows: next,
+      cyclePhaseWindowsLastEditedAt: stamp,
+      cyclePhaseWindowsLastEditedBy: userName || 'HR admin',
+    };
+    setOrgs(orgs.map((o) => (o.key === orgKey ? { ...o, ...nextOrg } : o)));
+    persistOrgBrandCache({ ...nextOrg, key: orgKey });
+    await Promise.resolve(saveOrganizationRecord(nextOrg));
+    setSavedAt(Date.now());
+  }
+
+  return (
+    <div style={{ maxWidth: 1100, margin: '0 auto', padding: '0 4px' }}>
+      <div style={{ marginBottom: 14, display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', gap: 12 }}>
+        <div>
+          <div style={{ fontSize: 22, fontWeight: 800, color: '#0F172A' }}>Cycle Calendar</div>
+          <div style={{ fontSize: 13, color: '#64748B', marginTop: 4 }}>
+            Set when goal-setting and evaluation open. Phases turn on and off automatically from these dates — no manual flips.
+          </div>
+        </div>
+        <SaveIndicator savedAt={savedAt} />
+      </div>
+      <PhaseSettingsEditor
+        value={value}
+        onChange={handleSave}
+        fiscalYearStartsOn={fiscal.startsOn}
+        fiscalYearEndsOn={fiscal.endsOn}
+      />
+    </div>
+  );
+}
+
+// Quick-config panel — renders the matching wizard step component in-place
+// so HR can tweak a single section (rating scale, auto-rating bands,
+// competencies, bell curve) without re-running the whole wizard. The wizard
+// step components take a `(key, value)` update API; the dashboard works in
+// partial-object patches. The bridge handles both, including the wizard's
+// `__mergeConfig` atomic multi-key updates.
+function QuickConfigPanel({ moduleId, config, onConfigSave, readOnly = false }) {
+  const [draftConfig, setDraftConfig] = useState(config || {});
+  const [savedAt, setSavedAt] = useState(null);
+  const [isSaving, setIsSaving] = useState(false);
+
+  const update = (key, value) => {
+    if (readOnly) return;
+    setDraftConfig((prev) => {
+      const base = prev || {};
+      if (key === '__mergeConfig' && value && typeof value === 'object') {
+        return { ...base, ...value };
+      }
+      return { ...base, [key]: value };
+    });
+  };
+  const dirty = JSON.stringify(draftConfig || {}) !== JSON.stringify(config || {});
+
+  // The embedded config steps no longer show their own apply button, so finalize
+  // the step's "applied" marker here as part of the single Save.
+  function finalizeSnapshots(cfg) {
+    if (moduleId === 'q-scale') return { ...cfg, scaleAppliedSnapshot: getScaleSnapshot(cfg) };
+    if (moduleId === 'q-bell') return { ...cfg, bellAppliedSnapshot: getBellCurveSnapshot(cfg) };
+    if (moduleId === 'q-auto') return { ...cfg, autoRatingAppliedSnapshot: cfg.autoRatingAppliedSnapshot || `confirmed_${Date.now()}` };
+    if (moduleId === 'q-comp') return { ...cfg, competenciesAppliedSnapshot: cfg.competenciesAppliedSnapshot || `confirmed_${Date.now()}` };
+    return cfg;
+  }
+
+  async function saveDraft() {
+    if (readOnly) return;
+    if (!dirty || isSaving) return;
+    setIsSaving(true);
+    const finalized = finalizeSnapshots(draftConfig);
+    setDraftConfig(finalized);
+    await Promise.resolve(onConfigSave?.(finalized));
+    setIsSaving(false);
+    setSavedAt(Date.now());
+  }
+
+  function cancelDraft() {
+    setDraftConfig(config || {});
+    setSavedAt(null);
+  }
+
+  const GoalsStep = draftConfig?.frameworkId === 'bsc' ? StepGoalLibraries : StepGoalLibrariesFlat;
+  const PrefillStep = draftConfig?.frameworkId === 'bsc' ? StepPrefillData : StepPrefillDataFlat;
+  const meta = {
+    'q-goals': { title: 'Goals',         Step: GoalsStep, desc: draftConfig?.frameworkId === 'bsc' ? 'Build BSC-aligned KRA / KPI libraries for each group.' : 'Build flat KRA / KPI libraries for each group or role.' },
+    'q-prefill': { title: 'Pre-fill Goals', Step: PrefillStep, desc: draftConfig?.frameworkId === 'bsc' ? 'Upload or edit pre-assigned BSC KRAs / KPIs.' : 'Upload or edit pre-assigned flat KRAs / KPIs.' },
+    'q-scale': { title: 'Rating Scale',  Step: StepScale,       desc: 'Tweak scale points, labels, rank codes.' },
+    'q-auto':  { title: 'Auto-Rating',   Step: StepAutoRating,  desc: 'Adjust the achievement % → score bands.' },
+    'q-comp':  { title: 'Competencies',  Step: StepCompetencies,desc: 'Scope, lists, weights, self-rate toggle, uploads.' },
+    'q-bell':  { title: 'Bell Curve',    Step: StepBellCurve,   desc: 'Distribution shape, tolerances, soft/hard publish mode.' },
+  }[moduleId];
+  if (!meta) return null;
+  const { Step } = meta;
+  return (
+    <div style={{ maxWidth: 1100, margin: '0 auto', padding: '0 4px' }}>
+      <div style={{ marginBottom: 14, display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', gap: 12 }}>
+        <div>
+          <div style={{ fontSize: 22, fontWeight: 800, color: '#0F172A' }}>{meta.title}</div>
+          <div style={{ fontSize: 13, color: '#64748B', marginTop: 4 }}>{meta.desc}</div>
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <SaveIndicator savedAt={savedAt} />
+          {!readOnly && dirty && (
+            <>
+              <button
+                type="button"
+                onClick={cancelDraft}
+                disabled={isSaving}
+                style={{
+                  padding: '7px 13px',
+                  borderRadius: 8,
+                  border: '1px solid #CBD5E1',
+                  background: '#fff',
+                  color: isSaving ? '#94A3B8' : '#334155',
+                  fontSize: 12.5,
+                  fontWeight: 700,
+                  cursor: isSaving ? 'not-allowed' : 'pointer',
+                  fontFamily: 'inherit',
+                }}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={saveDraft}
+                disabled={isSaving}
+                style={{
+                  padding: '7px 15px',
+                  borderRadius: 8,
+                  border: '1px solid #2563EB',
+                  background: isSaving ? '#BFDBFE' : '#2563EB',
+                  color: '#fff',
+                  fontSize: 12.5,
+                  fontWeight: 800,
+                  cursor: isSaving ? 'not-allowed' : 'pointer',
+                  fontFamily: 'inherit',
+                }}
+              >
+                {isSaving ? 'Saving...' : 'Save changes'}
+              </button>
+            </>
+          )}
+        </div>
+      </div>
+      {!readOnly && dirty && (
+        <div style={{ marginBottom: 14, padding: '9px 12px', borderRadius: 10, background: '#FFFBEB', border: '1px solid #FDE68A', color: '#92400E', fontSize: 12.5, fontWeight: 700 }}>
+          Unsaved changes — save or cancel to apply.
+        </div>
+      )}
+      <Step config={draftConfig} update={update} hideHead readOnly={readOnly} hideApplyBar={['q-scale', 'q-auto', 'q-comp', 'q-bell'].includes(moduleId)} />
+    </div>
+  );
+}
+
+function SaveIndicator({ savedAt }) {
+  if (!savedAt) return null;
+  return (
+    <div style={{
+      padding: '5px 11px', borderRadius: 999,
+      background: '#F0FDF4',
+      color: '#16A34A',
+      border: '1px solid #BBF7D0',
+      fontSize: 11.5, fontWeight: 700, whiteSpace: 'nowrap',
+    }}>
+      ✓ Saved
+    </div>
+  );
+}
+
 function ModuleConfig({ config, org, onEditSetup, onBrandChange, onConfigPatch }) {
   const [logoError, setLogoError] = useState('');
   // Local mirror of brandName so typing doesn't thrash parent state / localStorage on every keystroke.
@@ -7299,10 +7552,18 @@ export default function HRCycleDashboard() {
   }
 
   function handleConfigPatch(patch) {
-    if (!config) return;
-    const nextConfig = { ...config, ...patch };
+    setConfig((prev) => {
+      if (!prev) return prev;
+      const nextConfig = { ...prev, ...patch };
+      saveWizardConfig(orgKey, nextConfig);
+      return nextConfig;
+    });
+  }
+
+  async function handleConfigSave(nextConfig) {
+    if (!nextConfig) return false;
     setConfig(nextConfig);
-    saveWizardConfig(orgKey, nextConfig);
+    return saveWizardConfig(orgKey, nextConfig);
   }
 
   // ── Truth-source bridge ────────────────────────────────────────────────────
@@ -7316,6 +7577,20 @@ export default function HRCycleDashboard() {
     Object.entries(wf.submissions || {}).forEach(([k, s]) => { if (s?.status) m[k] = s.status; });
     return m;
   });
+  const [ratingStatuses, setRatingStatuses] = useState(() => {
+    const ratingStore = readRatings(orgKey);
+    const ratings = ratingStore.ratings || {};
+    const m = {};
+    Object.entries(ratings).forEach(([k, stages]) => {
+      m[normalizeCodeStr(k)] = {
+        selfSubmitted: !!stages?.self?.submittedAt,
+        managerSubmitted: !!stages?.manager?.submittedAt,
+        finalSubmitted: !!stages?.final?.submittedAt,
+        published: !!ratingStore.publishedAt,
+      };
+    });
+    return m;
+  });
   useEffect(() => {
     if (!orgKey) return undefined;
     function reread() {
@@ -7323,16 +7598,31 @@ export default function HRCycleDashboard() {
       const m = {};
       Object.entries(wf.submissions || {}).forEach(([k, s]) => { if (s?.status) m[k] = s.status; });
       setSubmissionStatuses(m);
+      const ratingStore = readRatings(orgKey);
+      const ratings = ratingStore.ratings || {};
+      const nextRatings = {};
+      Object.entries(ratings).forEach(([k, stages]) => {
+        nextRatings[normalizeCodeStr(k)] = {
+          selfSubmitted: !!stages?.self?.submittedAt,
+          managerSubmitted: !!stages?.manager?.submittedAt,
+          finalSubmitted: !!stages?.final?.submittedAt,
+          published: !!ratingStore.publishedAt,
+        };
+      });
+      setRatingStatuses(nextRatings);
     }
-    reread();
+    void hydrateRatings(orgKey).then(reread);
     void hydrateWorkflow(orgKey).then((wf) => {
       const m = {};
       Object.entries(wf?.submissions || {}).forEach(([k, s]) => { if (s?.status) m[k] = s.status; });
       setSubmissionStatuses(m);
     });
     const wfKey = workflowStorageKey(orgKey);
-    function onStorage(e) { if (e.key === wfKey) reread(); }
+    function onStorage(e) { if (e.key === wfKey || String(e.key || '').startsWith('zarohr_ratings_v1:')) reread(); }
+    function onRatingsChanged() { reread(); }
+    const unsubscribeRatings = subscribeToRatings(orgKey, reread);
     window.addEventListener('storage', onStorage);
+    window.addEventListener('zarohr-ratings-changed', onRatingsChanged);
     // Also reread on focus / visibility change — catches submits made in another tab the
     // storage event might miss if the origin is identical but listener timing differs.
     window.addEventListener('focus', reread);
@@ -7345,13 +7635,18 @@ export default function HRCycleDashboard() {
     // surface, causing visible flicker when multiple users were active.
     return () => {
       window.removeEventListener('storage', onStorage);
+      window.removeEventListener('zarohr-ratings-changed', onRatingsChanged);
+      unsubscribeRatings();
       window.removeEventListener('focus', reread);
       document.removeEventListener('visibilitychange', reread);
     };
   }, [orgKey]);
 
   // Map submission.status → PMS stage id. Kept in sync with EmployeePage's submit flow.
-  function statusToStage(status) {
+  function statusToStage(status, ratingStatus = null) {
+    if (ratingStatus?.published || ratingStatus?.finalSubmitted) return 'completed';
+    if (ratingStatus?.managerSubmitted) return 'hr-review';
+    if (ratingStatus?.selfSubmitted) return 'mgr-evaluation';
     if (status === 'pending-manager') return 'pending-approval';
     if (status === 'approved') return 'self-evaluation';
     if (status === 'sent-back') return 'goal-creation';
@@ -7363,12 +7658,13 @@ export default function HRCycleDashboard() {
     return liveEmployees.map((e) => {
       const key = normalizeCodeStr(e['Employee Code']);
       const wfStatus = submissionStatuses[key];
-      const derived = wfStatus ? statusToStage(wfStatus) : (e._pmsStage || 'goal-creation');
+      const ratingStatus = ratingStatuses[key] || null;
+      const derived = wfStatus || ratingStatus ? statusToStage(wfStatus, ratingStatus) : (e._pmsStage || 'goal-creation');
       const isExempt = !!e._outsidePms;
       if (derived === e._pmsStage && (!!e._pmsExempt) === isExempt) return e;
       return { ...e, _pmsStage: derived, _pmsExempt: isExempt };
     });
-  }, [liveEmployees, submissionStatuses]);
+  }, [liveEmployees, submissionStatuses, ratingStatuses]);
 
   /* congrats */
   const congratsKey = `zarohr_congrats_shown_${orgKey}`;
@@ -7409,18 +7705,31 @@ export default function HRCycleDashboard() {
 
   // Scoped HR: only show modules they're allowed; hide config + hr-team always.
   // Co-admins: full access (including hr-team management).
+  // HR Review opens once the appraisal (manager-evaluation) phase begins — or
+  // earlier the moment any manager has submitted a rating — and stays available
+  // through to publish, so HR can monitor calibration continuously.
+  const showHrReview = useMemo(() => {
+    const activeSubPhases = getActiveSubPhases(org, new Date());
+    const phaseReached = activeSubPhases.includes(SUB_PHASE.SELF_EVALUATION) || activeSubPhases.includes(SUB_PHASE.MANAGER_EVALUATION);
+    const anyAppraisalActivity = Object.values(ratingStatuses || {}).some((s) => s?.selfSubmitted || s?.managerSubmitted || s?.published);
+    return phaseReached || anyAppraisalActivity;
+  }, [org, ratingStatuses]);
+
   const visibleNavModules = useMemo(() => {
+    const baseModules = NAV_MODULES
+      .filter((m) => m.id !== 'hr-review' || showHrReview);
     if (isScopedHR) {
       const allowed = new Set(sessionAllowedModules || []);
-      return NAV_MODULES.filter((m) => allowed.has(m.id));
+      return baseModules.filter((m) => allowed.has(m.id));
     }
-    return NAV_MODULES;
-  }, [isScopedHR, sessionAllowedModules]);
+    return baseModules;
+  }, [config?.goalGroups, isScopedHR, sessionAllowedModules, showHrReview]);
 
   const NAV_GROUPS = [
-    { label: 'Main',       items: visibleNavModules.filter((m) => m.group === 'main') },
-    { label: 'Operations', items: visibleNavModules.filter((m) => m.group === 'ops') },
-    { label: 'Dev',        items: visibleNavModules.filter((m) => m.group === 'dev') },
+    { label: 'Main',         items: visibleNavModules.filter((m) => m.group === 'main') },
+    { label: 'Operations',   items: visibleNavModules.filter((m) => m.group === 'ops') },
+    { label: 'Quick Config', items: visibleNavModules.filter((m) => m.group === 'quick') },
+    { label: 'Dev',          items: visibleNavModules.filter((m) => m.group === 'dev') },
   ].filter((g) => g.items.length > 0);
 
   // Scoped HR: filter employees down to their assigned scope.
@@ -7601,8 +7910,12 @@ export default function HRCycleDashboard() {
             <ModuleOverview employees={empsForModules} groups={groups} orgName={org.name} congratsDismissed={congratsDismissed} onDismiss={() => setCongratsDismissed(true)} showConfetti={showConfetti} />
           )}
           {activeModule === 'emp-status' && <ModuleEmpStatus employees={empsForModules} groups={groups} orgKey={orgKey} org={org} />}
+          {activeModule === 'calendar' && !isScopedHR && (
+            <ModuleCalendar org={org} orgKey={orgKey} orgs={orgs} setOrgs={setOrgs} userName={userName} />
+          )}
           {activeModule === 'comms'      && <ModuleComms     employees={empsForModules} groups={groups} org={org} config={config} onUpdate={handleEmpUpdate} onConfigPatch={handleConfigPatch} orgKey={orgKey} onNavigate={setActiveModule} />}
           {activeModule === 'stage'      && <ModuleStageControl  employees={empsForModules} onUpdate={handleEmpUpdate} orgKey={orgKey} />}
+          {activeModule === 'hr-review'  && !isScopedHR && <HRReviewPage embedded />}
           {activeModule === 'mgr-change' && <ModuleMgrChange     employees={empsForModules} config={config} onUpdate={handleEmpUpdate} orgKey={orgKey} />}
           {activeModule === 'grp-transfer' && <ModuleGrpTransfer employees={empsForModules} groups={groups} goalLibraries={config?.goalLibraries || []} onUpdate={handleEmpUpdate} orgKey={orgKey} />}
           {activeModule === 'roster'     && <ModuleRoster employees={empsForModules} config={config} onUpdate={handleEmpUpdate} orgKey={orgKey} initialIntent={rosterIntent} onIntentConsumed={() => setRosterIntent(null)} />}
@@ -7620,6 +7933,15 @@ export default function HRCycleDashboard() {
               onEditSetup={goBackToSetup}
               onBrandChange={updateOrgBrand}
               onConfigPatch={handleConfigPatch}
+            />
+          )}
+          {(activeModule === 'q-goals' || activeModule === 'q-prefill' || activeModule === 'q-scale' || activeModule === 'q-auto' || activeModule === 'q-comp' || activeModule === 'q-bell') && !isScopedHR && config && (
+            <QuickConfigPanel
+              key={activeModule}
+              moduleId={activeModule}
+              config={config}
+              onConfigSave={handleConfigSave}
+              readOnly={(activeModule === 'q-goals' || activeModule === 'q-prefill') && !canEditSetup}
             />
           )}
 

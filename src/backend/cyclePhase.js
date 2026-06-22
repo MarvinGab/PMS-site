@@ -185,9 +185,9 @@ export function reviewCycleWindows(windows, now, options = {}) {
   if (!skipLive && evalEnd && today && evalEnd < today) {
     warnings.push('Evaluation window has already closed.');
   }
-  if (goalEnd && evalStart && evalStart < goalEnd) {
-    warnings.push('Evaluation begins while goal-setting is still open — phases will run in parallel.');
-  }
+  // Goal-setting and evaluation may intentionally overlap for late joiners,
+  // reopen cases, or staggered cohorts. Do not warn for this: consumers use
+  // `getActiveSubPhases` to light up each relevant surface independently.
   if (goalEnd && evalStart) {
     const gapDays = Math.round((evalStart.getTime() - goalEnd.getTime()) / (24 * 60 * 60 * 1000));
     if (gapDays > 365) warnings.push('Evaluation is more than a year after goal-setting ends — confirm the year.');
@@ -321,6 +321,31 @@ export function getCurrentSubPhase(orgOrWindows, now) {
   if (goalStart && t < goalStart) return SUB_PHASE.PRE_CYCLE;
   if (evalEnd && t > evalEnd) return SUB_PHASE.POST_CYCLE;
   return SUB_PHASE.BETWEEN;
+}
+
+// Return every calendar sub-phase active at `now`. This is the overlap-safe
+// API: goal-setting and evaluation can be open together, and each surface can
+// decide based on its own window instead of forcing one global winner.
+export function getActiveSubPhases(orgOrWindows, now) {
+  const windows = orgOrWindows && (orgOrWindows.goalSetting || orgOrWindows.evaluation)
+    ? orgOrWindows
+    : readCycleWindows(orgOrWindows);
+  if (!windows) return [];
+  const t = asNow(now);
+  const goal = windows[PHASE_KIND.GOAL_SETTING] || {};
+  const evalPhase = windows[PHASE_KIND.EVALUATION] || {};
+  const goalSubs = goal.subPhases || {};
+  const evalSubs = evalPhase.subPhases || {};
+  const active = [];
+  if (isInWindow(goalSubs.goalCreation, t)) active.push(SUB_PHASE.GOAL_CREATION);
+  if (isInWindow(goalSubs.managerApproval, t)) active.push(SUB_PHASE.MANAGER_APPROVAL);
+  if (isInWindow(evalSubs.selfEvaluation, t)) active.push(SUB_PHASE.SELF_EVALUATION);
+  if (isInWindow(evalSubs.managerEvaluation, t)) active.push(SUB_PHASE.MANAGER_EVALUATION);
+  return active;
+}
+
+export function isSubPhaseActive(orgOrWindows, subPhase, now) {
+  return getActiveSubPhases(orgOrWindows, now).includes(subPhase);
 }
 
 // Return the window the org is currently inside (or null).

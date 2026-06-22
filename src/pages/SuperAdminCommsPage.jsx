@@ -6,6 +6,7 @@ import zaroLogo from '../../images/final zaro logo.png';
 import { shouldUseSupabase } from '../backend/config';
 import { supabase } from '../backend/supabaseClient';
 import { uploadEmailLogoAsset, ensureDefaultZaroLogoUrl, isPublicBrandAssetUrl } from '../backend/brandAssetStorage';
+import { readSuperCommsStateSync, hydrateSuperCommsState, persistSuperCommsState } from '../backend/stateStore';
 import { buildWorkspaceUrl } from '../orgUtils';
 
 // ─── Constants (mirrored from HR-side ModuleComms) ───────────────────────
@@ -74,8 +75,6 @@ const BUTTON_STYLES = [
   { id: 'pill',    label: 'Pill' },
   { id: 'ghost',   label: 'Text link' },
 ];
-
-const STORAGE_KEY = 'zarohr_super_comms_v2';
 
 const DEFAULT_TEMPLATES = {
   'admin-invite': {
@@ -175,22 +174,12 @@ function PreviewHotspot({ label, onClick, children, inline = false }) {
   );
 }
 
-function loadSaved() {
-  try { const raw = localStorage.getItem(STORAGE_KEY); return raw ? JSON.parse(raw) : null; } catch { return null; }
-}
-function saveState(state) { try { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); } catch { /* ignore */ } }
-
-function isDefaultPlatformLogo(url) {
-  const value = String(url || '').toLowerCase();
-  return (
-    !value
-    || value.includes('defaults/zaro-logo')
-    || value.includes('final%20zaro')
-    || value.includes('final zaro')
-    || value.includes('/src/')
-    || value.includes('@vite')
-  );
-}
+// loadSaved reads the localStorage cache synchronously for first paint.
+// hydrateSuperCommsState (called in a useEffect below) then overwrites with
+// the authoritative Supabase row so the same templates show up on any
+// browser the Super Admin signs into.
+function loadSaved() { return readSuperCommsStateSync(); }
+function saveState(state) { persistSuperCommsState(state); }
 
 function themeForOrg(theme, org) {
   const orgLogo = String(org?.brandEmailLogo || org?.brandLogo || org?.brandLogoUrl || '').trim();
@@ -215,6 +204,14 @@ export default function SuperAdminCommsPage() {
   const [activeTab, setActiveTab]           = useState('email');
   const [stepTab, setStepTab]               = useState('compose');
   const [activeTemplate, setActiveTemplate] = useState('admin-invite');
+  // null = not naming; string = the in-progress name in the inline input that
+  // appears when the user clicks "+ Add to Template".
+  const [draftTemplateName, setDraftTemplateName] = useState(null);
+  const draftTemplateInputRef = useRef(null);
+  // null = not confirming; key string = the template the delete button is
+  // waiting for a second click on. Auto-reverts via a timer.
+  const [pendingDeleteKey, setPendingDeleteKey] = useState(null);
+  const pendingDeleteTimerRef = useRef(null);
   const [templates, setTemplates] = useState(() => {
     const saved = loadSaved();
     return saved?.templates || DEFAULT_TEMPLATES;
@@ -234,11 +231,38 @@ export default function SuperAdminCommsPage() {
       try {
         const url = await ensureDefaultZaroLogoUrl(zaroLogo);
         if (!cancelled) setEmailTheme((prev) => (isPublicBrandAssetUrl(prev.logo) ? prev : { ...prev, logo: url }));
-      } catch (_) { /* ignore — preview just renders without logo */ }
+      } catch { /* ignore — preview just renders without logo */ }
     })();
     return () => { cancelled = true; };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+  // Pull the authoritative templates + theme from Supabase on mount so the
+  // Super Admin sees the same library on any browser. localStorage above
+  // gave us a sync first-paint; this overrides it once the network reply
+  // lands. We skip overwrite when local state has diverged (user typed
+  // something since mount) to avoid clobbering unsaved edits.
+  const supabaseHydratedRef = useRef(false);
+  useEffect(() => {
+    if (supabaseHydratedRef.current) return;
+    let cancelled = false;
+    const baselineTemplates = loadSaved()?.templates || DEFAULT_TEMPLATES;
+    (async () => {
+      const remote = await hydrateSuperCommsState();
+      if (cancelled || !remote) return;
+      supabaseHydratedRef.current = true;
+      if (remote.templates && typeof remote.templates === 'object') {
+        setTemplates((current) => {
+          const isUntouched = JSON.stringify(current) === JSON.stringify(baselineTemplates);
+          return isUntouched ? remote.templates : current;
+        });
+      }
+      if (remote.theme && typeof remote.theme === 'object') {
+        setEmailTheme((current) => ({ ...current, ...remote.theme }));
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
   const [sendState, setSendState]   = useState({ status: 'idle', message: '' });
   const [busy, setBusy]             = useState(null);
 
@@ -261,7 +285,7 @@ export default function SuperAdminCommsPage() {
     try {
       const url = await ensureDefaultZaroLogoUrl(zaroLogo);
       updateTheme({ logo: url, logoCleared: false });
-    } catch (_) { updateTheme({ logo: zaroLogo, logoCleared: false }); }
+    } catch { updateTheme({ logo: zaroLogo, logoCleared: false }); }
   };
   const removeLogo = () => updateTheme({ logo: null, logoCleared: true });
 
@@ -419,18 +443,44 @@ export default function SuperAdminCommsPage() {
   }
   const flashRing = (key) => (flashSection === key ? '0 0 0 3px rgba(79,70,229,0.25)' : 'none');
 
-  // Add / delete templates
-  function addTemplate() {
-    const name = window.prompt('Template name'); if (!name?.trim()) return;
-    const key = `tpl_${Date.now().toString(36)}`;
-    setTemplates((p) => ({ ...p, [key]: { name: name.trim(), desc: 'Custom template', subject, body } }));
-    setActiveTemplate(key);
+  // Open the inline name input on "+ Add to Template". The button morphs
+  // into a text field; pressing Enter commits, Esc / empty blur cancels.
+  function openAddTemplate() {
+    setDraftTemplateName('');
+    setTimeout(() => draftTemplateInputRef.current?.focus(), 0);
   }
-  function deleteCurrent() {
+  function commitDraftTemplate() {
+    const name = (draftTemplateName || '').trim();
+    if (!name) { setDraftTemplateName(null); return; }
+    const key = `tpl_${Date.now().toString(36)}`;
+    setTemplates((p) => ({ ...p, [key]: { name, desc: 'Custom template', subject, body } }));
+    setActiveTemplate(key);
+    setDraftTemplateName(null);
+  }
+  function cancelDraftTemplate() {
+    setDraftTemplateName(null);
+  }
+
+  // Two-click delete: first click arms the button (red "Click again to
+  // delete"), second click within 3s actually removes. Replaces the ugly
+  // native window.confirm dialog.
+  function requestDelete() {
     if (activeTemplate === 'admin-invite') return;
-    if (!window.confirm('Delete this template?')) return;
-    setTemplates((p) => { const n = { ...p }; delete n[activeTemplate]; return n; });
-    setActiveTemplate('admin-invite');
+    if (pendingDeleteKey === activeTemplate) {
+      // Confirm: actually delete.
+      clearTimeout(pendingDeleteTimerRef.current);
+      pendingDeleteTimerRef.current = null;
+      setPendingDeleteKey(null);
+      setTemplates((p) => { const n = { ...p }; delete n[activeTemplate]; return n; });
+      setActiveTemplate('admin-invite');
+      return;
+    }
+    setPendingDeleteKey(activeTemplate);
+    clearTimeout(pendingDeleteTimerRef.current);
+    pendingDeleteTimerRef.current = setTimeout(() => {
+      setPendingDeleteKey(null);
+      pendingDeleteTimerRef.current = null;
+    }, 3000);
   }
 
   // Send
@@ -454,7 +504,7 @@ export default function SuperAdminCommsPage() {
           liveTheme = { ...liveTheme, logo: publicUrl, logoCleared: false };
           setEmailTheme(liveTheme);
         }
-      } catch (_) { /* swallow — render will simply omit the logo */ }
+      } catch { /* swallow — render will simply omit the logo */ }
     }
     return sendHrAdminInviteEmail(orgPayload, {
       theme: themeForOrg(liveTheme, orgPayload),
@@ -462,13 +512,28 @@ export default function SuperAdminCommsPage() {
       supportEmail: 'support@zarohr.com',
     });
   }
+  // Optimistic update so the row's Status + Last sent reflect the new state
+  // immediately without waiting for the next email_deliveries query.
+  function recordInviteResult(recipient, ok) {
+    const key = `${recipient.orgKey}::${String(recipient.email || '').toLowerCase()}`;
+    if (!key) return;
+    setInviteHistory((prev) => ({
+      ...prev,
+      [key]: { status: ok ? 'sent' : 'failed', sentAt: new Date().toISOString() },
+    }));
+  }
+
   async function handleSendOne(r) {
     setBusy(r.key);
     setSendState({ status: 'sending', message: `Sending to ${r.email}…` });
     try {
       const res = await sendOne(r);
+      recordInviteResult(r, !!res?.ok);
       setSendState(res?.ok ? { status: 'sent', message: `Sent to ${r.email}.` } : { status: 'failed', message: res?.error || 'Send failed.' });
-    } catch (e) { setSendState({ status: 'failed', message: e?.message || 'Send failed.' }); }
+    } catch (e) {
+      recordInviteResult(r, false);
+      setSendState({ status: 'failed', message: e?.message || 'Send failed.' });
+    }
     finally { setBusy(null); }
   }
   async function handleSendSelected() {
@@ -476,8 +541,12 @@ export default function SuperAdminCommsPage() {
     setSendState({ status: 'sending', message: `Sending ${selectedRecipients.length} invite${selectedRecipients.length === 1 ? '' : 's'}…` });
     let sent = 0, failed = 0;
     for (const r of selectedRecipients) {
-      try { const res = await sendOne(r); if (res?.ok) sent += 1; else failed += 1; }
-      catch { failed += 1; }
+      try {
+        const res = await sendOne(r);
+        recordInviteResult(r, !!res?.ok);
+        if (res?.ok) sent += 1; else failed += 1;
+      }
+      catch { recordInviteResult(r, false); failed += 1; }
     }
     setSendState({ status: failed ? 'failed' : 'sent', message: `Sent ${sent}${failed ? ` · ${failed} failed` : ''}.` });
   }
@@ -527,37 +596,95 @@ export default function SuperAdminCommsPage() {
 
         {activeTab === 'email' && (
           <>
-            {/* Status bar */}
+            {/* Transient send-state messages (Sending… / Sent / Failed) */}
             {(() => {
               const sending = sendState.status === 'sending';
               const sent    = sendState.status === 'sent';
               const failed  = sendState.status === 'failed';
+              const message = sendState.message || (sending ? 'Sending…' : '');
+              if (!message) return null;
               return (
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12, gap: 10, flexWrap: 'wrap' }}>
-                  <div style={{ fontSize: 12.5, color: sent ? '#166534' : failed ? '#991B1B' : '#64748B', fontWeight: sent || failed ? 700 : 500 }}>
-                    {sendState.message || (sending ? 'Sending…' : 'Pick a template, edit it, then send.')}
-                  </div>
+                <div style={{ marginBottom: 12, fontSize: 12.5, color: sent ? '#86EFAC' : failed ? '#FCA5A5' : '#94A3B8', fontWeight: sent || failed ? 700 : 500 }}>
+                  {message}
                 </div>
               );
             })()}
 
-            {/* Template switcher */}
-            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 12 }}>
-              {Object.entries(templates).map(([key, t]) => {
-                const active = activeTemplate === key;
-                return (
-                  <button key={key} type="button" onClick={() => setActiveTemplate(key)}
-                    style={{ flex: '1 1 200px', textAlign: 'left', padding: '10px 14px', borderRadius: 10, border: `1.5px solid ${active ? '#4F46E5' : '#E2E8F0'}`, background: active ? '#EEF2FF' : '#fff', cursor: 'pointer', fontFamily: 'inherit', boxShadow: active ? '0 4px 12px rgba(79,70,229,.15)' : 'none', transition: 'all 160ms ease', position: 'relative' }}>
-                    <div style={{ fontSize: 12.5, fontWeight: 700, color: active ? '#312E81' : '#0F172A' }}>{t.name || 'Untitled'}</div>
-                    <div style={{ fontSize: 11, color: '#64748B', marginTop: 2 }}>{t.desc || (key === 'admin-invite' ? 'Default template' : 'Custom template')}</div>
-                  </button>
-                );
-              })}
-              <button type="button" onClick={addTemplate} title="Add a custom template"
-                style={{ alignSelf: 'center', padding: '6px 12px', borderRadius: 8, border: '1.5px dashed #CBD5E1', background: '#fff', color: '#64748B', cursor: 'pointer', fontFamily: 'inherit', fontSize: 11.5, fontWeight: 600, whiteSpace: 'nowrap' }}>
-                + Add
-              </button>
-            </div>
+            {/* Template switcher — inline subtitle when there's only one
+                template, compact pill row when there are several. The bulky
+                "Pick a template" card has been retired in favour of this. */}
+            {Object.keys(templates).length === 1 ? (
+              <div style={{ marginBottom: 14, display: 'flex', alignItems: 'baseline', gap: 8, fontSize: 12.5, color: '#94A3B8' }}>
+                <span>Editing</span>
+                <span style={{ fontWeight: 700, color: '#E0E7FF' }}>{templates[activeTemplate]?.name || 'Untitled'}</span>
+                <span style={{ color: '#475569' }}>·</span>
+                <span>{templates[activeTemplate]?.desc || (activeTemplate === 'admin-invite' ? 'Sent when a workspace is provisioned' : 'Custom template')}</span>
+              </div>
+            ) : (
+              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 14, alignItems: 'center' }}>
+                <span style={{ fontSize: 11.5, color: '#64748B', textTransform: 'uppercase', letterSpacing: '0.05em', fontWeight: 700, marginRight: 4 }}>Templates</span>
+                {Object.entries(templates).map(([key, t]) => {
+                  const active = activeTemplate === key;
+                  const deletable = key !== 'admin-invite';
+                  const armed = pendingDeleteKey === key;
+                  const baseBorder = armed ? '#F87171' : (active ? 'rgba(96,165,250,0.55)' : 'rgba(255,255,255,0.08)');
+                  const baseBg = armed ? 'rgba(248,113,113,0.14)' : (active ? 'rgba(59,130,246,0.18)' : 'rgba(255,255,255,0.04)');
+                  const baseColor = armed ? '#FCA5A5' : (active ? '#BFDBFE' : '#94A3B8');
+                  return (
+                    <div key={key} style={{
+                      display: 'inline-flex', alignItems: 'center', gap: 4,
+                      padding: '6px 6px 6px 12px', borderRadius: 999,
+                      border: `1px solid ${baseBorder}`,
+                      background: baseBg, color: baseColor,
+                      fontFamily: 'inherit', fontSize: 12, fontWeight: 700,
+                      transition: 'all 160ms ease', whiteSpace: 'nowrap',
+                    }}>
+                      <button type="button" onClick={() => setActiveTemplate(key)}
+                        style={{ background: 'transparent', border: 'none', padding: 0, margin: 0, color: 'inherit', font: 'inherit', cursor: 'pointer' }}
+                      >
+                        {t.name || 'Untitled'}
+                      </button>
+                      {deletable && (
+                        <button type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            // First click arms; second click within 3s deletes.
+                            if (pendingDeleteKey === key) {
+                              clearTimeout(pendingDeleteTimerRef.current);
+                              pendingDeleteTimerRef.current = null;
+                              setPendingDeleteKey(null);
+                              setTemplates((p) => { const n = { ...p }; delete n[key]; return n; });
+                              if (activeTemplate === key) setActiveTemplate('admin-invite');
+                              return;
+                            }
+                            setPendingDeleteKey(key);
+                            clearTimeout(pendingDeleteTimerRef.current);
+                            pendingDeleteTimerRef.current = setTimeout(() => {
+                              setPendingDeleteKey(null);
+                              pendingDeleteTimerRef.current = null;
+                            }, 3000);
+                          }}
+                          onBlur={() => { if (armed) { setPendingDeleteKey(null); clearTimeout(pendingDeleteTimerRef.current); } }}
+                          title={armed ? 'Click again to confirm' : 'Remove template'}
+                          aria-label={armed ? 'Click again to confirm' : 'Remove template'}
+                          style={{
+                            display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                            width: 20, height: 20, padding: 0,
+                            border: 'none', borderRadius: 999,
+                            background: armed ? '#DC2626' : 'rgba(255,255,255,0.06)',
+                            color: armed ? '#fff' : '#94A3B8',
+                            cursor: 'pointer', fontFamily: 'inherit', fontSize: 12, fontWeight: 700, lineHeight: 1,
+                            transition: 'all 160ms ease',
+                          }}
+                        >
+                          ×
+                        </button>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
 
             {/* Step tabs */}
             <div style={{ display: 'inline-flex', gap: 2, padding: 4, background: '#F1F5F9', borderRadius: 11, marginBottom: 16 }}>
@@ -589,12 +716,22 @@ export default function SuperAdminCommsPage() {
                       <div style={{ fontSize: 13.5, fontWeight: 700, color: '#0F172A' }}>{stepTab === 'design' ? 'Brand & design' : 'Email template'}</div>
                       <div style={{ fontSize: 11.5, color: '#94A3B8' }}>{stepTab === 'design' ? 'Pick a colour, drop a logo, choose a button — preview updates live.' : 'Click a token to insert it where your cursor is.'}</div>
                     </div>
-                    {activeTemplate !== 'admin-invite' && (
-                      <button type="button" onClick={deleteCurrent}
-                        style={{ border: '1px solid #FECACA', background: '#fff', color: '#B91C1C', borderRadius: 8, padding: '6px 10px', fontSize: 12, fontWeight: 800, cursor: 'pointer', fontFamily: 'inherit' }}>
-                        Delete
-                      </button>
-                    )}
+                    {activeTemplate !== 'admin-invite' && (() => {
+                      const armed = pendingDeleteKey === activeTemplate;
+                      return (
+                        <button type="button" onClick={requestDelete}
+                          onBlur={() => { if (armed) { setPendingDeleteKey(null); clearTimeout(pendingDeleteTimerRef.current); } }}
+                          style={{
+                            border: armed ? '1px solid #DC2626' : '1px solid #FECACA',
+                            background: armed ? '#DC2626' : '#fff',
+                            color: armed ? '#fff' : '#B91C1C',
+                            borderRadius: 8, padding: '6px 12px', fontSize: 12, fontWeight: 800, cursor: 'pointer', fontFamily: 'inherit',
+                            transition: 'background 160ms ease, color 160ms ease, border-color 160ms ease',
+                          }}>
+                          {armed ? 'Click again to delete' : 'Delete'}
+                        </button>
+                      );
+                    })()}
                   </div>
 
                   <div style={{ padding: '16px 18px 18px', display: 'flex', flexDirection: 'column', gap: 14 }}>
@@ -636,11 +773,54 @@ export default function SuperAdminCommsPage() {
                         <textarea ref={bodyRef} value={body} onChange={(e) => setBody(e.target.value)} rows={14}
                           style={{ width: '100%', boxSizing: 'border-box', border: '1.5px solid #E2E8F0', borderRadius: 9, padding: '12px 14px', fontSize: 13, lineHeight: 1.7, outline: 'none', fontFamily: "'Geist Mono','SF Mono',Menlo,monospace", color: '#0D1117', resize: 'vertical', background: '#fff' }} />
                       </div>
-                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '6px 2px' }}>
-                        <span style={{ fontSize: 12, color: '#64748B' }}>Want a different look or logo?</span>
+                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '6px 2px', gap: 12, flexWrap: 'wrap' }}>
                         <button type="button" onClick={() => setStepTab('design')} style={{ background: 'transparent', border: 'none', color: '#4F46E5', fontWeight: 700, fontSize: 12.5, cursor: 'pointer', fontFamily: 'inherit', padding: 0 }}>
                           Customize design →
                         </button>
+                        {draftTemplateName !== null ? (
+                          <div style={{
+                            display: 'inline-flex', alignItems: 'center', gap: 8,
+                            padding: '6px 8px 6px 14px', borderRadius: 999,
+                            border: '1.5px solid #818CF8', background: '#EEF2FF',
+                            boxShadow: '0 4px 14px rgba(79,70,229,0.18)',
+                          }}>
+                            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#4338CA" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>
+                            <input
+                              ref={draftTemplateInputRef}
+                              type="text"
+                              value={draftTemplateName}
+                              placeholder="Name this template…"
+                              onChange={(e) => setDraftTemplateName(e.target.value)}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter') { e.preventDefault(); e.target.blur(); }
+                                else if (e.key === 'Escape') { e.preventDefault(); cancelDraftTemplate(); }
+                              }}
+                              onBlur={commitDraftTemplate}
+                              style={{ width: 180, border: 'none', outline: 'none', background: 'transparent', fontSize: 12.5, fontWeight: 700, color: '#312E81', fontFamily: 'inherit', padding: 0 }}
+                            />
+                            <span style={{ fontSize: 10.5, color: '#6B7280', whiteSpace: 'nowrap' }}>↵ to save</span>
+                          </div>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={openAddTemplate}
+                            title="Save current draft as a reusable template"
+                            style={{
+                              display: 'inline-flex', alignItems: 'center', gap: 6,
+                              padding: '8px 14px', borderRadius: 999,
+                              border: '1.5px solid #C7D2FE',
+                              background: '#EEF2FF',
+                              color: '#4338CA',
+                              fontWeight: 700, fontSize: 12.5, cursor: 'pointer', fontFamily: 'inherit',
+                              transition: 'background 160ms ease, border-color 160ms ease, transform 160ms ease',
+                            }}
+                            onMouseEnter={(e) => { e.currentTarget.style.background = '#E0E7FF'; e.currentTarget.style.transform = 'translateY(-1px)'; }}
+                            onMouseLeave={(e) => { e.currentTarget.style.background = '#EEF2FF'; e.currentTarget.style.transform = 'translateY(0)'; }}
+                          >
+                            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>
+                            + Add to Template
+                          </button>
+                        )}
                       </div>
                     </>}
 
@@ -782,7 +962,7 @@ export default function SuperAdminCommsPage() {
                               try {
                                 const url = await ensureDefaultZaroLogoUrl(zaroLogo);
                                 setEmailTheme({ ...DEFAULT_EMAIL_THEME, logo: url });
-                              } catch (_) {
+                              } catch {
                                 setEmailTheme({ ...DEFAULT_EMAIL_THEME, logo: zaroLogo });
                               }
                             }}
@@ -944,7 +1124,15 @@ export default function SuperAdminCommsPage() {
                             <span style={{ fontSize: 12, fontWeight: 700, color: roleColor, background: roleBg, borderRadius: 999, padding: '4px 10px' }}>{item.role}</span>
                           </td>
                           <td style={{ padding: '15px 18px' }}>
-                            <span style={{ fontSize: 12, fontWeight: 800, color: item.launched ? '#047857' : '#92400E', background: item.launched ? '#ECFDF5' : '#FFFBEB', borderRadius: 999, padding: '5px 10px' }}>{item.launched ? 'Active' : 'Setup'}</span>
+                            {(() => {
+                              if (history?.status === 'failed') {
+                                return <span style={{ fontSize: 12, fontWeight: 800, color: '#B91C1C', background: '#FEF2F2', borderRadius: 999, padding: '5px 10px' }}>Failed</span>;
+                              }
+                              if (history?.sentAt) {
+                                return <span style={{ fontSize: 12, fontWeight: 800, color: '#047857', background: '#ECFDF5', borderRadius: 999, padding: '5px 10px' }}>Sent</span>;
+                              }
+                              return <span style={{ fontSize: 12, fontWeight: 800, color: '#6B7280', background: '#F1F5F9', borderRadius: 999, padding: '5px 10px' }}>Not sent</span>;
+                            })()}
                           </td>
                           <td style={{ padding: '15px 18px', color: lsColor, fontSize: 12.5 }} title={lsTitle}>
                             {ls ? (
