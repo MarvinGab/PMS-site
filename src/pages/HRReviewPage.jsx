@@ -8,7 +8,8 @@ import {
   recordCalibrationMove,
   publishCycle,
   isPublished,
-  seedSampleRatings,
+  clearSeededRatings,
+  SEED_MARKER,
   subscribeToRatings,
 } from '../backend/ratingsStore';
 
@@ -373,6 +374,13 @@ export default function HRReviewPage({ embedded = false } = {}) {
 
   const ratings = readRatings(orgKey);
   void tick;
+  // How many employees carry demo-seeded ratings (so we can offer a cleanup).
+  const seededCount = useMemo(() => {
+    const isSeeded = (s) => !!s && (s._seeded === true || s.overallComment === SEED_MARKER);
+    return Object.values(ratings.ratings || {}).filter(
+      (stages) => stages && Object.values(stages).some(isSeeded)
+    ).length;
+  }, [ratings]);
   const allRows = employees.map((emp) => {
     const code = String(emp['Employee Code'] || '').trim();
     const stages = ratings.ratings?.[code] || {};
@@ -433,9 +441,15 @@ export default function HRReviewPage({ embedded = false } = {}) {
   const publishBlocked = bellMode === 'hard' && hasOutOfTolerance;
   const [publishReason, setPublishReason] = useState('');
 
-  const onSeedSample = () => {
-    seedSampleRatings(orgKey, employees, scale.length);
+  const onClearSeeded = () => {
+    const ok = window.confirm(
+      `Remove demo-seeded ratings for ${seededCount} employee${seededCount === 1 ? '' : 's'}? `
+      + 'Real self/manager submissions are kept. Everyone seeded will drop back to their true stage.'
+    );
+    if (!ok) return;
+    const affected = clearSeededRatings(orgKey);
     setTick((t) => t + 1);
+    window.alert(`Removed demo data from ${affected} employee${affected === 1 ? '' : 's'}.`);
   };
   const onPublish = () => {
     if (publishBlocked) return;
@@ -529,6 +543,12 @@ export default function HRReviewPage({ embedded = false } = {}) {
           subtitle={`${completedRows.length} completed ratings · ${bellMode === 'hard' ? 'Hard' : 'Soft'} bell-curve mode`}
           right={
             <div style={{ display: 'flex', gap: 8 }}>
+              {!published && seededCount > 0 && (
+                <button type="button" onClick={onClearSeeded}
+                  style={{ padding: '8px 14px', borderRadius: 8, fontSize: 13, fontWeight: 700, border: '1.5px solid #FCA5A5', background: '#FEF2F2', color: '#B91C1C', cursor: 'pointer', fontFamily: 'inherit' }}>
+                  Remove demo data ({seededCount})
+                </button>
+              )}
               {!published && rated.length > 0 && (
                 <button type="button" onClick={onPublish} disabled={publishBlocked} style={btnStyle('primary', publishBlocked)}>
                   {publishBlocked ? 'Publish blocked' : 'Publish cycle'}

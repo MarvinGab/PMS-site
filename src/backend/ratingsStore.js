@@ -25,6 +25,7 @@ const KEY_PREFIX = 'zarohr_ratings_v1';
 const REMOTE_RECORD_KEY = 'ratings';
 const DEFAULT_RATINGS_STATE = { ratings: {}, auditLog: [], publishedAt: null };
 const remoteWriteQueues = new Map();
+export const SEED_MARKER = 'Auto-seeded for demo.';
 
 function key(orgKey) {
   return `${KEY_PREFIX}:${orgKey || 'default'}`;
@@ -64,6 +65,38 @@ function mergeAuditLogs(remoteLogs = [], localLogs = []) {
     out.push(row);
   });
   return out.sort((a, b) => (Date.parse(a?.ts || 0) || 0) - (Date.parse(b?.ts || 0) || 0));
+}
+
+function isSeededStage(stage) {
+  return !!stage && (stage._seeded === true || stage.overallComment === SEED_MARKER);
+}
+
+function seededTombstone(ts) {
+  return { cleared: true, clearedAt: ts, updatedAt: ts };
+}
+
+function sanitizeSeededRatingsState(data = DEFAULT_RATINGS_STATE, ts = new Date().toISOString()) {
+  const ratings = data?.ratings || {};
+  let changed = false;
+  const nextRatings = {};
+  Object.entries(ratings).forEach(([code, stages]) => {
+    if (!stages || typeof stages !== 'object') {
+      nextRatings[code] = stages;
+      return;
+    }
+    const nextStages = { ...stages };
+    ['self', 'manager', 'final'].forEach((stageName) => {
+      if (isSeededStage(nextStages[stageName])) {
+        nextStages[stageName] = seededTombstone(ts);
+        changed = true;
+      }
+    });
+    nextRatings[code] = nextStages;
+  });
+  return {
+    changed,
+    data: changed ? { ...data, ratings: nextRatings, updatedAt: ts } : (data || DEFAULT_RATINGS_STATE),
+  };
 }
 
 function mergeRatingsState(remote = DEFAULT_RATINGS_STATE, local = DEFAULT_RATINGS_STATE) {
@@ -128,7 +161,10 @@ function writeJson(k, value) {
 }
 
 export function readRatings(orgKey) {
-  return readJson(key(orgKey), DEFAULT_RATINGS_STATE);
+  const raw = readJson(key(orgKey), DEFAULT_RATINGS_STATE);
+  const cleaned = sanitizeSeededRatingsState(raw);
+  if (cleaned.changed) writeJson(key(orgKey), cleaned.data);
+  return cleaned.data;
 }
 
 export function writeRatings(orgKey, data) {
@@ -162,9 +198,10 @@ export async function hydrateRatings(orgKey = '') {
     if (Object.keys(local?.ratings || {}).length > 0) await persistRatings(orgKey, local);
     return local;
   }
-  const merged = mergeRatingsState(remote, local);
+  const mergedRaw = mergeRatingsState(remote, local);
+  const { data: merged, changed: cleanedSeeded } = sanitizeSeededRatingsState(mergedRaw);
   writeJson(key(orgKey), merged);
-  if (JSON.stringify(merged) !== JSON.stringify(remote)) await persistRatings(orgKey, merged);
+  if (cleanedSeeded || JSON.stringify(merged) !== JSON.stringify(remote)) await persistRatings(orgKey, merged);
   return merged;
 }
 
@@ -175,7 +212,8 @@ export function persistRatings(orgKey = '', payload = null) {
   const run = async () => {
     try {
       const remote = await readRemoteRatings(orgKey);
-      const merged = remote ? mergeRatingsState(remote, writePayload) : writePayload;
+      const mergedRaw = remote ? mergeRatingsState(remote, writePayload) : writePayload;
+      const { data: merged } = sanitizeSeededRatingsState(mergedRaw);
       const { error } = await supabase
         .from('app_state')
         .upsert({
@@ -377,7 +415,13 @@ export function computeDistribution(orgKey, scalePoints) {
 // Sample data — seeds fake self+manager ratings across all employees so HR
 // review can be exercised end-to-end during development. Idempotent: skips
 // employees who already have ratings recorded.
-export function seedSampleRatings(orgKey, employees, scalePoints) {
+export function seedSampleRatings(orgKey, employees, scalePoints, options = {}) {
+  // Guard: demo data must never land on a live cycle. Callers have to pass an
+  // explicit confirmation, so this can't fire by accident on a launched org.
+  if (!options.confirmDemoSeed) {
+    console.warn('seedSampleRatings blocked: pass { confirmDemoSeed: true } to seed demo data.');
+    return;
+  }
   const all = readRatings(orgKey);
   const N = scalePoints || 5;
   const next = { ...all, ratings: { ...(all.ratings || {}) } };
@@ -400,9 +444,44 @@ export function seedSampleRatings(orgKey, employees, scalePoints) {
     const selfScore = Math.max(1, Math.min(N, candidate + (r % 2)));
     const managerScore = Math.max(1, Math.min(N, candidate));
     next.ratings[code] = {
-      self: { overallScore: selfScore, overallComment: 'Auto-seeded for demo.', submittedAt: new Date().toISOString() },
-      manager: { overallScore: managerScore, overallComment: 'Auto-seeded for demo.', submittedAt: new Date().toISOString() },
+      self: { overallScore: selfScore, overallComment: SEED_MARKER, _seeded: true, submittedAt: new Date().toISOString() },
+      manager: { overallScore: managerScore, overallComment: SEED_MARKER, _seeded: true, submittedAt: new Date().toISOString() },
     };
   });
   writeRatings(orgKey, next);
+}
+
+// Clear ONLY the demo-seeded stages (matched by the seed marker / flag),
+// leaving every real self/manager/final submission untouched. Returns how many
+// employee entries were affected so the UI can confirm what it cleared.
+//
+// We can't just delete the keys: the cloud sync UNIONS local + remote codes
+// (mergeRatingsState), so a deleted employee would re-appear from the server on
+// the next merge. Instead each seeded stage is replaced with a tombstone that
+// is NEWER than the seed but carries no submittedAt — mergeStage keeps the
+// newer record, and "no submittedAt" makes the stage read as not-submitted, so
+// the employee correctly drops back to their true stage everywhere.
+export function clearSeededRatings(orgKey) {
+  const all = readRatings(orgKey);
+  const ratings = all.ratings || {};
+  const ts = new Date().toISOString();
+  let affected = 0;
+  const nextRatings = {};
+  Object.entries(ratings).forEach(([code, stages]) => {
+    if (!stages) { nextRatings[code] = stages; return; }
+    let touched = false;
+    const next = {};
+    Object.entries(stages).forEach(([stageName, stageValue]) => {
+      if (isSeededStage(stageValue)) {
+        touched = true;
+        next[stageName] = seededTombstone(ts);
+      } else {
+        next[stageName] = stageValue;
+      }
+    });
+    if (touched) affected += 1;
+    nextRatings[code] = next;
+  });
+  writeRatings(orgKey, { ...all, ratings: nextRatings });
+  return affected;
 }
