@@ -9172,8 +9172,9 @@ const DEFAULT_TARGET_TYPES = [
   { id: 'tt_default_number',     name: 'Number',     unit: '',  unitPosition: 'suffix', isNumeric: true,  hasMin: false, min: null, hasMax: false, max: null,  isDefault: true, hidden: false },
   { id: 'tt_default_percentage', name: 'Percentage', unit: '%', unitPosition: 'suffix', isNumeric: true,  hasMin: true,  min: 0,    hasMax: true,  max: 100,   isDefault: true, hidden: false },
   { id: 'tt_default_currency',   name: 'Currency',   unit: '₹', unitPosition: 'prefix', isNumeric: true,  hasMin: false, min: null, hasMax: false, max: null,  isDefault: true, hidden: false },
-  { id: 'tt_neg_number',         name: 'Negative number',   unit: '',  unitPosition: 'suffix', isNumeric: true,  hasMin: false, min: null, hasMax: false, max: null,  isDefault: true, hidden: false, lowerIsBetter: true },
-  { id: 'tt_neg_currency',       name: 'Negative currency', unit: '₹', unitPosition: 'prefix', isNumeric: true,  hasMin: false, min: null, hasMax: false, max: null,  isDefault: true, hidden: false, lowerIsBetter: true },
+  { id: 'tt_neg_number',         name: 'Negative number',     unit: '',  unitPosition: 'suffix', isNumeric: true,  hasMin: false, min: null, hasMax: false, max: null,  isDefault: true, hidden: false, lowerIsBetter: true },
+  { id: 'tt_neg_currency',       name: 'Negative currency',   unit: '₹', unitPosition: 'prefix', isNumeric: true,  hasMin: false, min: null, hasMax: false, max: null,  isDefault: true, hidden: false, lowerIsBetter: true },
+  { id: 'tt_neg_percentage',     name: 'Negative percentage', unit: '%', unitPosition: 'suffix', isNumeric: true,  hasMin: true,  min: 0,    hasMax: true,  max: 100,   isDefault: true, hidden: false, lowerIsBetter: true },
   { id: 'tt_default_text',       name: 'Free text',  unit: '',  unitPosition: 'suffix', isNumeric: false, hasMin: false, min: null, hasMax: false, max: null,  isDefault: true, hidden: false },
 ];
 

@@ -802,6 +802,7 @@ const TARGET_TYPES = [
   { id: 'neg_number',   icon: '#↓',  label: 'Negative number',   example: 'Lower is better (e.g. 3 defects)', unitPosition: 'suffix', lowerIsBetter: true },
   { id: 'neg_currency', icon: '₹↓',  label: 'Negative currency', example: 'Lower is better (e.g. cost ₹5000)', unit: '₹', unitPosition: 'prefix', lowerIsBetter: true },
   { id: 'percentage', icon: '%',  label: 'Percentage',  example: 'Target % (e.g. 95)', unit: '%', unitPosition: 'suffix' },
+  { id: 'neg_percentage', icon: '%↓', label: 'Negative percentage', example: 'Lower is better (e.g. 2% defect rate)', unit: '%', unitPosition: 'suffix', lowerIsBetter: true },
   { id: 'duration',   icon: '⧗',  label: 'Duration',    example: 'Target duration (e.g. < 24 hrs)' },
   { id: 'date',       icon: '📅', label: 'Date',        example: 'Target date' },
   { id: 'rating',     icon: '★',  label: 'Rating',      example: 'Target rating (e.g. 4.5 / 5)' },
@@ -816,6 +817,7 @@ function canonicalTargetTypeId(type = {}) {
   if (rawId === 'tt_default_currency' || name === 'currency' || name === '₹' || name === 'inr') return 'currency';
   if (rawId === 'tt_neg_number' || name === 'negative number') return 'neg_number';
   if (rawId === 'tt_neg_currency' || name === 'negative currency') return 'neg_currency';
+  if (rawId === 'tt_neg_percentage' || name === 'negative percentage') return 'neg_percentage';
   if (rawId === 'tt_default_yesno' || name === 'yes / no' || name === 'yes/no' || name === 'yes-no') return 'yesno';
   if (rawId === 'tt_default_text' || name === 'text' || name === 'free text') return 'text';
   return rawId || name.replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '') || 'text';

@@ -64,6 +64,7 @@ const DEFAULT_TARGET_TYPES = [
   { id: 'tt_default_currency', name: 'Currency', unit: '₹', unitPosition: 'prefix', isNumeric: true },
   { id: 'tt_neg_number', name: 'Negative number', unit: '', unitPosition: 'suffix', isNumeric: true, lowerIsBetter: true },
   { id: 'tt_neg_currency', name: 'Negative currency', unit: '₹', unitPosition: 'prefix', isNumeric: true, lowerIsBetter: true },
+  { id: 'tt_neg_percentage', name: 'Negative percentage', unit: '%', unitPosition: 'suffix', isNumeric: true, lowerIsBetter: true },
   { id: 'tt_default_text', name: 'Free text', unit: '', unitPosition: 'suffix', isNumeric: false },
 ];
 function normalizeTargetTypeName(value) {

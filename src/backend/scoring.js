@@ -83,6 +83,7 @@ const DEFAULT_TARGET_TYPES = [
   { id: 'tt_default_currency', name: 'Currency', isNumeric: true },
   { id: 'tt_neg_number', name: 'Negative number', isNumeric: true, lowerIsBetter: true },
   { id: 'tt_neg_currency', name: 'Negative currency', isNumeric: true, lowerIsBetter: true },
+  { id: 'tt_neg_percentage', name: 'Negative percentage', isNumeric: true, lowerIsBetter: true },
   { id: 'tt_default_text', name: 'Free text', isNumeric: false },
 ];
 
