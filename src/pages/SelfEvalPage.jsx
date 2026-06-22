@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useMemo, useState } from 'react';
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import { readEmployeeSessionSync, readWorkflowSync } from '../backend/stateStore';
 import { useApp } from '../AppContext';
 import { usePMSData, SUB_PHASE } from '../hooks/usePMSData';
@@ -282,20 +282,33 @@ export default function SelfEvalPage({ embedded = false, overrideEmpCode = '', o
     });
     return out;
   }, [config.autoRating, goals, achievements, targetLevel, rateAtKpi, bands, targetTypes]);
+  // Remember the score we last auto-applied per item, so we can keep it in
+  // sync as the achievement changes — but stop the moment the user picks their
+  // own score (an override). Without this the score froze on the first value
+  // ever auto-filled (e.g. the first digit typed into the achievement box).
+  const autoAppliedRef = useRef({});
   useEffect(() => {
     if (config.autoRating === false || saved) return;
-    setScores((prev) => {
-      let changed = false;
-      const next = { ...prev };
-      Object.entries(autoScores).forEach(([id, score]) => {
-        if (isMissingScore(next[id])) {
+    // Compute purely and mutate the ref OUTSIDE setScores — the setScores
+    // updater can run twice (StrictMode), which would corrupt a ref mutated
+    // inside it and revert the sync.
+    let changed = false;
+    const next = { ...scores };
+    const applied = { ...autoAppliedRef.current };
+    Object.entries(autoScores).forEach(([id, score]) => {
+      const lastAuto = applied[id];
+      const untouched = isMissingScore(next[id]) || String(next[id]) === String(lastAuto);
+      if (untouched) {
+        if (String(next[id]) !== String(score)) {
           next[id] = score;
           changed = true;
         }
-      });
-      return changed ? next : prev;
+        applied[id] = score;
+      }
     });
-  }, [autoScores, config.autoRating, saved]);
+    autoAppliedRef.current = applied;
+    if (changed) setScores(next);
+  }, [autoScores, scores, config.autoRating, saved]);
   const invalidKeys = new Set(submitErrors.map((err) => err.key));
   const hasHardErrors = submitErrors.some((e) => e.severity === 'hard');
   const onlySoftPending = submitErrors.length > 0 && !hasHardErrors;

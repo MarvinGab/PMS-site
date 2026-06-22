@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { readEmployeeSessionSync, readWorkflowSync, persistWorkflow } from '../backend/stateStore';
 import { useApp } from '../AppContext';
 import { usePMSData, SUB_PHASE } from '../hooks/usePMSData';
@@ -550,20 +550,33 @@ function ReportEditor({ report, orgKey, config, actor, previewMode, subPhase, on
     });
     return out;
   }, [autoOn, goals, achievements, targetLevel, rateAtKpi, bands, targetTypes]);
+  // Track the score we last auto-applied per item so the suggestion stays in
+  // sync as the manager corrects an achievement — but back off once they pick
+  // their own score. Otherwise the score froze on the first value auto-filled
+  // (e.g. the first digit typed while correcting an achievement).
+  const autoAppliedRef = useRef({});
   useEffect(() => {
     if (!autoOn || saved) return;
-    setScores((prev) => {
-      let changed = false;
-      const next = { ...prev };
-      Object.entries(autoScores).forEach(([id, score]) => {
-        if (isMissingScore(next[id])) {
+    // Compute purely and mutate the ref OUTSIDE setScores — the setScores
+    // updater can run twice (StrictMode), which would corrupt a ref mutated
+    // inside it and revert the sync.
+    let changed = false;
+    const next = { ...scores };
+    const applied = { ...autoAppliedRef.current };
+    Object.entries(autoScores).forEach(([id, score]) => {
+      const lastAuto = applied[id];
+      const untouched = isMissingScore(next[id]) || String(next[id]) === String(lastAuto);
+      if (untouched) {
+        if (String(next[id]) !== String(score)) {
           next[id] = score;
           changed = true;
         }
-      });
-      return changed ? next : prev;
+        applied[id] = score;
+      }
     });
-  }, [autoScores, autoOn, saved]);
+    autoAppliedRef.current = applied;
+    if (changed) setScores(next);
+  }, [autoScores, scores, autoOn, saved]);
   const scoreLockedByAuto = (id) => saved || (!managerCanOverrideAuto && autoScores[id] !== null && autoScores[id] !== undefined);
   const validateManagerEvaluation = () => {
     const errors = [];
