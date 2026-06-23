@@ -65,6 +65,16 @@ const FALLBACK_TARGET_TYPES = [
   { id: 'currency', name: 'Currency', unit: '₹', unitPosition: 'prefix', isNumeric: true },
 ];
 
+// Built-in "lower is better" target types. These are always offered in templates
+// and accepted on upload — even for an org whose saved config predates them
+// (the Targets step shows a merged view but only persists the list when a type
+// is edited, so these can be absent from config.targetTypes yet still expected).
+const BUILTIN_LOWER_IS_BETTER = [
+  { id: 'tt_neg_number', name: 'Negative number', unit: '', unitPosition: 'suffix', isNumeric: true, lowerIsBetter: true },
+  { id: 'tt_neg_currency', name: 'Negative currency', unit: '₹', unitPosition: 'prefix', isNumeric: true, lowerIsBetter: true },
+  { id: 'tt_neg_percentage', name: 'Negative percentage', unit: '%', unitPosition: 'suffix', isNumeric: true, hasMin: true, min: 0, hasMax: true, max: 100, lowerIsBetter: true },
+];
+
 export function canonicalTargetTypeId(type = {}) {
   const rawId = String(type?.id || '').trim().toLowerCase();
   const name = String(type?.name || '').trim().toLowerCase();
@@ -81,28 +91,39 @@ function getTargetTypeOptions(config = {}) {
     ? config.targetTypes
     : FALLBACK_TARGET_TYPES;
   const seen = new Set();
-  const options = source
-    .filter((type) => !type?.hidden)
-    .map((type) => {
-      const label = String(type?.name || '').trim();
-      if (!label) return null;
-      const id = canonicalTargetTypeId(type);
-      const key = label.toLowerCase();
-      if (seen.has(key)) return null;
-      seen.add(key);
-      return {
-        id,
-        label,
-        unit: String(type?.unit || '').trim(),
-        unitPosition: type?.unitPosition === 'prefix' ? 'prefix' : 'suffix',
-        isNumeric: !!type?.isNumeric,
-        hasMin: !!type?.hasMin,
-        min: type?.min,
-        hasMax: !!type?.hasMax,
-        max: type?.max,
-      };
-    })
-    .filter(Boolean);
+  const options = [];
+  const pushType = (type) => {
+    if (!type || type.hidden) return;
+    const label = String(type?.name || '').trim();
+    if (!label) return;
+    const key = label.toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    options.push({
+      id: canonicalTargetTypeId(type),
+      label,
+      unit: String(type?.unit || '').trim(),
+      unitPosition: type?.unitPosition === 'prefix' ? 'prefix' : 'suffix',
+      isNumeric: !!type?.isNumeric,
+      lowerIsBetter: !!type?.lowerIsBetter,
+      hasMin: !!type?.hasMin,
+      min: type?.min,
+      hasMax: !!type?.hasMax,
+      max: type?.max,
+    });
+  };
+  source.forEach(pushType);
+  // Guarantee the built-in lower-is-better types are always available, unless
+  // the org has explicitly hidden one. Skipped automatically if already present.
+  const hiddenLabels = new Set(
+    (config.targetTypes || [])
+      .filter((t) => t?.hidden)
+      .map((t) => String(t?.name || '').trim().toLowerCase())
+  );
+  BUILTIN_LOWER_IS_BETTER.forEach((type) => {
+    if (hiddenLabels.has(type.name.toLowerCase())) return;
+    pushType(type);
+  });
   return options.length > 0 ? options : FALLBACK_TARGET_TYPES.map((type) => ({ ...type, label: type.name }));
 }
 
