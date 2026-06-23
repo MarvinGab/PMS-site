@@ -939,7 +939,7 @@ function ModuleOverview({ employees, groups, orgName, congratsDismissed, onDismi
                 if (pendingPct > 0) insights.push({ text: `${pendingPct}% awaiting approval`, color: '#FEF2F2', border: '#FECACA', tc: '#991B1B', dot: '#DC2626' });
                 if (topGroup && groupRows.length > 1) insights.push({ text: `Largest group: ${topGroup.name} (${topGroup.value})`, color: '#EEF2FF', border: '#C7D2FE', tc: '#3730A3', dot: '#4F46E5' });
                 if (externalManagerCount > 0) insights.push({ text: `${externalManagerCount} report to managers outside the upload`, color: '#FFF7ED', border: '#FED7AA', tc: '#9A3412', dot: '#EA580C' });
-                if (noManagerCount > 0) insights.push({ text: `${noManagerCount} have no manager assigned`, color: '#FEF2F2', border: '#FECACA', tc: '#991B1B', dot: '#DC2626' });
+                if (noManagerCount > 0) insights.push({ text: `${noManagerCount} have goals but no manager to rate them`, color: '#FEF2F2', border: '#FECACA', tc: '#991B1B', dot: '#DC2626' });
                 if (insights.length === 0) insights.push({ text: 'Everything looks healthy.', color: '#F0FDF4', border: '#BBF7D0', tc: '#166534', dot: '#16A34A' });
                 return insights.map((ins, i) => (
                   <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 8, background: ins.color, border: `1px solid ${ins.border}`, borderRadius: 999, padding: '6px 14px' }}>
@@ -4479,6 +4479,9 @@ function ModuleRoster({ employees, config, onUpdate, orgKey, initialIntent, onIn
   const [l1NewMgrInPMS, setL1NewMgrInPMS] = useState(false);
   const [l1NewMgrGroup, setL1NewMgrGroup] = useState('');
   const [l1NewMgrSegment, setL1NewMgrSegment] = useState('');
+  // A new manager added as a PMS employee has a goal group → they get goals →
+  // someone must rate them. Capture who.
+  const [l1NewMgrMgrCode, setL1NewMgrMgrCode] = useState('');
   const [removeSearch, setRemoveSearch] = useState('');
   const [removeSelected, setRemoveSelected] = useState([]);
   const [confirmRemove, setConfirmRemove] = useState(false);
@@ -4586,7 +4589,7 @@ function ModuleRoster({ employees, config, onUpdate, orgKey, initialIntent, onIn
     setShowReportingManager(false);
     setL1NewMgrInPMS(false);
     setL1NewMgrGroup('');
-    setL1NewMgrSegment('');
+    setL1NewMgrSegment(''); setL1NewMgrMgrCode('');
     onIntentConsumed?.();
   }, [initialIntent, onIntentConsumed]);
 
@@ -4638,6 +4641,7 @@ function ModuleRoster({ employees, config, onUpdate, orgKey, initialIntent, onIn
     if (!name) { setManualError('Employee Name is required'); return; }
     const existingCodes = new Set(employees.map((emp) => String(emp['Employee Code'] || '').trim().toLowerCase()));
     if (existingCodes.has(code.toLowerCase())) { setManualError(`Employee Code "${code}" already exists`); return; }
+    if (l1Code && l1Code.toLowerCase() === code.toLowerCase()) { setManualError("An employee can't report to themselves."); return; }
     if (meta.hasGoalGroups && !selectedGroup && !isOutsidePmsGroup) {
       setManualError('Group Name is required'); return;
     }
@@ -4677,6 +4681,13 @@ function ModuleRoster({ employees, config, onUpdate, orgKey, initialIntent, onIn
             return;
           }
         }
+        // This manager has a goal group → they'll have goals → someone must
+        // rate them. (A rater-only top seed is added by leaving "Also add as
+        // PMS employee" unchecked, so they never reach this branch.)
+        const raterCode = String(l1NewMgrMgrCode || '').trim();
+        if (!raterCode) { setManualError("Pick who rates this manager — they have goals, so they need a rater."); return; }
+        if (raterCode.toLowerCase() === l1Code.toLowerCase()) { setManualError("A manager can't report to themselves."); return; }
+        if (!lookupByCode(raterCode)) { setManualError(`Rater code "${raterCode}" isn't in the roster — add them first or pick an existing employee.`); return; }
       }
       mgrEmp = {};
       meta.headers.forEach((h) => { mgrEmp[h] = ''; });
@@ -4688,6 +4699,13 @@ function ModuleRoster({ employees, config, onUpdate, orgKey, initialIntent, onIn
         mgrEmp.assignedGoalGroupName = l1MgrGroupObj?.name || '';
       }
       if (l1MgrSegmentAttr) mgrEmp[l1MgrSegmentAttr] = l1NewMgrSegment;
+      // Wire the new manager's own "reports to".
+      if (meta.hasGoalGroups && String(l1NewMgrMgrCode || '').trim()) {
+        const raterMatch = lookupByCode(l1NewMgrMgrCode);
+        mgrEmp['Reporting Manager Code'] = String(l1NewMgrMgrCode).trim();
+        mgrEmp['Reporting Manager Name'] = raterMatch?.['Employee Name'] || '';
+        if (meta.needsEmail) mgrEmp['Reporting Manager Email'] = raterMatch ? getStoredEmail(raterMatch) : '';
+      }
     }
 
     // Resolve L1 manager — prefer existing roster row over what the user typed.
@@ -4719,7 +4737,7 @@ function ModuleRoster({ employees, config, onUpdate, orgKey, initialIntent, onIn
     showToast(mgrEmp ? `${name} added · manager ${mgrEmp['Employee Name']} also added to PMS` : `${name} added`);
     setManualForm({});
     setShowReportingManager(false);
-    setL1NewMgrInPMS(false); setL1NewMgrGroup(''); setL1NewMgrSegment('');
+    setL1NewMgrInPMS(false); setL1NewMgrGroup(''); setL1NewMgrSegment(''); setL1NewMgrMgrCode('');
   }
 
   function clearManualReportingManagers() {
@@ -4737,7 +4755,7 @@ function ModuleRoster({ employees, config, onUpdate, orgKey, initialIntent, onIn
     setShowReportingManager(false);
     setL1NewMgrInPMS(false);
     setL1NewMgrGroup('');
-    setL1NewMgrSegment('');
+    setL1NewMgrSegment(''); setL1NewMgrMgrCode('');
   }
 
   // Pick & Remove operates on the full roster — real employees + reporting managers
@@ -5023,7 +5041,7 @@ function ModuleRoster({ employees, config, onUpdate, orgKey, initialIntent, onIn
             setShowReportingManager(false);
             setL1NewMgrInPMS(false);
             setL1NewMgrGroup('');
-            setL1NewMgrSegment('');
+            setL1NewMgrSegment(''); setL1NewMgrMgrCode('');
             setRemoveSelected([]);
             setRemoveSearch('');
             setConfirmRemove(false);
@@ -5040,7 +5058,7 @@ function ModuleRoster({ employees, config, onUpdate, orgKey, initialIntent, onIn
             <div style={{ fontSize: 12.5, color: '#64748B', marginTop: 2 }}>Add one employee manually, or use bulk upload for a sheet.</div>
           </div>
           {tabPills(addMode, [{ k: 'manual', label: 'Add manually' }, { k: 'upload', label: 'Bulk upload' }],
-            (k) => { setAddMode(k); setAddPreview(null); setManualForm({}); setManualError(''); setShowReportingManager(false); setL1NewMgrInPMS(false); setL1NewMgrGroup(''); setL1NewMgrSegment(''); })}
+            (k) => { setAddMode(k); setAddPreview(null); setManualForm({}); setManualError(''); setShowReportingManager(false); setL1NewMgrInPMS(false); setL1NewMgrGroup(''); setL1NewMgrSegment(''); setL1NewMgrMgrCode(''); })}
         </header>
 
         <div style={{ padding: '16px 18px' }}>
@@ -5178,7 +5196,7 @@ function ModuleRoster({ employees, config, onUpdate, orgKey, initialIntent, onIn
                       </div>
                       <label style={{ display: 'inline-flex', alignItems: 'center', gap: 8, fontSize: 12.5, color: '#0F172A', cursor: 'pointer', userSelect: 'none' }}>
                         <input type="checkbox" checked={l1NewMgrInPMS}
-                          onChange={(e) => { setL1NewMgrInPMS(e.target.checked); if (!e.target.checked) { setL1NewMgrGroup(''); setL1NewMgrSegment(''); } }}
+                          onChange={(e) => { setL1NewMgrInPMS(e.target.checked); if (!e.target.checked) { setL1NewMgrGroup(''); setL1NewMgrSegment(''); setL1NewMgrMgrCode(''); } }}
                           style={{ width: 15, height: 15, accentColor: '#4F46E5' }} />
                         <span>Also add this manager as a PMS employee</span>
                       </label>
@@ -5190,7 +5208,7 @@ function ModuleRoster({ employees, config, onUpdate, orgKey, initialIntent, onIn
                                 <label style={{ fontSize: 11.5, fontWeight: 600, color: '#64748B', display: 'block', marginBottom: 5 }}>
                                   Group <span style={{ color: '#DC2626' }}>*</span>
                                 </label>
-                                <select value={l1NewMgrGroup} onChange={(e) => { setL1NewMgrGroup(e.target.value); setL1NewMgrSegment(''); }} style={inputBase}>
+                                <select value={l1NewMgrGroup} onChange={(e) => { setL1NewMgrGroup(e.target.value); setL1NewMgrSegment(''); setL1NewMgrMgrCode(''); }} style={inputBase}>
                                   <option value="">Select a group…</option>
                                   {meta.groupNames.map((g) => <option key={g} value={g}>{g}</option>)}
                                 </select>
@@ -5209,6 +5227,20 @@ function ModuleRoster({ employees, config, onUpdate, orgKey, initialIntent, onIn
                               </div>
                             )}
                           </div>
+                          {meta.hasGoalGroups && (
+                            <div style={{ marginTop: 12, paddingTop: 12, borderTop: '1px solid #EEF2F7' }}>
+                              <label style={{ fontSize: 11.5, fontWeight: 600, color: '#64748B', display: 'block', marginBottom: 5 }}>
+                                Who rates this manager? <span style={{ color: '#DC2626' }}>*</span>
+                                <span style={{ fontWeight: 500, color: '#94A3B8', marginLeft: 6 }}>· this manager has goals, so they need a rater · Reporting Manager Code (must already be in the roster)</span>
+                              </label>
+                              <input value={l1NewMgrMgrCode} onChange={(e) => setL1NewMgrMgrCode(e.target.value)} placeholder="e.g. 3000" style={inputBase} />
+                              {String(l1NewMgrMgrCode || '').trim() && (
+                                lookupByCode(l1NewMgrMgrCode)
+                                  ? <div style={{ marginTop: 6, fontSize: 11.5, color: '#166534' }}>✓ {lookupByCode(l1NewMgrMgrCode)['Employee Name']}</div>
+                                  : <div style={{ marginTop: 6, fontSize: 11.5, color: '#DC2626' }}>Not in roster — add them first or pick an existing code.</div>
+                              )}
+                            </div>
+                          )}
                         </div>
                       )}
                     </div>
