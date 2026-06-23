@@ -4,6 +4,7 @@
 // any failure so a `npm run build` / CI pipeline can chain it later. No test
 // framework required — uses node:assert.
 
+/* global process */
 import assert from 'node:assert/strict';
 import {
   SUB_PHASE,
@@ -158,7 +159,7 @@ check('sub-phase outside parent fails', () => {
   const r = validateCycleWindows(broken);
   assert.equal(r.ok, false);
 });
-check('evaluation overlapping goal-setting is ALLOWED (with notice)', () => {
+check('evaluation overlapping goal-setting is ALLOWED without warning', () => {
   const overlap = JSON.parse(JSON.stringify(windows));
   overlap.evaluation.startsOn = '2026-04-15';
   overlap.evaluation.subPhases.selfEvaluation.startsOn = '2026-04-15';
@@ -169,7 +170,7 @@ check('evaluation overlapping goal-setting is ALLOWED (with notice)', () => {
   const r = validateCycleWindows(overlap);
   assert.equal(r.ok, true, r.errors.join('; '));
   const review = reviewCycleWindows(overlap, at('2025-12-01T12:00:00'));
-  assert.ok(review.warnings.some((w) => /run in parallel/i.test(w)));
+  assert.equal(review.warnings.length, 0);
 });
 check('missing phase fails cleanly', () => {
   const r = validateCycleWindows({ goalSetting: windows.goalSetting });

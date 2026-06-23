@@ -5,7 +5,7 @@ import { usePMSData, SUB_PHASE } from '../hooks/usePMSData';
 import { RatingWidget } from '../components/RatingWidget';
 import { getEmployeeStage, setEmployeeStage, submitEmployeeStage } from '../backend/ratingsStore';
 import { resolveCompetenciesForEmployee } from '../backend/competencyResolver';
-import { achievementPercentFromTarget, computeGoalAutoRatings, computeSelfScoreBreakdown, formatFinalRating } from '../backend/scoring';
+import { computeGoalAutoRatings, computeSelfScoreBreakdown, formatFinalRating } from '../backend/scoring';
 
 const ACCENT = '#2563EB';
 const GOAL_ACCENT = '#7C3AED';     // violet — goals/KRAs
@@ -59,10 +59,6 @@ function formatTargetValue(value, typeId, targetTypes = []) {
   const unit = String(meta?.unit || '').trim();
   if (!unit) return text;
   return meta?.unitPosition === 'prefix' ? `${unit} ${text}` : `${text} ${unit}`;
-}
-
-function getAchievementPercent(target, achievement, typeId, targetTypes = []) {
-  return achievementPercentFromTarget(target, achievement, typeId, targetTypes);
 }
 
 function getEmployeeGroup(config, employee) {
@@ -139,23 +135,11 @@ export default function SelfEvalPage({ embedded = false, overrideEmpCode = '', o
   const [softArmed, setSoftArmed] = useState(false);
   const [finalOpen, setFinalOpen] = useState(false);
 
-  if (!session?.empCode && !isHRAdmin) {
-    return <ShellMessage title="Sign in required" message="Open this page from the employee sign-in flow." />;
-  }
-  if (!ready) {
-    return <ShellMessage title="Loading…" message="Reading cycle data." />;
-  }
-  if (!employee) {
-    return <ShellMessage title="Employee not found" message={`No employee with code "${actingEmpCode || '—'}" exists for this org.${isHRAdmin && !overrideCode ? ' HR admins: append #self-eval?as=EMP_CODE to preview as a specific employee.' : ''}`} />;
-  }
   const selfWindowActive = activeSubPhases.includes(SUB_PHASE.SELF_EVALUATION) || subPhase === SUB_PHASE.SELF_EVALUATION;
   const phaseActive = selfWindowActive || myStatus === 'approved';
   const previewMode = !phaseActive && (isHRAdmin || !!overrideCode);
-  if (!phaseActive && !previewMode) {
-    return <ShellMessage title="Self-evaluation is not open" message={`Current cycle phase: ${subPhase}. Self-evaluation is only editable during the self-evaluation window in the cycle calendar.`} />;
-  }
 
-  const bands = config.autoRatingBands || [];
+  const bands = useMemo(() => config.autoRatingBands || [], [config.autoRatingBands]);
   const autoOn = config.autoRating !== false;
   const actor = isHRAdmin ? `HR (${empSession?.empCode || 'admin'} as ${actingEmpCode})` : actingEmpCode;
   const buildPayload = () => ({
@@ -335,6 +319,19 @@ export default function SelfEvalPage({ embedded = false, overrideEmpCode = '', o
     setOverallComment(value);
   };
 
+  if (!session?.empCode && !isHRAdmin) {
+    return <ShellMessage title="Sign in required" message="Open this page from the employee sign-in flow." />;
+  }
+  if (!ready) {
+    return <ShellMessage title="Loading…" message="Reading cycle data." />;
+  }
+  if (!employee) {
+    return <ShellMessage title="Employee not found" message={`No employee with code "${actingEmpCode || '—'}" exists for this org.${isHRAdmin && !overrideCode ? ' HR admins: append #self-eval?as=EMP_CODE to preview as a specific employee.' : ''}`} />;
+  }
+  if (!phaseActive && !previewMode) {
+    return <ShellMessage title="Self-evaluation is not open" message={`Current cycle phase: ${subPhase}. Self-evaluation is only editable during the self-evaluation window in the cycle calendar.`} />;
+  }
+
   return (
     <div style={embedded
       ? { padding: '0' }
@@ -375,7 +372,6 @@ export default function SelfEvalPage({ embedded = false, overrideEmpCode = '', o
           const kraScore = scores[kra.id] ?? null;
           const kraAch = achievements[kra.id] ?? '';
           const hasKpis = (kra.kpis || []).length > 0;
-          const kraAchievementPct = getAchievementPercent(kra.target, kraAch, kra.targetType, targetTypes);
           const autoScore = autoOn ? autoScores[kra.id] : null;
           return (
             <GoalCard key={kra.id} accent={goalColor}>
@@ -419,7 +415,6 @@ export default function SelfEvalPage({ embedded = false, overrideEmpCode = '', o
                 <div>
                   {kra.kpis.map((kpi, kpiIdx) => {
                     const kpiAch = achievements[kpi.id] ?? '';
-                    const kpiAchievementPct = getAchievementPercent(kpi.target, kpiAch, kpi.targetType, targetTypes);
                     const kpiSuggested = autoOn ? autoScores[kpi.id] : null;
                     return (
                       <KpiWithRating
