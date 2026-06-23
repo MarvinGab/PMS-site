@@ -658,7 +658,7 @@ function isGroupLibraryEnabled(group) {
 }
 
 function isGroupShownOnGoalsBoard(group) {
-  return !!group && (isGroupLibraryEnabled(group) || !!group.prefillType);
+  return !!group && isGroupLibraryEnabled(group);
 }
 
 function normalizeSimpleGoalGroup(group) {
@@ -5008,16 +5008,11 @@ function LibraryCard({ library, groupLabel, assignedText, accent, active = false
 }
 
 function getGoalSetupLabels(group = {}) {
-  const prefillLabel = group.prefillType === 'kra-kpi'
-    ? 'Pre-fill KRAs + KPIs'
-    : group.prefillType === 'kra-only'
-      ? 'Pre-fill KRAs only'
-      : null;
   const libraryLabel = group.hasLibrary
     ? `Reference library ${group.libraryType === 'kra-kpi' ? 'KRAs + KPIs' : 'KRAs only'}`
     : null;
   const editLabel = group.canEditOwn === false ? 'Employee edits off' : 'Employee edits on';
-  return [prefillLabel, libraryLabel, editLabel].filter(Boolean);
+  return [libraryLabel, editLabel].filter(Boolean);
 }
 
 function ReadOnlyLibraryModal({ library, onClose, showKpiPercent = false, targetTypes = [] }) {
@@ -6175,7 +6170,7 @@ export function StepGoalLibraries({ config, update, hideHead, readOnly = false }
                           key={`${group.id}:${assignment.slotKey}`}
                           library={library || { name: assignment.label, type: 'kra-kpi', perspectives: [] }}
                           groupLabel={assignment.label}
-                          assignedText={!readOnly ? (group.prefillType === 'kra-kpi' ? 'Pre-fill: KRA + KPI' : group.prefillType === 'kra-only' ? 'Pre-fill: KRA only' : null) : null}
+                          assignedText={null}
                           accent={accent}
                           active={!!library}
                           empty={!library}
@@ -11999,23 +11994,22 @@ export function StepPrefillDataFlat({ config, update, readOnly = false }) {
 export function StepGoalLibrariesFlat({ config, update, hideHead, readOnly = false }) {
   const libraries = config.goalLibraries || [];
   const groups = config.goalGroups || [];
-  const groupsShownOnBoard = groups.filter(isGroupShownOnGoalsBoard);
-  const canShowAllGroups = groupsShownOnBoard.length > 1;
+  const groupsNeedingLib = groups.filter(isGroupLibraryEnabled);
+  const canShowAllGroups = groupsNeedingLib.length > 1;
   const [showAddModal, setShowAddModal] = useState(false);
   const [editingLibraryId, setEditingLibraryId] = useState(null);
   const [showAllGroups, setShowAllGroups] = useState(false);
-  const [selectedGroupId, setSelectedGroupId] = useState(groupsShownOnBoard[0]?.id || '');
+  const [selectedGroupId, setSelectedGroupId] = useState(groupsNeedingLib[0]?.id || '');
   const [editingSlot, setEditingSlot] = useState(null);
-  const [editingPrefillTarget, setEditingPrefillTarget] = useState(null);
   const [viewingLibrary, setViewingLibrary] = useState(null);
   const [uploadErrors, setUploadErrors] = useState([]);
 
-  const groupsWithAssignments = groupsShownOnBoard.map(group => ({
+  const groupsWithAssignments = groupsNeedingLib.map(group => ({
     ...group,
     libraryAssignments: getGroupLibraryAssignments(group),
   }));
   const allSlotsAssigned = groupsWithAssignments.length === 0 || groupsWithAssignments.every(g =>
-    !isGroupLibraryEnabled(g) || g.libraryAssignments.every(a => a.libraryId && libraries.some(l => l.id === a.libraryId))
+    g.libraryAssignments.every(a => a.libraryId && libraries.some(l => l.id === a.libraryId))
   );
   const isValid = allSlotsAssigned;
   const isApplied = !!config.goalLibrariesAppliedSnapshot && isValid;
@@ -12033,15 +12027,10 @@ export function StepGoalLibrariesFlat({ config, update, hideHead, readOnly = fal
     : { ...config, goalGroups: [selectedGroup] };
   const selectedGroupIndex = Math.max(0, groupsWithAssignments.findIndex(g => g.id === selectedGroup?.id));
   const editingLibrary = libraries.find(l => l.id === editingLibraryId) || null;
-  const editingPrefillGroup = groupsWithAssignments.find(g => g.id === editingPrefillTarget?.groupId) || null;
-  const editingPrefillAssignment = editingPrefillGroup
-    ? getGroupPrefillAssignments(editingPrefillGroup).find(a => a.slotKey === editingPrefillTarget?.slotKey) || null
-    : null;
   const boardSlots = ((showAllGroups && canShowAllGroups) ? groupsWithAssignments : (selectedGroup ? [selectedGroup] : []))
     .flatMap((group, groupIndex) =>
       group.libraryAssignments.map((assignment, assignmentIndex) => ({
         group, assignment,
-        prefillAssignment: getGroupPrefillAssignments(group).find((item) => item.slotKey === assignment.slotKey) || null,
         accent: LIBRARY_BOARD_COLORS[(groupIndex + assignmentIndex + Math.max(selectedGroupIndex, 0)) % LIBRARY_BOARD_COLORS.length],
         library: libraries.find(l => l.id === assignment.libraryId) || null,
       }))
@@ -12082,28 +12071,6 @@ export function StepGoalLibrariesFlat({ config, update, hideHead, readOnly = fal
     setEditingSlot({ group, assignment });
     setEditingLibraryId(libraryId);
     setShowAddModal(true);
-  }
-
-  function updatePrefillAssignments(groupId, nextAssignments) {
-    const nextGroups = setGroupPrefillAssignments(groups, groupId, nextAssignments);
-    update('goalGroups', nextGroups);
-    update('goalLibraryData', buildLegacyPrefillData(config, nextGroups));
-    update('prefillDataAppliedSnapshot', null);
-    setUploadErrors([]);
-  }
-
-  function updatePrefillAssignmentData(groupId, slotKey, nextData) {
-    const group = groups.find(item => item.id === groupId);
-    if (!group) return;
-    const nextAssignments = getGroupPrefillAssignments(group).map(a =>
-      a.slotKey === slotKey ? { ...a, data: nextData } : a
-    );
-    updatePrefillAssignments(groupId, nextAssignments);
-  }
-
-  function openPrefillEditor(group, assignment) {
-    setSelectedGroupId(group.id);
-    setEditingPrefillTarget({ groupId: group.id, slotKey: assignment.slotKey });
   }
 
   function handleImportedLibraries(nextLibraries, importedLibraries = nextLibraries) {
@@ -12177,29 +12144,6 @@ export function StepGoalLibrariesFlat({ config, update, hideHead, readOnly = fal
           onClose={() => { setShowAddModal(false); setEditingLibraryId(null); setEditingSlot(null); }}
         />
       )}
-      {!readOnly && editingPrefillGroup && editingPrefillAssignment && (
-        <AddLibraryModalFlat
-          initialLibrary={{
-            id: `${editingPrefillGroup.id}_${editingPrefillAssignment.slotKey}`,
-            name: editingPrefillAssignment.label,
-            type: editingPrefillGroup.prefillType === 'kra-kpi' ? 'kra-kpi' : 'kra-only',
-            weightType: 'suggested',
-            perspectives: editingPrefillAssignment.data || [],
-          }}
-          fixedName={editingPrefillAssignment.label}
-          suggestedType={editingPrefillGroup.prefillType}
-          lockType
-          hideKpiWeights={editingPrefillGroup.kpiRatingMode === 'free-text'}
-          targetsOn={config.targetsEnabled !== false}
-          targetLevel={editingPrefillGroup.targetLevel === 'KRA' ? 'KRA' : 'KPI'}
-          targetTypeOptions={getMergedTargetTypes(config).filter((t) => !t.hidden).map((t) => ({ id: canonicalTargetTypeId(t), label: t.name }))}
-          onSave={(library) => {
-            updatePrefillAssignmentData(editingPrefillGroup.id, editingPrefillAssignment.slotKey, library.perspectives || []);
-            setEditingPrefillTarget(null);
-          }}
-          onClose={() => setEditingPrefillTarget(null)}
-        />
-      )}
       <ReadOnlyLibraryModal library={viewingLibrary?.library || null} onClose={() => setViewingLibrary(null)} showKpiPercent={!!viewingLibrary?.showKpiPercent} targetTypes={getMergedTargetTypes(config).filter((t) => !t.hidden)} />
 
       {!hideHead && <SectionHead title="Build your KRA libraries" />}
@@ -12231,40 +12175,33 @@ export function StepGoalLibrariesFlat({ config, update, hideHead, readOnly = fal
                   )}
                   <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: 18 }}>
                     {slots.map((slot, index) => {
-                      const { group, assignment, library, prefillAssignment } = slot;
+                      const { group, assignment, library } = slot;
                       const accent = slot.accent || LIBRARY_BOARD_COLORS[(selectedGroupIndex + index) % LIBRARY_BOARD_COLORS.length];
-                      const libraryEnabled = isGroupLibraryEnabled(group);
-                      const prefillData = prefillAssignment?.data || [];
-                      const prefillOnly = !libraryEnabled && !!group.prefillType;
-                      const displayLibrary = library || (!libraryEnabled && group.prefillType
-                        ? { name: assignment.label, type: group.prefillType, perspectives: prefillData }
-                        : { name: assignment.label, type: 'kra-kpi', perspectives: [] });
+                      const displayLibrary = library || { name: assignment.label, type: group.libraryType === 'kra-only' ? 'kra-only' : 'kra-kpi', perspectives: [] };
                       return (
                         <LibraryCard
                           key={`${group.id}:${assignment.slotKey}`}
                           library={displayLibrary}
                           groupLabel={assignment.label}
-                          assignedText={!readOnly ? (group.prefillType === 'kra-kpi' ? 'Pre-fill: KRA + KPI' : group.prefillType === 'kra-only' ? 'Pre-fill: KRA only' : null) : null}
+                          assignedText={null}
                           accent={accent}
-                          active={!!library || (!libraryEnabled && prefillData.length > 0)}
-                          empty={libraryEnabled ? !library : prefillData.length === 0}
+                          active={!!library}
+                          empty={!library}
                           setupLabels={!readOnly ? getGoalSetupLabels(group) : []}
-                          onSelect={readOnly && !((libraryEnabled ? !library : prefillData.length === 0))
+                          onSelect={readOnly && library
                             ? () => setViewingLibrary({
                                 library: displayLibrary,
                                 showKpiPercent: displayLibrary?.type === 'kra-kpi' && group.kpiRatingMode !== 'free-text',
                               })
                             : null}
-                          onEdit={!readOnly ? (libraryEnabled ? () => openSlotEditor(group, assignment, library?.id || null) : prefillOnly ? () => openPrefillEditor(group, assignment) : null) : null}
-                          onDelete={!readOnly ? (library ? () => deleteLibrary(library.id) : prefillOnly && prefillData.length > 0 ? () => updatePrefillAssignmentData(group.id, assignment.slotKey, []) : null) : null}
+                          onEdit={!readOnly ? () => openSlotEditor(group, assignment, library?.id || null) : null}
+                          onDelete={!readOnly && library ? () => deleteLibrary(library.id) : null}
                           showKpiPercent={displayLibrary?.type === 'kra-kpi' && group.kpiRatingMode !== 'free-text'}
                           selectionHint={readOnly
-                            ? ((libraryEnabled ? library : prefillData.length > 0) ? 'Click to view details' : 'No data configured')
-                            : (libraryEnabled
-                                ? (library
-                                    ? `${group.name}${group.segmentAttr ? ` · ${group.segmentAttr}` : ''}${group.prefillType ? ' · pre-fill data is in Pre-fill Goals' : ''}`
-                                    : `Create library for ${assignment.label}`)
-                                : (prefillData.length ? 'Click Edit to update pre-fill data' : `Create pre-fill data for ${assignment.label}`))}
+                            ? (library ? 'Click to view details' : 'No library configured')
+                            : (library
+                                ? `${group.name}${group.segmentAttr ? ` · ${group.segmentAttr}` : ''}`
+                                : `Create library for ${assignment.label}`)}
                         />
                       );
                     })}
