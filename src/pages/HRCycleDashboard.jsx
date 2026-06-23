@@ -6550,7 +6550,14 @@ function QuickConfigPanel({ moduleId, config, onConfigSave, readOnly = false }) 
           Unsaved changes — save or cancel to apply.
         </div>
       )}
-      <Step config={draftConfig} update={update} hideHead readOnly={readOnly} hideApplyBar={['q-scale', 'q-auto', 'q-comp', 'q-bell'].includes(moduleId)} />
+      <Step
+        config={draftConfig}
+        update={update}
+        hideHead
+        readOnly={readOnly}
+        showPrefillGroups={moduleId === 'q-goals'}
+        hideApplyBar={['q-scale', 'q-auto', 'q-comp', 'q-bell'].includes(moduleId)}
+      />
     </div>
   );
 }
