@@ -8,6 +8,12 @@ export const EXPECTED_TABLES = [
   'organizations', 'organization_branding', 'org_members', 'employees',
   'reporting_relationships', 'org_grades', 'competency_library',
   'goal_libraries', 'goal_library_items', 'prefill_datasets', 'prefill_dataset_items',
+  // Task 2: cycles
+  'appraisal_cycles', 'cycle_phase_windows', 'cycle_config_snapshots', 'cycle_config_versions',
+  'cycle_perspectives', 'cycle_groups', 'cycle_group_segment_values', 'cycle_group_library_assignments',
+  'cycle_target_types', 'cycle_rating_scale_levels', 'cycle_auto_rating_bands', 'cycle_goal_rules',
+  'cycle_competency_config', 'cycle_competency_assignments', 'cycle_bell_curve_bands',
+  'cycle_participants', 'cycle_participant_assignments',
 ];
 
 const admin = adminClient();
