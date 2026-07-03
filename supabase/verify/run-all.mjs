@@ -9,6 +9,13 @@ const scripts = [
   'supabase/verify/kernel-check.mjs',
 ];
 
+console.log('\n=== deno unit tests (kernel) ===');
+const deno = spawnSync('deno', ['test', 'supabase/functions/_shared/kernel.test.ts'], { stdio: 'inherit' });
+if (deno.status !== 0) {
+  console.error('\nFOUNDATION SMOKE: FAILED at kernel unit tests');
+  process.exit(deno.status ?? 1);
+}
+
 for (const script of scripts) {
   console.log(`\n=== ${script} ===`);
   const res = spawnSync(process.execPath, [script], { stdio: 'inherit' });

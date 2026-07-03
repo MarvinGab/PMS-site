@@ -6,6 +6,7 @@ import { adminClient, SUPABASE_URL, SERVICE_KEY } from './_clients.mjs';
 import { createClient } from '@supabase/supabase-js';
 
 export const ORG_KEY = 'acme-test';
+export const ORG_B_KEY = 'beta-test';
 export const PASSWORD = 'Passw0rd!seed';
 export const USERS = {
   superadmin: 'pms-super@example.com',
@@ -13,6 +14,7 @@ export const USERS = {
   manager: 'pms-manager@example.com',
   employee: 'pms-employee@example.com',
   hod: 'pms-hod@example.com',
+  beta: 'pms-beta@example.com',
 };
 
 const isMain = process.argv[1] && process.argv[1].endsWith('seed-foundation.mjs');
@@ -123,5 +125,26 @@ if (isMain) {
   });
   assert.equal(auditInsErr, null, auditInsErr?.message);
 
-  console.log(`seed-foundation: PASS (org ${org.id}, cycle ${cycle.id})`);
+  // 9. Org B: minimal second tenant, seeded solely to prove cross-tenant isolation.
+  await admin.from('organizations').delete().eq('key', ORG_B_KEY);
+  const { data: orgB, error: orgBErr } = await admin.from('organizations')
+    .insert({ key: ORG_B_KEY, name: 'Beta Test Org' }).select().single();
+  assert.equal(orgBErr, null, orgBErr?.message);
+
+  const { error: memBErr } = await admin.from('org_members')
+    .insert({ organization_id: orgB.id, user_id: userIds.beta, roles: ['hr_admin'] });
+  assert.equal(memBErr, null, memBErr?.message);
+
+  const { error: empBErr } = await admin.from('employees').insert({
+    organization_id: orgB.id, employee_code: 'BETA001', full_name: 'Beta Bob', email: USERS.beta,
+    designation: 'Analyst', department: 'Ops', group_name: 'Ops', user_id: userIds.beta,
+  });
+  assert.equal(empBErr, null, empBErr?.message);
+
+  const { error: cycBErr } = await admin.from('appraisal_cycles').insert({
+    organization_id: orgB.id, name: 'FY26 Beta Cycle', framework_id: 'kra', status: 'draft', created_by: userIds.beta,
+  });
+  assert.equal(cycBErr, null, cycBErr?.message);
+
+  console.log(`seed-foundation: PASS (org A ${org.id} / cycle ${cycle.id}; org B ${orgB.id})`);
 }

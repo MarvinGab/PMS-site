@@ -3,7 +3,7 @@
 // HR = whole org; browser writes to business tables = denied; version bump + working-cycle constraint work.
 import assert from 'node:assert/strict';
 import { anonClient, signIn, adminClient } from './_clients.mjs';
-import { USERS, PASSWORD, ORG_KEY } from './seed-foundation.mjs';
+import { USERS, PASSWORD, ORG_KEY, ORG_B_KEY } from './seed-foundation.mjs';
 
 let n = 0;
 const check = (desc, cond) => { n += 1; assert.ok(cond, `FAIL: ${desc}`); console.log(`ok ${desc}`); };
@@ -108,6 +108,82 @@ assert.ok(org, 'seed org missing — run seed-foundation.mjs first');
     p_key: 'manager_rating_visible',
   });
   check('anon cannot call pms rpc helpers', anonErr !== null);
+}
+
+// --- cross-tenant isolation: org B (beta-test) rows must never leak into org A queries ---
+{
+  const { client: betaClient } = await signIn(USERS.beta, PASSWORD);
+  const { data: betaEmps } = await betaClient.from('employees').select('employee_code');
+  const betaCodes = (betaEmps ?? []).map((e) => e.employee_code).sort();
+  check('beta user sees only BETA001 (org A roster invisible)', JSON.stringify(betaCodes) === JSON.stringify(['BETA001']));
+
+  const { data: betaOrgs } = await betaClient.from('organizations').select('key');
+  const betaOrgKeys = (betaOrgs ?? []).map((o) => o.key);
+  check('beta user sees beta-test org', betaOrgKeys.includes(ORG_B_KEY));
+  check('beta user cannot see acme-test org', !betaOrgKeys.includes(ORG_KEY));
+
+  const { data: betaWindows } = await betaClient.from('cycle_phase_windows').select('id');
+  check('beta user sees no org A phase windows', (betaWindows ?? []).length === 0);
+}
+
+// --- org A HR must not see org B's org or roster row ---
+{
+  const { client } = await signIn(USERS.hr, PASSWORD);
+  const { data: hrOrgs } = await client.from('organizations').select('key');
+  check('org A HR does not see beta-test org', !(hrOrgs ?? []).some((o) => o.key === ORG_B_KEY));
+  const { data: hrEmps } = await client.from('employees').select('employee_code');
+  check('org A HR does not see BETA001', !(hrEmps ?? []).some((e) => e.employee_code === 'BETA001'));
+}
+
+// --- super admin: sees every org, not just its own ---
+{
+  const { client } = await signIn(USERS.superadmin, PASSWORD);
+  const { data: orgs } = await client.from('organizations').select('key');
+  const keys = (orgs ?? []).map((o) => o.key);
+  check('super admin sees acme-test and beta-test', keys.includes(ORG_KEY) && keys.includes(ORG_B_KEY));
+}
+
+// --- notifications.read_at: the one allowed client write ---
+{
+  const { data: eveRow } = await admin.from('employees').select('user_id')
+    .eq('organization_id', org.id).eq('employee_code', 'EMP002').single();
+  const { data: eveMember } = await admin.from('org_members').select('id')
+    .eq('organization_id', org.id).eq('user_id', eveRow.user_id).single();
+  // Reset so re-runs against a not-freshly-reseeded org stay deterministic.
+  await admin.from('notifications').delete().eq('recipient_member_id', eveMember.id);
+  const { error: notifInsErr } = await admin.from('notifications').insert({
+    organization_id: org.id, recipient_member_id: eveMember.id, type: 'test', title: 'Seed note',
+  });
+  assert.equal(notifInsErr, null, notifInsErr?.message);
+
+  const { client: eveClient } = await signIn(USERS.employee, PASSWORD);
+  const { data: eveNotifs } = await eveClient.from('notifications').select('id, read_at');
+  check('Eve sees exactly 1 notification', (eveNotifs ?? []).length === 1);
+  const notifId = eveNotifs[0].id;
+
+  const { data: markRead, error: markErr } = await eveClient.from('notifications')
+    .update({ read_at: new Date().toISOString() }).eq('id', notifId).select();
+  check('Eve can mark her notification read', markErr === null && (markRead ?? [])[0]?.read_at != null);
+
+  const { error: hackErr } = await eveClient.from('notifications')
+    .update({ title: 'hacked' }).eq('id', notifId).select();
+  check('Eve cannot update notification title (column grant)', hackErr !== null);
+
+  const { client: betaNotifClient } = await signIn(USERS.beta, PASSWORD);
+  const { data: betaNotifs } = await betaNotifClient.from('notifications').select('id');
+  check('beta user sees 0 notifications', (betaNotifs ?? []).length === 0);
+  const { data: betaUpd } = await betaNotifClient.from('notifications')
+    .update({ read_at: new Date().toISOString() }).eq('id', notifId).select();
+  check("beta user updating Eve's notification has no effect", (betaUpd ?? []).length === 0);
+}
+
+// --- archived-cycle allowance: partial unique index only guards non-archived cycles ---
+{
+  const { error: archivedErr } = await admin.from('appraisal_cycles').insert({
+    organization_id: org.id, name: 'Old Archived Cycle', framework_id: 'kra',
+    status: 'archived', archived_at: new Date().toISOString(),
+  });
+  check('archived cycle insert succeeds alongside the working cycle', archivedErr === null);
 }
 
 console.log(`rls-check: PASS (${n} assertions)`);
