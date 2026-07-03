@@ -389,7 +389,7 @@ git commit -m "feat(foundation): pms schema core org tables + verify harness"
 ### Task 2: Cycle schema migration
 
 **Files:**
-- Create: `supabase/migrations/2026070311_pms_cycles.sql`
+- Create: `supabase/migrations/2026070312_pms_cycles.sql`
 - Modify: `supabase/verify/check-tables.mjs` (extend `EXPECTED_TABLES`)
 
 **Interfaces:**
@@ -417,7 +417,7 @@ Expected: FAIL — 17 `MISSING pms.<name>` lines for the new names; the 11 Task-
 
 - [ ] **Step 3: Write the cycles migration**
 
-`supabase/migrations/2026070311_pms_cycles.sql`:
+`supabase/migrations/2026070312_pms_cycles.sql`:
 
 ```sql
 create table pms.appraisal_cycles (
@@ -702,7 +702,7 @@ end $$;
 - [ ] **Step 4: Apply and verify**
 
 Run: `supabase db push`
-Expected: `Applying migration 2026070311_pms_cycles.sql... Finished supabase db push.`
+Expected: `Applying migration 2026070312_pms_cycles.sql... Finished supabase db push.`
 
 Run: `node supabase/verify/check-tables.mjs`
 Expected: all 28 tables `ok`, `check-tables: PASS`.
@@ -710,7 +710,7 @@ Expected: all 28 tables `ok`, `check-tables: PASS`.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add supabase/migrations/2026070311_pms_cycles.sql supabase/verify/check-tables.mjs
+git add supabase/migrations/2026070312_pms_cycles.sql supabase/verify/check-tables.mjs
 git commit -m "feat(foundation): cycle schema tables with one-working-cycle constraint"
 ```
 
@@ -719,7 +719,7 @@ git commit -m "feat(foundation): cycle schema tables with one-working-cycle cons
 ### Task 3: Workflow + plumbing schema migration
 
 **Files:**
-- Create: `supabase/migrations/2026070312_pms_workflow.sql`
+- Create: `supabase/migrations/2026070313_pms_workflow.sql`
 - Modify: `supabase/verify/check-tables.mjs` (extend `EXPECTED_TABLES`)
 
 **Interfaces:**
@@ -746,7 +746,7 @@ Expected: FAIL — 17 new `MISSING` lines.
 
 - [ ] **Step 3: Write the workflow migration**
 
-`supabase/migrations/2026070312_pms_workflow.sql`:
+`supabase/migrations/2026070313_pms_workflow.sql`:
 
 ```sql
 create table pms.employee_goal_plans (
@@ -1045,7 +1045,7 @@ end $$;
 - [ ] **Step 4: Apply and verify**
 
 Run: `supabase db push`
-Expected: `Applying migration 2026070312_pms_workflow.sql... Finished supabase db push.`
+Expected: `Applying migration 2026070313_pms_workflow.sql... Finished supabase db push.`
 
 Run: `node supabase/verify/check-tables.mjs`
 Expected: all 45 tables `ok`, `check-tables: PASS`.
@@ -1053,7 +1053,7 @@ Expected: all 45 tables `ok`, `check-tables: PASS`.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add supabase/migrations/2026070312_pms_workflow.sql supabase/verify/check-tables.mjs
+git add supabase/migrations/2026070313_pms_workflow.sql supabase/verify/check-tables.mjs
 git commit -m "feat(foundation): workflow, publishing, jobs, import and audit tables"
 ```
 
@@ -1204,7 +1204,7 @@ git commit -m "feat(foundation): idempotent test-identity and draft-cycle seed"
 ### Task 5: RLS helpers, grants, and policies
 
 **Files:**
-- Create: `supabase/migrations/2026070313_pms_rls.sql`
+- Create: `supabase/migrations/2026070314_pms_rls.sql`
 
 **Interfaces:**
 - Consumes: all Task 1–3 tables; seeded rows (for the next task's checks).
@@ -1213,7 +1213,7 @@ git commit -m "feat(foundation): idempotent test-identity and draft-cycle seed"
 
 - [ ] **Step 1: Write the RLS migration**
 
-`supabase/migrations/2026070313_pms_rls.sql`:
+`supabase/migrations/2026070314_pms_rls.sql`:
 
 ```sql
 -- ============ helper functions (SECURITY DEFINER so policies don't recurse) ============
@@ -1483,7 +1483,7 @@ end $$;
 - [ ] **Step 2: Apply the migration**
 
 Run: `supabase db push`
-Expected: `Applying migration 2026070313_pms_rls.sql... Finished supabase db push.`
+Expected: `Applying migration 2026070314_pms_rls.sql... Finished supabase db push.`
 
 - [ ] **Step 3: Quick sanity check (service role unaffected)**
 
@@ -1493,7 +1493,7 @@ Expected: still all `ok` + `check-tables: PASS` (service role bypasses RLS).
 - [ ] **Step 4: Commit**
 
 ```bash
-git add supabase/migrations/2026070313_pms_rls.sql
+git add supabase/migrations/2026070314_pms_rls.sql
 git commit -m "feat(foundation): RLS helpers, deny-by-default grants, scoped read policies"
 ```
 
