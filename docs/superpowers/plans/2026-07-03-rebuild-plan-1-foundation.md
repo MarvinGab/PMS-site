@@ -34,15 +34,17 @@
 **Interfaces:**
 - Produces: env vars `SUPABASE_SERVICE_ROLE_KEY` (new), reused `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`. A clean `supabase migration list` state so `supabase db push` only applies new files.
 
-- [ ] **Step 1: Add the service-role key to `.env`**
+- [x] **Step 1: Add the service-role key to `.env`** *(done: fetched via `supabase projects api-keys -o json` and piped directly into `.env` without displaying it)*
 
-Supabase Dashboard → project `mkjtdwrzmobahwkpumxx` → Project Settings → API Keys → copy the `service_role` secret. Append to `.env`:
+Manual alternative: Supabase Dashboard → project `mkjtdwrzmobahwkpumxx` → Project Settings → API Keys → copy the `service_role` secret. Append to `.env`:
 
 ```bash
 SUPABASE_SERVICE_ROLE_KEY=<paste service_role key>
 ```
 
 - [ ] **Step 2: Reconcile migration history**
+
+*(done: checked in-session — LOCAL and REMOTE already match for all 8 versions; no repair needed)*
 
 Run: `supabase migration list --linked`
 
@@ -64,6 +66,8 @@ Re-run `supabase migration list --linked` — LOCAL and REMOTE columns must matc
 - [ ] **Step 3: Disable public signups (invite-only auth)**
 
 Dashboard → Authentication → Sign In / Providers → Email: keep Email **enabled**, turn **OFF** "Allow new users to sign up". (Users are created only by our backend via the admin API.)
+
+*(Status: pending — needs the user's dashboard access; does not block any task in this plan. Must be done before cutover.)*
 
 ---
 
@@ -353,6 +357,10 @@ begin
     end if;
   end loop;
 end $$;
+
+-- Expose pms to the REST API (SQL equivalent of Dashboard → Data API → Exposed schemas).
+alter role authenticator set pgrst.db_schemas = 'public, storage, graphql_public, pms';
+notify pgrst, 'reload config';
 ```
 
 - [ ] **Step 5: Apply the migration**
@@ -360,9 +368,9 @@ end $$;
 Run: `supabase db push`
 Expected: `Applying migration 2026070310_pms_core.sql... Finished supabase db push.` (only this file applied).
 
-- [ ] **Step 6: Expose the `pms` schema to the API**
+- [ ] **Step 6: Confirm the `pms` schema is exposed to the API**
 
-Dashboard → Project Settings → Data API → "Exposed schemas" → add `pms` (keep existing entries) → Save. Wait ~30 seconds for PostgREST to reload.
+The migration's final `alter role authenticator set pgrst.db_schemas ...` + `notify pgrst` handles this. Wait ~30 seconds after push. Fallback if Step 7 still reports every table missing with a schema error: Dashboard → Project Settings → Data API → "Exposed schemas" → add `pms` → Save.
 
 - [ ] **Step 7: Run the table check to verify it passes**
 
