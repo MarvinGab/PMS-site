@@ -16,7 +16,7 @@ export class ApiError extends Error {
 }
 
 export type Membership = {
-  memberId: string;
+  memberId: string | null;
   organizationId: string | null;
   roles: string[];
   employeeId: string | null;
@@ -96,13 +96,19 @@ async function buildCtx(req: Request): Promise<HandlerCtx> {
     .select('id, organization_id, roles, status')
     .eq('user_id', userId)
     .eq('status', 'active');
-  if (memberErr) throw new ApiError('DB_ERROR', memberErr.message, 500);
+  if (memberErr) {
+    console.error('db', memberErr);
+    throw new ApiError('DB_ERROR', 'Database error', 500);
+  }
 
   const { data: empRows, error: empErr } = await admin
     .from('employees')
     .select('id, organization_id')
     .eq('user_id', userId);
-  if (empErr) throw new ApiError('DB_ERROR', empErr.message, 500);
+  if (empErr) {
+    console.error('db', empErr);
+    throw new ApiError('DB_ERROR', 'Database error', 500);
+  }
 
   const memberships: Membership[] = (memberRows ?? []).map((m) => ({
     memberId: m.id,
@@ -126,7 +132,7 @@ async function buildCtx(req: Request): Promise<HandlerCtx> {
       const membership = memberships.find((m) => m.organizationId === orgId);
       if (membership && roles.some((r) => membership.roles.includes(r))) return membership;
       if (isSuperAdmin) {
-        return { memberId: '', organizationId: orgId, roles: ['super_admin'], employeeId: null };
+        return { memberId: null, organizationId: orgId, roles: ['super_admin'], employeeId: null };
       }
       throw new ApiError('FORBIDDEN', 'You do not have permission for this action', 403);
     },
@@ -144,7 +150,10 @@ async function buildCtx(req: Request): Promise<HandlerCtx> {
         after: entry.after ?? null,
         note: entry.note ?? null,
       });
-      if (error) throw new ApiError('DB_ERROR', `audit failed: ${error.message}`, 500);
+      if (error) {
+        console.error('audit failed', error);
+        throw new ApiError('DB_ERROR', 'Database error', 500);
+      }
     },
     async versionedUpdate(table, id, expectedVersion, patch) {
       const { data, error } = await admin
@@ -154,7 +163,10 @@ async function buildCtx(req: Request): Promise<HandlerCtx> {
         .eq('version', expectedVersion)
         .select()
         .maybeSingle();
-      if (error) throw new ApiError('DB_ERROR', error.message, 500);
+      if (error) {
+        console.error('db', error);
+        throw new ApiError('DB_ERROR', 'Database error', 500);
+      }
       if (data) return data;
       const { data: row } = await admin.from(table).select('id').eq('id', id).maybeSingle();
       if (!row) throw new ApiError('NOT_FOUND', `${table} row not found`, 404);
@@ -168,7 +180,7 @@ export function serveActions(handlers: Record<string, Handler>): void {
   Deno.serve(async (req) => {
     if (req.method === 'OPTIONS') return new Response('ok', { headers: CORS });
     try {
-      if (req.method !== 'POST') throw new ApiError('BAD_REQUEST', 'POST only', 405);
+      if (req.method !== 'POST') throw new ApiError('METHOD_NOT_ALLOWED', 'POST only', 405);
       let body: unknown;
       try {
         body = await req.json();
@@ -176,9 +188,9 @@ export function serveActions(handlers: Record<string, Handler>): void {
         throw new ApiError('BAD_REQUEST', 'Body must be valid JSON', 400);
       }
       const { action, payload } = parseActionBody(body);
+      const ctx = await buildCtx(req);
       const handler = handlers[action];
       if (!handler) throw new ApiError('UNKNOWN_ACTION', `Unknown action "${action}"`, 404);
-      const ctx = await buildCtx(req);
       const data = await handler(payload, ctx);
       return toResponse({ ok: true, data });
     } catch (err) {
