@@ -1,6 +1,12 @@
 // Shared kernel for all pms-* edge functions.
 // Contract: POST { action: 'domain.action', payload: {} } with the user's JWT.
-// Every handler: validate → permission check → transactional write → audit → { ok, data }.
+// Every handler: validate → permission check → row writes (single-row updates are atomic;
+// multi-table actions must call a Postgres function via ctx.admin.rpc(...)) → audit → { ok, data }.
+// audit() runs after the write and is best-effort.
+//
+// NOTE: the pms.* SQL helper functions (is_org_member, can_read_evaluation, ...) answer for
+// auth.uid() and return false under the service role — never call them from edge-function code
+// for authorization decisions; authorize via ctx.requireOrgRole and explicit queries.
 import { createClient, SupabaseClient } from 'npm:@supabase/supabase-js@2';
 
 const CORS = {
@@ -41,6 +47,7 @@ export type HandlerCtx = {
   audit(entry: AuditEntry): Promise<void>;
   versionedUpdate(
     table: string,
+    orgId: string,
     id: string,
     expectedVersion: number,
     patch: Record<string, unknown>,
@@ -155,10 +162,11 @@ async function buildCtx(req: Request): Promise<HandlerCtx> {
         throw new ApiError('DB_ERROR', 'Database error', 500);
       }
     },
-    async versionedUpdate(table, id, expectedVersion, patch) {
+    async versionedUpdate(table, orgId, id, expectedVersion, patch) {
       const { data, error } = await admin
         .from(table)
         .update(patch)
+        .eq('organization_id', orgId)
         .eq('id', id)
         .eq('version', expectedVersion)
         .select()
@@ -168,7 +176,12 @@ async function buildCtx(req: Request): Promise<HandlerCtx> {
         throw new ApiError('DB_ERROR', 'Database error', 500);
       }
       if (data) return data;
-      const { data: row } = await admin.from(table).select('id').eq('id', id).maybeSingle();
+      const { data: row } = await admin
+        .from(table)
+        .select('id')
+        .eq('organization_id', orgId)
+        .eq('id', id)
+        .maybeSingle();
       if (!row) throw new ApiError('NOT_FOUND', `${table} row not found`, 404);
       throw new ApiError('CONFLICT', 'someone else changed this — reload', 409);
     },
