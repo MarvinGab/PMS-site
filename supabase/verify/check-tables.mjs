@@ -14,6 +14,12 @@ export const EXPECTED_TABLES = [
   'cycle_target_types', 'cycle_rating_scale_levels', 'cycle_auto_rating_bands', 'cycle_goal_rules',
   'cycle_competency_config', 'cycle_competency_assignments', 'cycle_bell_curve_bands',
   'cycle_participants', 'cycle_participant_assignments',
+  // Task 3: workflow + plumbing
+  'employee_goal_plans', 'employee_goal_items', 'employee_goal_plan_competencies',
+  'goal_workflow_events', 'evaluations', 'evaluation_goal_scores', 'evaluation_competency_scores',
+  'calibrations', 'cycle_publications', 'rating_acknowledgements',
+  'notifications', 'email_jobs', 'email_delivery_attempts', 'background_jobs',
+  'import_runs', 'import_run_errors', 'audit_logs',
 ];
 
 const admin = adminClient();
