@@ -19,8 +19,8 @@ export const EXPECTED_TABLES = [
 const admin = adminClient();
 let failed = 0;
 for (const table of EXPECTED_TABLES) {
-  // select('*') not 'id': organization_branding's PK is organization_id (no id column).
-  const { error } = await admin.from(table).select('*', { count: 'exact', head: true });
+  // limit-0 GET, not head:true: postgrest-js swallows the 404 on HEAD (empty body), so a missing table would report ok.
+  const { error } = await admin.from(table).select('*').limit(0);
   if (error) { failed += 1; console.error(`MISSING pms.${table}: ${error.message}`); }
   else console.log(`ok pms.${table}`);
 }
