@@ -19,7 +19,7 @@
 - **Dead legacy fields are NOT carried into the new schema** (spec §4.1 list).
 - **Old world untouched:** nothing in `public` schema, old edge functions, or old app code is modified or deleted in this plan. No old production data is deleted until the new schema passes fresh-org tests (spec §9).
 - **Roster-only rule:** `employees.group_name = 'NONE'` marks roster-only people; never label them "Outside PMS" in any UI copy.
-- **Conflict responses, never silent overwrites:** stale `version` → error code `CONFLICT`, HTTP 409, message "someone else changed this — reload".
+- **Conflict responses, never silent overwrites:** stale `version` → error code `CONFLICT`, HTTP 409, message "someone else changed this — reload". The `updated_at`/`version` pair exists for optimistic concurrency and therefore applies to EDITABLE tables only; append-only history tables (`cycle_config_versions`, `goal_workflow_events`, `calibrations`, `notifications`, `email_delivery_attempts`, `import_run_errors`, `audit_logs`) are never UPDATEd and intentionally omit them (clarified after Task 2 review).
 - **Response shape for all edge actions:** `{ ok: true, data }` or `{ ok: false, error: { code, message } }`.
 - All commands run from repo root `/Users/marvin/Desktop/PMS site`. The `.env` file is gitignored — never commit it.
 - **Roles note (refines spec §5):** `org_members.roles` stores *granted* roles only: `super_admin` (row with `organization_id NULL`), `hr_admin`, `employee`. Manager and HOD capabilities are **derived** from `reporting_relationships` rows (`relation_type` = `manager` / `l2` / `hod`), not stored as roles — the roster is their source of truth, so they can't drift.
