@@ -63,8 +63,12 @@ assert.ok(org, 'seed org missing — run seed-foundation.mjs first');
   const { client } = await signIn(USERS.hr, PASSWORD);
   const { data: emps } = await client.from('employees').select('employee_code');
   check('HR sees all 4 roster rows', (emps ?? []).length === 4);
-  const { data: audit, error: auditErr } = await client.from('audit_logs').select('id').limit(1);
-  check('HR can read audit logs', auditErr === null);
+  const { data: bands } = await client.from('cycle_bell_curve_bands').select('id');
+  check('HR sees the seeded bell band', (bands ?? []).length === 1);
+  const { data: pfi } = await client.from('prefill_dataset_items').select('id');
+  check('HR sees the seeded prefill item', (pfi ?? []).length === 1);
+  const { data: audit, error: auditErr } = await client.from('audit_logs').select('id').limit(5);
+  check('HR reads the seeded audit row', auditErr === null && (audit ?? []).length >= 1);
   const { error: delErr, count } = await client.from('employees')
     .delete({ count: 'exact' }).eq('employee_code', 'EMP004');
   check('HR cannot delete roster rows from browser', delErr !== null || count === 0 || count === null);

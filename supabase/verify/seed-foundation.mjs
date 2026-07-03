@@ -102,5 +102,26 @@ if (isMain) {
   assert.equal(partErr, null, partErr?.message);
   assert.equal(parts.length, 3);
 
+  // 8. Fixture rows that make the RLS "cannot read" checks discriminating:
+  const { error: bandErr } = await admin.from('cycle_bell_curve_bands').insert({
+    organization_id: org.id, cycle_id: cycle.id, rating_point: 3, target_percent: 60, tolerance_percent: 10,
+  });
+  assert.equal(bandErr, null, bandErr?.message);
+  const { data: pfd, error: pfdErr } = await admin.from('prefill_datasets').insert({
+    organization_id: org.id, name: 'Seed Prefill', description: 'RLS check fixture',
+  }).select().single();
+  assert.equal(pfdErr, null, pfdErr?.message);
+  const { error: pfiErr } = await admin.from('prefill_dataset_items').insert({
+    organization_id: org.id, prefill_dataset_id: pfd.id, employee_code: 'EMP002',
+    kra_title: 'Seed KRA', kpi_title: 'Seed KPI', weight: 100, display_order: 1,
+  });
+  assert.equal(pfiErr, null, pfiErr?.message);
+  const { error: auditInsErr } = await admin.from('audit_logs').insert({
+    organization_id: org.id, cycle_id: cycle.id, actor_user_id: userIds.hr,
+    actor_role: 'hr_admin', action: 'seed.created', entity_type: 'organization', entity_id: org.id,
+    note: 'seed fixture row so RLS checks are discriminating',
+  });
+  assert.equal(auditInsErr, null, auditInsErr?.message);
+
   console.log(`seed-foundation: PASS (org ${org.id}, cycle ${cycle.id})`);
 }
