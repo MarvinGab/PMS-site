@@ -112,6 +112,7 @@ One backend transaction: create cycle row → phase windows → frozen config sn
 - **published** — results visible per visibility settings; acknowledgement/concern flow runs; config locked; revoke-publish possible (audited) → back to review.
 - **archived** — read-only forever; history views and exports.
 - **Phase calendar stays king:** windows in `cycle_phase_windows`; sub-phase always computed from dates + now, never persisted as a flag. Super-admin edits win over HR-admin (last-write-wins with version check, both audited).
+- **Phase windows may overlap:** goal creation, manager goal approval, self-evaluation, manager evaluation, HOD/HR review, calibration, publishing prep, and acknowledgement are independent windows. The backend checks the specific action's window plus that employee's prerequisites; it must not reduce the cycle to one global current phase.
 - **"Start new cycle" replaces "clean organization":** archive current cycle (nothing deleted) → create new draft → HR chooses carry-over (settings snapshot, goal libraries/prefill, roster & reporting lines, participants with add/remove) → re-validate carried data → same create-cycle transaction. No manual deletion; no leftover state; old cycle stays queryable under its cycle id.
 - **Org-level vs cycle-level:** roster, reporting relationships, grades, competency library, branding, goal libraries evolve at org level; each cycle pins what it uses (participants, assignments, frozen snapshot) so history never shifts.
 
