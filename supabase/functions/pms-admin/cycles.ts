@@ -36,6 +36,8 @@ function assertEditable(cycle: Record<string, unknown>) {
 
 // The cycle row's version is the concurrency token for section/window saves:
 // two admins racing on the same cycle — the loser gets CONFLICT and reloads.
+// Callers validate and build the full payload BEFORE claiming the token, so a
+// bad payload fails without consuming a version bump.
 async function claimCycleToken(ctx: HandlerCtx, orgId: string, cycle: Record<string, unknown>, expectedVersion: number) {
   return await ctx.versionedUpdate('appraisal_cycles', orgId, cycle.id as string, expectedVersion, {
     period_label: cycle.period_label ?? null,
@@ -52,6 +54,9 @@ async function replaceRows(
   const { error: insErr } = await ctx.admin.from(table).insert(rows);
   if (insErr) {
     if (insErr.code === '23505') throw new ApiError('BAD_REQUEST', `rows contain duplicates not allowed in ${table}`, 400);
+    if (insErr.code === '23503') {
+      throw new ApiError('BAD_REQUEST', 'rows reference a missing related record (check goalLibraryId / competencyId values)', 400);
+    }
     console.error(`replace ${table} insert`, insErr);
     throw new ApiError('DB_ERROR', 'Database error', 500);
   }
@@ -191,8 +196,8 @@ async function competencyAssignmentRows(ctx: HandlerCtx, orgId: string, cycleId:
   });
 }
 
-async function saveGroups(ctx: HandlerCtx, orgId: string, cycleId: string, raw: unknown): Promise<number> {
-  const groups = reqArray(raw, 'rows', 100).map((r, i) => {
+function parseGroups(orgId: string, cycleId: string, raw: unknown) {
+  return reqArray(raw, 'rows', 100).map((r, i) => {
     const o = reqObject(r, `rows[${i}]`);
     return {
       row: {
@@ -221,15 +226,21 @@ async function saveGroups(ctx: HandlerCtx, orgId: string, cycleId: string, raw: 
         }),
     };
   });
-  // Deleting groups cascades segment values, library assignments AND per-group
-  // goal rules — clients must save groups BEFORE goal_rules/competency_assignments.
+}
+
+async function writeGroups(
+  ctx: HandlerCtx, orgId: string, cycleId: string, groups: ReturnType<typeof parseGroups>,
+): Promise<number> {
+  // Deleting groups cascades segment values, library assignments, per-group
+  // goal rules AND group-scoped competency assignments — clients must save
+  // groups BEFORE goal_rules/competency_assignments.
   await replaceRows(ctx, 'cycle_groups', orgId, cycleId, []);
   let count = 0;
   for (const g of groups) {
     const { data: inserted, error } = await ctx.admin.from('cycle_groups').insert(g.row).select('id').single();
     if (error) {
       if (error.code === '23505') throw new ApiError('BAD_REQUEST', `duplicate group name "${g.row.name}"`, 400);
-      console.error('saveGroups insert', error);
+      console.error('writeGroups insert', error);
       throw new ApiError('DB_ERROR', 'Database error', 500);
     }
     count += 1;
@@ -237,21 +248,33 @@ async function saveGroups(ctx: HandlerCtx, orgId: string, cycleId: string, raw: 
       const { error: svErr } = await ctx.admin.from('cycle_group_segment_values').insert(
         g.segmentValues.map((v) => ({ organization_id: orgId, cycle_id: cycleId, group_id: inserted.id, value: v })),
       );
-      if (svErr) { console.error('saveGroups segment values', svErr); throw new ApiError('DB_ERROR', 'Database error', 500); }
+      if (svErr) {
+        if (svErr.code === '23503') {
+          throw new ApiError('BAD_REQUEST', 'rows reference a missing related record (check goalLibraryId / competencyId values)', 400);
+        }
+        console.error('writeGroups segment values', svErr);
+        throw new ApiError('DB_ERROR', 'Database error', 500);
+      }
     }
     if (g.libraryAssignments.length) {
       const { error: laErr } = await ctx.admin.from('cycle_group_library_assignments').insert(
         g.libraryAssignments.map((a) => ({ organization_id: orgId, cycle_id: cycleId, group_id: inserted.id, ...a })),
       );
-      if (laErr) { console.error('saveGroups library assignments', laErr); throw new ApiError('DB_ERROR', 'Database error', 500); }
+      if (laErr) {
+        if (laErr.code === '23503') {
+          throw new ApiError('BAD_REQUEST', 'rows reference a missing related record (check goalLibraryId / competencyId values)', 400);
+        }
+        console.error('writeGroups library assignments', laErr);
+        throw new ApiError('DB_ERROR', 'Database error', 500);
+      }
     }
   }
   return count;
 }
 
-async function saveCompetencyConfig(ctx: HandlerCtx, orgId: string, cycleId: string, raw: unknown): Promise<number> {
+function buildCompetencyConfigRow(orgId: string, cycleId: string, raw: unknown) {
   const o = reqObject(raw, 'config');
-  const row = {
+  return {
     organization_id: orgId, cycle_id: cycleId,
     enabled: optBool(o.enabled, 'config.enabled'),
     max_per_employee: optInt(o.maxPerEmployee, 'config.maxPerEmployee'),
@@ -261,9 +284,14 @@ async function saveCompetencyConfig(ctx: HandlerCtx, orgId: string, cycleId: str
     employee_can_edit: optBool(o.employeeCanEdit, 'config.employeeCanEdit'),
     scope: reqEnum(o.scope ?? 'org', 'config.scope', ['org', 'group', 'group_role']),
   };
+}
+
+async function writeCompetencyConfig(
+  ctx: HandlerCtx, row: ReturnType<typeof buildCompetencyConfigRow>,
+): Promise<number> {
   const { error } = await ctx.admin.from('cycle_competency_config')
     .upsert(row, { onConflict: 'cycle_id' });
-  if (error) { console.error('saveCompetencyConfig', error); throw new ApiError('DB_ERROR', 'Database error', 500); }
+  if (error) { console.error('writeCompetencyConfig', error); throw new ApiError('DB_ERROR', 'Database error', 500); }
   return 1;
 }
 
@@ -299,40 +327,67 @@ export const cycleHandlers: Record<string, Handler> = {
     const section = reqEnum(payload.section, 'section', SECTIONS);
     const cycle = await loadCycle(ctx, orgId, cycleId);
     assertEditable(cycle);
-    const fresh = await claimCycleToken(ctx, orgId, cycle, cycleVersion);
-    let count = 0;
+    // Validate and build the full section payload BEFORE claiming the version
+    // token, so a bad payload fails without consuming a version bump.
+    let write: () => Promise<number>;
     switch (section) {
-      case 'perspectives':
-        count = await replaceRows(ctx, 'cycle_perspectives', orgId, cycleId, perspectiveRows(orgId, cycleId, payload.rows));
+      case 'perspectives': {
+        const rows = perspectiveRows(orgId, cycleId, payload.rows);
+        write = () => replaceRows(ctx, 'cycle_perspectives', orgId, cycleId, rows);
         break;
-      case 'groups':
-        count = await saveGroups(ctx, orgId, cycleId, payload.rows);
+      }
+      case 'groups': {
+        const groups = parseGroups(orgId, cycleId, payload.rows);
+        write = () => writeGroups(ctx, orgId, cycleId, groups);
         break;
-      case 'target_types':
-        count = await replaceRows(ctx, 'cycle_target_types', orgId, cycleId, targetTypeRows(orgId, cycleId, payload.rows));
+      }
+      case 'target_types': {
+        const rows = targetTypeRows(orgId, cycleId, payload.rows);
+        write = () => replaceRows(ctx, 'cycle_target_types', orgId, cycleId, rows);
         break;
-      case 'rating_scale_levels':
-        count = await replaceRows(ctx, 'cycle_rating_scale_levels', orgId, cycleId, ratingScaleLevelRows(orgId, cycleId, payload.rows));
+      }
+      case 'rating_scale_levels': {
+        const rows = ratingScaleLevelRows(orgId, cycleId, payload.rows);
+        write = () => replaceRows(ctx, 'cycle_rating_scale_levels', orgId, cycleId, rows);
         break;
-      case 'auto_rating_bands':
-        count = await replaceRows(ctx, 'cycle_auto_rating_bands', orgId, cycleId, autoRatingBandRows(orgId, cycleId, payload.rows));
+      }
+      case 'auto_rating_bands': {
+        const rows = autoRatingBandRows(orgId, cycleId, payload.rows);
+        write = () => replaceRows(ctx, 'cycle_auto_rating_bands', orgId, cycleId, rows);
         break;
-      case 'goal_rules':
-        count = await replaceRows(ctx, 'cycle_goal_rules', orgId, cycleId, await goalRuleRows(ctx, orgId, cycleId, payload.rows));
+      }
+      case 'goal_rules': {
+        const rows = await goalRuleRows(ctx, orgId, cycleId, payload.rows);
+        write = () => replaceRows(ctx, 'cycle_goal_rules', orgId, cycleId, rows);
         break;
-      case 'competency_config':
-        count = await saveCompetencyConfig(ctx, orgId, cycleId, payload.config);
+      }
+      case 'competency_config': {
+        const row = buildCompetencyConfigRow(orgId, cycleId, payload.config);
+        write = () => writeCompetencyConfig(ctx, row);
         break;
-      case 'competency_assignments':
-        count = await replaceRows(ctx, 'cycle_competency_assignments', orgId, cycleId, await competencyAssignmentRows(ctx, orgId, cycleId, payload.rows));
+      }
+      case 'competency_assignments': {
+        const rows = await competencyAssignmentRows(ctx, orgId, cycleId, payload.rows);
+        write = () => replaceRows(ctx, 'cycle_competency_assignments', orgId, cycleId, rows);
         break;
-      case 'bell_curve_bands':
-        count = await replaceRows(ctx, 'cycle_bell_curve_bands', orgId, cycleId, bellBandRows(orgId, cycleId, payload.rows));
+      }
+      case 'bell_curve_bands': {
+        const rows = bellBandRows(orgId, cycleId, payload.rows);
+        write = () => replaceRows(ctx, 'cycle_bell_curve_bands', orgId, cycleId, rows);
         break;
+      }
+      default:
+        // Unreachable: reqEnum already restricted section to SECTIONS.
+        throw new Error(`unhandled section "${section}"`);
     }
+    const fresh = await claimCycleToken(ctx, orgId, cycle, cycleVersion);
+    const count = await write();
+    const note = section === 'groups'
+      ? `groups: ${count} row(s) (cascade reset of segment values, library assignments, per-group goal rules, group-scoped competency assignments)`
+      : `${section}: ${count} row(s)`;
     await ctx.audit({
       organizationId: orgId, cycleId, action: 'cycle.section.save',
-      entityType: 'cycle_section', note: `${section}: ${count} row(s)`,
+      entityType: 'cycle_section', note,
     });
     return { cycle: fresh, rows: count };
   },
