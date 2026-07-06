@@ -20,8 +20,9 @@ export const participantHandlers: Record<string, Handler> = {
     ctx.requireOrgRole(orgId, ['hr_admin']);
     const cycleId = reqUuid(payload.cycleId, 'cycleId');
     await loadEditableCycle(ctx, orgId, cycleId);
-    const codes = reqArray(payload.employeeCodes, 'employeeCodes', 5000)
+    const rawCodes = reqArray(payload.employeeCodes, 'employeeCodes', 5000)
       .map((c, i) => reqString(c, `employeeCodes[${i}]`, 60));
+    const codes = [...new Set(rawCodes)];
     const { data: emps, error } = await ctx.admin.from('employees')
       .select('id, employee_code, group_name').eq('organization_id', orgId).in('employee_code', codes);
     if (error) { console.error('add-participants emps', error); throw new ApiError('DB_ERROR', 'Database error', 500); }
@@ -29,14 +30,23 @@ export const participantHandlers: Record<string, Handler> = {
     const unknown = codes.filter((c) => !byCode.has(c));
     if (unknown.length) throw new ApiError('BAD_REQUEST', `unknown employee code(s): ${unknown.slice(0, 10).join(', ')}`, 400);
     const { data: existing } = await ctx.admin.from('cycle_participants')
-      .select('employee_id').eq('cycle_id', cycleId);
-    const already = new Set((existing ?? []).map((p) => p.employee_id));
+      .select('id, employee_id, status, version').eq('cycle_id', cycleId);
+    const existingByEmp = new Map((existing ?? []).map((p) => [p.employee_id, p]));
     const skipped: string[] = [];
     const toInsert: Record<string, unknown>[] = [];
+    let reactivated = 0;
     for (const code of codes) {
       const e = byCode.get(code)!;
       if (e.group_name === 'NONE') { skipped.push(`${code} (roster-only)`); continue; }
-      if (already.has(e.id)) { skipped.push(`${code} (already added)`); continue; }
+      const ex = existingByEmp.get(e.id);
+      if (ex) {
+        if (ex.status === 'active') { skipped.push(`${code} (already added)`); continue; }
+        const { error: reErr } = await ctx.admin.from('cycle_participants')
+          .update({ status: 'active' }).eq('id', ex.id);
+        if (reErr) { console.error('add-participants reactivate', reErr); throw new ApiError('DB_ERROR', 'Database error', 500); }
+        reactivated += 1;
+        continue;
+      }
       toInsert.push({ organization_id: orgId, cycle_id: cycleId, employee_id: e.id });
     }
     let added = 0;
@@ -48,9 +58,9 @@ export const participantHandlers: Record<string, Handler> = {
     }
     await ctx.audit({
       organizationId: orgId, cycleId, action: 'cycle.add-participants',
-      entityType: 'cycle_participants', note: `added ${added}, skipped ${skipped.length}`,
+      entityType: 'cycle_participants', note: `added ${added}, reactivated ${reactivated}, skipped ${skipped.length}`,
     });
-    return { added, skipped };
+    return { added, reactivated, skipped };
   },
 
   'cycle.remove-participant': async (payload, ctx) => {
@@ -85,36 +95,44 @@ export const participantHandlers: Record<string, Handler> = {
 
     let groupId: string | null = null;
     if (groupName) {
-      const { data: g } = await ctx.admin.from('cycle_groups')
+      const { data: g, error: gErr } = await ctx.admin.from('cycle_groups')
         .select('id').eq('cycle_id', cycleId).eq('name', groupName).maybeSingle();
+      if (gErr) { console.error('assign group lookup', gErr); throw new ApiError('DB_ERROR', 'Database error', 500); }
       if (!g) throw new ApiError('BAD_REQUEST', `group "${groupName}" is not a group in this cycle`, 400);
       groupId = g.id;
     }
     let goalLibraryId: string | null = null;
     if (goalLibraryName) {
-      const { data: l } = await ctx.admin.from('goal_libraries')
+      const { data: l, error: lErr } = await ctx.admin.from('goal_libraries')
         .select('id').eq('organization_id', orgId).eq('name', goalLibraryName).maybeSingle();
+      if (lErr) { console.error('assign library lookup', lErr); throw new ApiError('DB_ERROR', 'Database error', 500); }
       if (!l) throw new ApiError('BAD_REQUEST', `goal library "${goalLibraryName}" not found`, 400);
       goalLibraryId = l.id;
     }
     let prefillDatasetId: string | null = null;
     if (prefillDatasetName) {
-      const { data: d } = await ctx.admin.from('prefill_datasets')
+      const { data: d, error: dErr } = await ctx.admin.from('prefill_datasets')
         .select('id').eq('organization_id', orgId).eq('name', prefillDatasetName).maybeSingle();
+      if (dErr) { console.error('assign prefill lookup', dErr); throw new ApiError('DB_ERROR', 'Database error', 500); }
       if (!d) throw new ApiError('BAD_REQUEST', `prefill dataset "${prefillDatasetName}" not found`, 400);
       prefillDatasetId = d.id;
     }
+    const { data: existingAssign } = await ctx.admin.from('cycle_participant_assignments')
+      .select('group_id, goal_library_id, prefill_dataset_id').eq('participant_id', participantId).maybeSingle();
+    const finalGroupId = groupName !== null ? groupId : (existingAssign?.group_id ?? null);
+    const finalLibraryId = goalLibraryName !== null ? goalLibraryId : (existingAssign?.goal_library_id ?? null);
+    const finalPrefillId = prefillDatasetName !== null ? prefillDatasetId : (existingAssign?.prefill_dataset_id ?? null);
     const { data: assignment, error } = await ctx.admin.from('cycle_participant_assignments')
       .upsert({
         organization_id: orgId, cycle_id: cycleId, participant_id: participantId,
-        employee_id: participant.employee_id, group_id: groupId,
-        goal_library_id: goalLibraryId, prefill_dataset_id: prefillDatasetId,
+        employee_id: participant.employee_id, group_id: finalGroupId,
+        goal_library_id: finalLibraryId, prefill_dataset_id: finalPrefillId,
       }, { onConflict: 'participant_id' }).select().single();
     if (error) { console.error('assign upsert', error); throw new ApiError('DB_ERROR', 'Database error', 500); }
     await ctx.audit({
       organizationId: orgId, cycleId, action: 'cycle.assign-participant',
       entityType: 'cycle_participant_assignment', entityId: assignment.id,
-      after: { group_id: groupId, goal_library_id: goalLibraryId, prefill_dataset_id: prefillDatasetId },
+      after: { group_id: finalGroupId, goal_library_id: finalLibraryId, prefill_dataset_id: finalPrefillId },
     });
     return { assignment };
   },

@@ -406,11 +406,30 @@ let goodRun;
   const list = await callAdmin(superT, 'cycle.list-participants', { orgId: gamma.id, cycleId: pcycle.id });
   check('list-participants returns 2 rows', list.status === 200 && (list.body.data.participants ?? []).length === 2);
   const rita = list.body.data.participants.find((p) => p.employees.employee_code === 'G101');
+  const bea = list.body.data.participants.find((p) => p.employees.employee_code === 'G100');
+
+  // dedup: duplicate codes in one call must not collide on the unique constraint (no 500)
+  const dedup = await callAdmin(superT, 'cycle.add-participants', {
+    orgId: gamma.id, cycleId: pcycle.id, employeeCodes: ['G100', 'G100'],
+  });
+  check('add-participants dedups duplicate codes (no unique-constraint 500)', dedup.status === 200);
 
   const assign = await callAdmin(superT, 'cycle.assign-participant', {
     orgId: gamma.id, cycleId: pcycle.id, participantId: rita.id, groupName: 'Sales', goalLibraryName: 'Sales Playbook',
   });
   check('assign-participant resolves group + library', assign.status === 200 && assign.body.data.assignment.group_id !== null);
+
+  // merge: assigning only a group then only a library must preserve the group
+  const beaGroupOnly = await callAdmin(superT, 'cycle.assign-participant', {
+    orgId: gamma.id, cycleId: pcycle.id, participantId: bea.id, groupName: 'Sales',
+  });
+  check('assign-participant with only group succeeds', beaGroupOnly.status === 200);
+  const beaLibOnly = await callAdmin(superT, 'cycle.assign-participant', {
+    orgId: gamma.id, cycleId: pcycle.id, participantId: bea.id, goalLibraryName: 'Sales Playbook',
+  });
+  check('assign-participant with only library succeeds', beaLibOnly.status === 200);
+  const { data: beaAssign } = await admin.from('cycle_participant_assignments').select('group_id, goal_library_id').eq('participant_id', bea.id).single();
+  check('assign-participant merges (group preserved when only library set)', (beaAssign?.group_id ?? null) !== null && (beaAssign?.goal_library_id ?? null) !== null);
 
   const badGroup = await callAdmin(superT, 'cycle.assign-participant', {
     orgId: gamma.id, cycleId: pcycle.id, participantId: rita.id, groupName: 'Ghost Group',
@@ -421,6 +440,15 @@ let goodRun;
     orgId: gamma.id, cycleId: pcycle.id, participantId: rita.id, expectedVersion: rita.version,
   });
   check('remove-participant sets status removed', remove.status === 200 && remove.body.data.participant.status === 'removed');
+
+  // reactivate: re-adding a removed participant flips them back to active
+  const reactivate = await callAdmin(superT, 'cycle.add-participants', {
+    orgId: gamma.id, cycleId: pcycle.id, employeeCodes: ['G101'],
+  });
+  check('add-participants reactivates a removed participant', reactivate.status === 200 && reactivate.body.data.reactivated >= 1);
+  const relist = await callAdmin(superT, 'cycle.list-participants', { orgId: gamma.id, cycleId: pcycle.id });
+  const ritaAgain = relist.body.data.participants.find((p) => p.employees.employee_code === 'G101');
+  check('reactivated participant is active again', ritaAgain?.status === 'active');
 
   // stash pcycle id for Task 5/6 by re-reading in those sections via admin
 }
