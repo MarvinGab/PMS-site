@@ -334,4 +334,30 @@ let cycle;
   check('employee cannot list libraries', empDenied.status === 403);
 }
 
+// --- roster import: validate & preview ---
+let goodRun;
+{
+  const bad = await callAdmin(superT, 'import.validate-roster', {
+    orgId: gamma.id, rows: [
+      { employeeCode: 'G1', fullName: 'Ann', email: 'ann@x.com', groupName: 'Sales', managerCode: 'GHOST' },
+      { employeeCode: 'G1', fullName: 'Dup', email: 'bad-email', groupName: '' },
+    ],
+  });
+  check('validate flags bad rows', bad.status === 200 && bad.body.data.errorCount >= 3 && bad.body.data.importRun.status === 'failed');
+
+  const good = await callAdmin(superT, 'import.validate-roster', {
+    orgId: gamma.id, rows: [
+      { employeeCode: 'G100', fullName: 'Boss Bea', email: 'bea@x.com', groupName: 'Leadership', department: 'Exec' },
+      { employeeCode: 'G101', fullName: 'Rep Rita', email: 'rita@x.com', groupName: 'Sales', department: 'Sales', managerCode: 'G100', hodCode: 'G100' },
+      { employeeCode: 'G102', fullName: 'Ext Ed', email: 'ed@x.com', groupName: 'NONE', designation: 'Advisor' },
+    ],
+  });
+  check('validate accepts a clean roster', good.status === 200 && good.body.data.errorCount === 0 && good.body.data.validCount === 3);
+  check('clean run is preview_ready', good.body.data.importRun.status === 'preview_ready');
+  goodRun = good.body.data.importRun;
+
+  const preview = await callAdmin(superT, 'import.get-preview', { orgId: gamma.id, importRunId: goodRun.id });
+  check('get-preview returns the run', preview.status === 200 && preview.body.data.importRun.id === goodRun.id);
+}
+
 console.log(`admin-check: PASS (${n} assertions)`);
