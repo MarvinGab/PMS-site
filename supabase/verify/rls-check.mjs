@@ -212,7 +212,11 @@ assert.ok(org, 'seed org missing — run seed-foundation.mjs first');
     p_org: org.id, p_name: 'Hacker Cycle', p_period_label: null,
     p_framework: 'kra', p_actor: '00000000-0000-0000-0000-000000000000', p_actor_role: 'employee',
   });
-  check('authenticated user cannot call create_cycle_draft_tx', cycRpcErr !== null);
+  // Discriminating: EXECUTE permission is checked before the function body runs,
+  // so a denial is 42501 — never the 23505 the working-cycle unique index would
+  // throw if a vulnerable system actually let the insert run.
+  check('authenticated user cannot call create_cycle_draft_tx',
+    cycRpcErr !== null && cycRpcErr.code !== '23505');
   const anon = anonClient();
   const { error: anonRpcErr } = await anon.rpc('create_organization_tx', {
     p_key: 'hacker-org', p_name: 'Hacker', p_actor: '00000000-0000-0000-0000-000000000000',
