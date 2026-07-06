@@ -470,6 +470,27 @@ let goodRun;
   check('invite email job queued', (jobs ?? []).some((j) => j.status === 'queued'));
   const reinvite = await callAdmin(superT, 'cycle.invite-participants', { orgId: gamma.id, cycleId: pcycle.id });
   check('re-invite counts already-linked, no duplicate', reinvite.status === 200 && reinvite.body.data.alreadyLinked >= 1);
+
+  // downgrade guard: an employee whose member is already 'active' must NOT be
+  // flipped back to 'invited' by a (re-)invite — that would lock them out.
+  async function ensureAuthUser(email) {
+    const { data: list } = await admin.auth.admin.listUsers({ perPage: 1000 });
+    const found = list.users.find((u) => u.email === email);
+    if (found) return found.id;
+    const { data } = await admin.auth.admin.createUser({ email, password: 'Passw0rd!dg', email_confirm: true });
+    return data.user.id;
+  }
+  {
+    const dgId = await ensureAuthUser('gamma-active@example.com');
+    await admin.from('org_members').delete().eq('organization_id', gamma.id).eq('user_id', dgId);
+    await admin.from('org_members').insert({ organization_id: gamma.id, user_id: dgId, roles: ['hr_admin'], status: 'active' });
+    await admin.from('employees').delete().eq('organization_id', gamma.id).eq('employee_code', 'GDG1');
+    await admin.from('employees').insert({ organization_id: gamma.id, employee_code: 'GDG1', full_name: 'Active Amy', email: 'gamma-active@example.com', group_name: 'Sales', user_id: null });
+    await callAdmin(superT, 'cycle.add-participants', { orgId: gamma.id, cycleId: pcycle.id, employeeCodes: ['GDG1'] });
+    await callAdmin(superT, 'cycle.invite-participants', { orgId: gamma.id, cycleId: pcycle.id });
+    const { data: dgMember } = await admin.from('org_members').select('status').eq('organization_id', gamma.id).eq('user_id', dgId).single();
+    check('invite does not downgrade an already-active member', dgMember.status === 'active');
+  }
 }
 
 console.log(`admin-check: PASS (${n} assertions)`);

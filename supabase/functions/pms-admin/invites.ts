@@ -17,7 +17,7 @@ async function findOrCreateUser(admin: any, email: string): Promise<string> {
 
 async function recoveryLink(admin: any, email: string): Promise<string> {
   const { data, error } = await admin.auth.admin.generateLink({ type: 'recovery', email });
-  if (error) { console.error('generateLink', error); return ''; }
+  if (error) { console.error('generateLink', error); throw new ApiError('DB_ERROR', 'Could not generate the invite link', 500); }
   return data?.properties?.action_link ?? '';
 }
 
@@ -33,24 +33,33 @@ export const inviteHandlers: Record<string, Handler> = {
     if (error) { console.error('invite participants read', error); throw new ApiError('DB_ERROR', 'Database error', 500); }
     let invited = 0, alreadyLinked = 0;
     const skipped: string[] = [];
+    const failed: string[] = [];
     for (const p of parts ?? []) {
       const e = p.employees as unknown as { id: string; email: string | null; group_name: string | null; user_id: string | null };
       if (!e) continue;
       if (e.group_name === 'NONE') { skipped.push('roster-only'); continue; }
       if (e.user_id) { alreadyLinked += 1; continue; }
       if (!e.email) { skipped.push('no email'); continue; }
-      const userId = await findOrCreateUser(ctx.admin, e.email);
-      const link = await recoveryLink(ctx.admin, e.email);
-      const { error: rpcErr } = await ctx.admin.rpc('link_invited_member_tx', {
-        p_org: orgId, p_user: userId, p_employee: e.id, p_email: e.email, p_link: link, p_actor: ctx.userId,
-      });
-      if (rpcErr) { console.error('link_invited_member_tx', rpcErr); throw new ApiError('DB_ERROR', 'Database error', 500); }
-      invited += 1;
+      // Isolate each employee: a failure on one row (auth API, link, or RPC) must
+      // not abort the batch or skip the summary audit.
+      try {
+        const userId = await findOrCreateUser(ctx.admin, e.email);
+        const link = await recoveryLink(ctx.admin, e.email);
+        const { error: rpcErr } = await ctx.admin.rpc('link_invited_member_tx', {
+          p_org: orgId, p_user: userId, p_employee: e.id, p_email: e.email, p_link: link, p_actor: ctx.userId,
+        });
+        if (rpcErr) { console.error('link_invited_member_tx', rpcErr); throw new ApiError('DB_ERROR', 'Database error', 500); }
+        invited += 1;
+      } catch (err) {
+        console.error('invite failed', e.id, err);
+        failed.push(e.id);
+        continue;
+      }
     }
     await ctx.audit({
       organizationId: orgId, cycleId, action: 'cycle.invite-participants',
-      entityType: 'cycle', entityId: cycleId, note: `invited ${invited}, already ${alreadyLinked}, skipped ${skipped.length}`,
+      entityType: 'cycle', entityId: cycleId, note: `invited ${invited}, already ${alreadyLinked}, skipped ${skipped.length}, failed ${failed.length}`,
     });
-    return { invited, alreadyLinked, skipped };
+    return { invited, alreadyLinked, skipped, failed };
   },
 };
