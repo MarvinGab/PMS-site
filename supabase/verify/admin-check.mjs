@@ -315,6 +315,21 @@ let cycle;
     items: [{ employeeCode: 'GAMMA001', kraTitle: 'Onboarding', kpiTitle: 'Time to value', weight: 100, displayOrder: 0 }],
   });
   check('prefill.save creates dataset + items', pf.status === 200 && pf.body.data.items === 1);
+
+  const second = await callAdmin(superT, 'library.save', { orgId: gamma.id, name: 'Second Lib', items: [] });
+  const rename = await callAdmin(superT, 'library.save', {
+    orgId: gamma.id, libraryId: second.body.data.library.id,
+    expectedVersion: second.body.data.library.version, name: 'Sales Playbook', items: [],
+  });
+  check('rename to an existing library name returns 409', rename.status === 409 && rename.body.error.code === 'LIBRARY_NAME_TAKEN');
+
+  const orphan = await callAdmin(superT, 'library.save', {
+    orgId: gamma.id, name: 'Orphan Test', items: [{ itemType: 'kpi', key: 'x', parentKey: 'ghost', title: 'X' }],
+  });
+  check('bad-payload library.save rejected before header write', orphan.status === 400);
+  const { data: orphanRows } = await admin.from('goal_libraries').select('id').eq('organization_id', gamma.id).eq('name', 'Orphan Test');
+  check('no orphan library header left behind on bad payload', (orphanRows ?? []).length === 0);
+
   const empDenied = await callAdmin(empT, 'library.list', { orgId: gamma.id });
   check('employee cannot list libraries', empDenied.status === 403);
 }

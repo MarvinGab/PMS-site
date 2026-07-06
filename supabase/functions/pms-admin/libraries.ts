@@ -3,12 +3,23 @@ import {
   optNumber, optString, optUuid, reqArray, reqEnum, reqInt, reqObject, reqString, reqUuid,
 } from '../_shared/validate.ts';
 
-async function replaceLibraryItems(
-  ctx: HandlerCtx, orgId: string, libraryId: string, rawItems: unknown,
-): Promise<number> {
-  // Two-pass: insert KRA rows first (capturing payload-key → new uuid), then KPI
-  // rows resolving parentKey against that map. Payload keys are caller-local.
-  const items = reqArray(rawItems, 'items', 500).map((r, i) => {
+type BuiltItem = {
+  itemType: string;
+  key: string;
+  parentKey: string | null;
+  title: string;
+  description: string | null;
+  perspective: string | null;
+  weight: number | null;
+  target_type_key: string | null;
+  target_value: string | null;
+  display_order: number;
+};
+
+// Pure: validate + shape the item payload with NO database access, so a bad
+// payload throws before any header write or destructive item delete happens.
+function buildLibraryItems(rawItems: unknown): { items: BuiltItem[]; kras: BuiltItem[]; kpis: BuiltItem[] } {
+  const items: BuiltItem[] = reqArray(rawItems, 'items', 500).map((r, i) => {
     const o = reqObject(r, `items[${i}]`);
     return {
       itemType: reqEnum(o.itemType, `items[${i}].itemType`, ['kra', 'kpi']),
@@ -26,13 +37,31 @@ async function replaceLibraryItems(
   const keys = items.map((it) => it.key);
   if (new Set(keys).size !== keys.length) throw new ApiError('BAD_REQUEST', 'items contain duplicate keys', 400);
 
+  const kras = items.filter((it) => it.itemType === 'kra');
+  const kpis = items.filter((it) => it.itemType === 'kpi');
+  // Pre-check every kpi parentKey resolves against a kra key in this same payload,
+  // so we reject bad references before touching the database.
+  const kraKeys = new Set(kras.map((it) => it.key));
+  for (const it of kpis) {
+    if (it.parentKey && !kraKeys.has(it.parentKey)) {
+      throw new ApiError('BAD_REQUEST', `items: kpi "${it.key}" references unknown parentKey "${it.parentKey}"`, 400);
+    }
+  }
+  return { items, kras, kpis };
+}
+
+async function writeLibraryItems(
+  ctx: HandlerCtx, orgId: string, libraryId: string,
+  built: { items: BuiltItem[]; kras: BuiltItem[]; kpis: BuiltItem[] },
+): Promise<number> {
+  // Two-pass: insert KRA rows first (capturing payload-key → new uuid), then KPI
+  // rows resolving parentKey against that map. buildLibraryItems already proved
+  // every parentKey resolves, so the map lookup below always succeeds.
   await ctx.admin.from('goal_library_items').delete()
     .eq('goal_library_id', libraryId).eq('organization_id', orgId);
 
   const keyToId = new Map<string, string>();
-  const kras = items.filter((it) => it.itemType === 'kra');
-  const kpis = items.filter((it) => it.itemType === 'kpi');
-  for (const it of kras) {
+  for (const it of built.kras) {
     const { data, error } = await ctx.admin.from('goal_library_items').insert({
       organization_id: orgId, goal_library_id: libraryId, item_type: 'kra',
       title: it.title, description: it.description, perspective: it.perspective,
@@ -42,11 +71,8 @@ async function replaceLibraryItems(
     if (error) { console.error('library items kra', error); throw new ApiError('DB_ERROR', 'Database error', 500); }
     keyToId.set(it.key, data.id);
   }
-  for (const it of kpis) {
-    const parentId = it.parentKey ? keyToId.get(it.parentKey) : null;
-    if (it.parentKey && !parentId) {
-      throw new ApiError('BAD_REQUEST', `items: kpi "${it.key}" references unknown parentKey "${it.parentKey}"`, 400);
-    }
+  for (const it of built.kpis) {
+    const parentId = it.parentKey ? keyToId.get(it.parentKey) ?? null : null;
     const { error } = await ctx.admin.from('goal_library_items').insert({
       organization_id: orgId, goal_library_id: libraryId, item_type: 'kpi', parent_item_id: parentId,
       title: it.title, description: it.description, perspective: it.perspective,
@@ -55,7 +81,7 @@ async function replaceLibraryItems(
     });
     if (error) { console.error('library items kpi', error); throw new ApiError('DB_ERROR', 'Database error', 500); }
   }
-  return items.length;
+  return built.items.length;
 }
 
 export const libraryHandlers: Record<string, Handler> = {
@@ -65,9 +91,15 @@ export const libraryHandlers: Record<string, Handler> = {
     const name = reqString(payload.name, 'name', 200);
     const description = optString(payload.description, 'description', 2000);
     const libraryId = optUuid(payload.libraryId, 'libraryId');
+    // Validate the item payload up front (pure) so an invalid payload throws
+    // before we create/update the header row or delete any existing items.
+    const built = buildLibraryItems(payload.items ?? []);
     let library: Record<string, unknown>;
     if (libraryId) {
       const expectedVersion = reqInt(payload.expectedVersion, 'expectedVersion');
+      const { data: clash } = await ctx.admin.from('goal_libraries')
+        .select('id').eq('organization_id', orgId).eq('name', name).neq('id', libraryId).maybeSingle();
+      if (clash) throw new ApiError('LIBRARY_NAME_TAKEN', 'A library with this name already exists', 409);
       library = await ctx.versionedUpdate('goal_libraries', orgId, libraryId, expectedVersion, { name, description });
     } else {
       const { data, error } = await ctx.admin.from('goal_libraries')
@@ -79,7 +111,7 @@ export const libraryHandlers: Record<string, Handler> = {
       }
       library = data;
     }
-    const count = await replaceLibraryItems(ctx, orgId, library.id as string, payload.items ?? []);
+    const count = await writeLibraryItems(ctx, orgId, library.id as string, built);
     await ctx.audit({
       organizationId: orgId, action: 'library.save',
       entityType: 'goal_library', entityId: library.id as string, note: `${count} item(s)`,
@@ -115,9 +147,27 @@ export const libraryHandlers: Record<string, Handler> = {
     const name = reqString(payload.name, 'name', 200);
     const description = optString(payload.description, 'description', 2000);
     const datasetId = optUuid(payload.datasetId, 'datasetId');
+    // Validate the item payload up front (in-memory) so an invalid payload throws
+    // before we create/update the header row or delete any existing items.
+    const rawRows = reqArray(payload.items ?? [], 'items', 2000).map((r, i) => {
+      const o = reqObject(r, `items[${i}]`);
+      return {
+        employee_code: reqString(o.employeeCode, `items[${i}].employeeCode`, 60),
+        kra_title: reqString(o.kraTitle, `items[${i}].kraTitle`, 300),
+        kpi_title: optString(o.kpiTitle, `items[${i}].kpiTitle`, 300),
+        weight: optNumber(o.weight, `items[${i}].weight`),
+        perspective: optString(o.perspective, `items[${i}].perspective`, 120),
+        target_type_key: optString(o.targetTypeKey, `items[${i}].targetTypeKey`, 60),
+        target_value: optString(o.targetValue, `items[${i}].targetValue`, 200),
+        display_order: reqInt(o.displayOrder ?? i, `items[${i}].displayOrder`),
+      };
+    });
     let dataset: Record<string, unknown>;
     if (datasetId) {
       const expectedVersion = reqInt(payload.expectedVersion, 'expectedVersion');
+      const { data: clash } = await ctx.admin.from('prefill_datasets')
+        .select('id').eq('organization_id', orgId).eq('name', name).neq('id', datasetId).maybeSingle();
+      if (clash) throw new ApiError('PREFILL_NAME_TAKEN', 'A prefill dataset with this name already exists', 409);
       dataset = await ctx.versionedUpdate('prefill_datasets', orgId, datasetId, expectedVersion, { name, description });
     } else {
       const { data, error } = await ctx.admin.from('prefill_datasets')
@@ -129,20 +179,9 @@ export const libraryHandlers: Record<string, Handler> = {
       }
       dataset = data;
     }
-    const rows = reqArray(payload.items ?? [], 'items', 2000).map((r, i) => {
-      const o = reqObject(r, `items[${i}]`);
-      return {
-        organization_id: orgId, prefill_dataset_id: dataset.id,
-        employee_code: reqString(o.employeeCode, `items[${i}].employeeCode`, 60),
-        kra_title: reqString(o.kraTitle, `items[${i}].kraTitle`, 300),
-        kpi_title: optString(o.kpiTitle, `items[${i}].kpiTitle`, 300),
-        weight: optNumber(o.weight, `items[${i}].weight`),
-        perspective: optString(o.perspective, `items[${i}].perspective`, 120),
-        target_type_key: optString(o.targetTypeKey, `items[${i}].targetTypeKey`, 60),
-        target_value: optString(o.targetValue, `items[${i}].targetValue`, 200),
-        display_order: reqInt(o.displayOrder ?? i, `items[${i}].displayOrder`),
-      };
-    });
+    const rows = rawRows.map((r) => ({
+      ...r, organization_id: orgId, prefill_dataset_id: dataset.id,
+    }));
     await ctx.admin.from('prefill_dataset_items').delete()
       .eq('prefill_dataset_id', dataset.id).eq('organization_id', orgId);
     if (rows.length) {
