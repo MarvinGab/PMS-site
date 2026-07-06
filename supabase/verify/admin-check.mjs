@@ -493,4 +493,56 @@ let goodRun;
   }
 }
 
+// --- activation ---
+{
+  // gamma allows only one WORKING cycle; the FY28 participation cycle from Task 4
+  // is still draft (working). Archive it via admin so the bare cycle can be created.
+  await admin.from('appraisal_cycles')
+    .update({ status: 'archived', archived_at: new Date().toISOString() })
+    .eq('organization_id', gamma.id).eq('name', 'FY28 Participation Cycle');
+
+  // A brand-new draft cycle with NO prerequisites must fail activation.
+  const bare = await callAdmin(superT, 'cycle.create-draft', {
+    orgId: gamma.id, name: 'FY29 Bare Cycle', frameworkId: 'kra',
+  });
+  check('bare draft created', bare.status === 200);
+  const bareCycle = bare.body.data.cycle;
+  const prereqFail = await callAdmin(superT, 'cycle.activate', {
+    orgId: gamma.id, cycleId: bareCycle.id, expectedVersion: bareCycle.version,
+  });
+  check('activation blocked without prerequisites', prereqFail.status === 422 && prereqFail.body.error.code === 'ACTIVATION_PREREQ');
+
+  // Build the minimum: one rating level, one window, one participant.
+  let v = bareCycle.version;
+  const scale = await callAdmin(superT, 'cycle.save-section', {
+    orgId: gamma.id, cycleId: bareCycle.id, cycleVersion: v, section: 'rating_scale_levels',
+    rows: [{ point: 3, label: 'Meets', code: 'ME', rangeFrom: 60, rangeTo: 79 }],
+  });
+  v = scale.body.data.cycle.version;
+  const win = await callAdmin(superT, 'cycle.set-windows', {
+    orgId: gamma.id, cycleId: bareCycle.id, cycleVersion: v,
+    windows: [{ key: 'goal_creation', startsOn: '2029-04-01', endsOn: '2029-04-30' }],
+  });
+  v = win.body.data.cycle.version;
+  await callAdmin(superT, 'cycle.add-participants', { orgId: gamma.id, cycleId: bareCycle.id, employeeCodes: ['G100'] });
+
+  const staleActivate = await callAdmin(superT, 'cycle.activate', {
+    orgId: gamma.id, cycleId: bareCycle.id, expectedVersion: 1,
+  });
+  check('activation with stale version conflicts', staleActivate.status === 409 && staleActivate.body.error.code === 'CONFLICT');
+
+  const activate = await callAdmin(superT, 'cycle.activate', {
+    orgId: gamma.id, cycleId: bareCycle.id, expectedVersion: v,
+  });
+  check('activation succeeds with prerequisites met', activate.status === 200 && activate.body.data.cycle.status === 'active');
+
+  const { data: activated } = await admin.from('appraisal_cycles').select('status, activated_at').eq('id', bareCycle.id).single();
+  check('cycle row is active with activated_at set', activated.status === 'active' && activated.activated_at !== null);
+
+  const reactivate = await callAdmin(superT, 'cycle.activate', {
+    orgId: gamma.id, cycleId: bareCycle.id, expectedVersion: activate.body.data.cycle ? v + 1 : v,
+  });
+  check('re-activating an active cycle is rejected', reactivate.status === 409 && reactivate.body.error.code === 'CYCLE_LOCKED');
+}
+
 console.log(`admin-check: PASS (${n} assertions)`);

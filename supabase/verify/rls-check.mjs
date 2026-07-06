@@ -227,6 +227,10 @@ assert.ok(org, 'seed org missing — run seed-foundation.mjs first');
     p_employee: '00000000-0000-0000-0000-000000000000', p_email: 'x@x.com', p_link: 'x', p_actor: '00000000-0000-0000-0000-000000000000',
   });
   check('authenticated user cannot call link_invited_member_tx', linkRpcErr?.code === '42501');
+  const { error: activateRpcErr } = await eveC.rpc('activate_cycle_tx', {
+    p_org: org.id, p_cycle: '00000000-0000-0000-0000-000000000000', p_expected_version: 1, p_actor: '00000000-0000-0000-0000-000000000000',
+  });
+  check('authenticated user cannot call activate_cycle_tx', activateRpcErr?.code === '42501');
   const anon = anonClient();
   const { error: anonRpcErr } = await anon.rpc('create_organization_tx', {
     p_key: 'hacker-org', p_name: 'Hacker', p_actor: '00000000-0000-0000-0000-000000000000',
