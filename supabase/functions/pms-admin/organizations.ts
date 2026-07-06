@@ -52,6 +52,8 @@ export const organizationHandlers: Record<string, Handler> = {
     ctx.requireOrgRole(orgId, ['hr_admin']);
     const expectedVersion = reqInt(payload.expectedVersion, 'expectedVersion');
     const brandingPayload = reqObject(payload.payload, 'payload');
+    const { data: beforeBranding } = await ctx.admin.from('organization_branding')
+      .select().eq('organization_id', orgId).maybeSingle();
     // organization_branding's PK is organization_id (no id column) — direct
     // version-checked update, same conflict contract as versionedUpdate.
     const { data: updated, error } = await ctx.admin.from('organization_branding')
@@ -67,7 +69,8 @@ export const organizationHandlers: Record<string, Handler> = {
     }
     await ctx.audit({
       organizationId: orgId, action: 'org.set-branding',
-      entityType: 'organization_branding', entityId: orgId, after: updated,
+      entityType: 'organization_branding', entityId: orgId,
+      before: beforeBranding ?? null, after: updated,
     });
     return { branding: updated };
   },
