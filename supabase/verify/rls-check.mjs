@@ -94,6 +94,97 @@ assert.ok(org, 'seed org missing — run seed-foundation.mjs first');
   check('second working cycle rejected', cycleErr !== null && /duplicate|unique/i.test(cycleErr.message));
 }
 
+// --- draft evaluations are private to their author (+ HR) ---
+{
+  const { data: eve } = await admin.from('employees')
+    .select('id').eq('organization_id', org.id).eq('employee_code', 'EMP002').single();
+  const { data: cyc } = await admin.from('appraisal_cycles')
+    .select('id').eq('organization_id', org.id).eq('status', 'draft').single();
+  await admin.from('evaluations').delete().eq('cycle_id', cyc.id).eq('employee_id', eve.id);
+  const { data: draftEval, error: draftErr } = await admin.from('evaluations').insert({
+    organization_id: org.id, cycle_id: cyc.id, employee_id: eve.id, stage: 'self', status: 'draft',
+  }).select().single();
+  assert.equal(draftErr, null, draftErr?.message);
+  const { client: eveC } = await signIn(USERS.employee, PASSWORD);
+  const { data: eveSees } = await eveC.from('evaluations').select('id');
+  check('employee sees own draft self-evaluation', (eveSees ?? []).length === 1);
+  const { client: maryC } = await signIn(USERS.manager, PASSWORD);
+  const { data: maryDraft } = await maryC.from('evaluations').select('id');
+  check('manager cannot see report draft self-evaluation', (maryDraft ?? []).length === 0);
+  await admin.from('evaluations')
+    .update({ status: 'submitted', submitted_at: new Date().toISOString() }).eq('id', draftEval.id);
+  const { data: marySubmitted } = await maryC.from('evaluations').select('id');
+  check('manager sees report submitted self-evaluation', (marySubmitted ?? []).length === 1);
+  await admin.from('evaluations').update({ status: 'draft' }).eq('id', draftEval.id);
+  const { client: hrC } = await signIn(USERS.hr, PASSWORD);
+  const { data: hrSees } = await hrC.from('evaluations').select('id');
+  check('HR sees draft evaluations', (hrSees ?? []).length === 1);
+  await admin.from('evaluations').delete().eq('id', draftEval.id);
+}
+
+// --- manager-stage drafts are private to the manager (author) ---
+{
+  const { data: eve } = await admin.from('employees')
+    .select('id').eq('organization_id', org.id).eq('employee_code', 'EMP002').single();
+  const { data: cyc } = await admin.from('appraisal_cycles')
+    .select('id').eq('organization_id', org.id).eq('status', 'draft').single();
+  await admin.from('evaluations').delete().eq('cycle_id', cyc.id).eq('employee_id', eve.id);
+  const { data: mgrEval, error: mgrErr } = await admin.from('evaluations').insert({
+    organization_id: org.id, cycle_id: cyc.id, employee_id: eve.id, stage: 'manager', status: 'draft',
+  }).select().single();
+  assert.equal(mgrErr, null, mgrErr?.message);
+  const { client: maryC } = await signIn(USERS.manager, PASSWORD);
+  const { data: marySees } = await maryC.from('evaluations').select('id');
+  check('manager sees own draft manager evaluation', (marySees ?? []).length === 1);
+  const { client: hodC } = await signIn(USERS.hod, PASSWORD);
+  const { data: hodSees } = await hodC.from('evaluations').select('id');
+  check('HOD cannot see draft manager evaluation (author-only)', (hodSees ?? []).length === 0);
+  const { client: eveC } = await signIn(USERS.employee, PASSWORD);
+  const { data: eveSeesDraft } = await eveC.from('evaluations').select('id');
+  check('employee cannot see draft manager evaluation', (eveSeesDraft ?? []).length === 0);
+  await admin.from('evaluations')
+    .update({ status: 'submitted', submitted_at: new Date().toISOString() }).eq('id', mgrEval.id);
+  const { data: hodSubmitted } = await hodC.from('evaluations').select('id');
+  check('HOD sees submitted manager evaluation', (hodSubmitted ?? []).length === 1);
+  const { data: eveSubmitted } = await eveC.from('evaluations').select('id');
+  check('employee still cannot see manager evaluation before publish (after_publish)', (eveSubmitted ?? []).length === 0);
+  await admin.from('evaluations').delete().eq('id', mgrEval.id);
+}
+
+// --- disabled membership suspends scoped reads ---
+{
+  const { data: eveEmp } = await admin.from('employees')
+    .select('user_id').eq('organization_id', org.id).eq('employee_code', 'EMP002').single();
+  await admin.from('org_members').update({ status: 'disabled' })
+    .eq('organization_id', org.id).eq('user_id', eveEmp.user_id);
+  const { client: eveC } = await signIn(USERS.employee, PASSWORD);
+  const { data: whileDisabled } = await eveC.from('employees').select('id');
+  check('disabled member reads no roster rows', (whileDisabled ?? []).length === 0);
+  await admin.from('org_members').update({ status: 'active' })
+    .eq('organization_id', org.id).eq('user_id', eveEmp.user_id);
+  const { client: eveC2 } = await signIn(USERS.employee, PASSWORD);
+  const { data: reEnabled } = await eveC2.from('employees').select('id');
+  check('re-activated member reads roster rows again', (reEnabled ?? []).length === 3);
+}
+
+// --- cycle_admin_config is HR-only ---
+{
+  const { data: cyc } = await admin.from('appraisal_cycles')
+    .select('id').eq('organization_id', org.id).eq('status', 'draft').single();
+  await admin.from('cycle_admin_config').delete().eq('cycle_id', cyc.id);
+  const { error: cfgErr } = await admin.from('cycle_admin_config').insert({
+    organization_id: org.id, cycle_id: cyc.id,
+    payload: { bell: { enabled: true, mode: 'org', preset: 'standard' } },
+  });
+  assert.equal(cfgErr, null, cfgErr?.message);
+  const { client: eveC } = await signIn(USERS.employee, PASSWORD);
+  const { data: eveCfg, error: eveCfgErr } = await eveC.from('cycle_admin_config').select('id');
+  check('employee cannot read cycle_admin_config', eveCfgErr !== null || (eveCfg ?? []).length === 0);
+  const { client: hrC } = await signIn(USERS.hr, PASSWORD);
+  const { data: hrCfg } = await hrC.from('cycle_admin_config').select('id');
+  check('HR reads cycle_admin_config', (hrCfg ?? []).length === 1);
+}
+
 // --- RPC hardening: helper functions must not act as a cross-org oracle ---
 {
   const { client } = await signIn(USERS.employee, PASSWORD);
