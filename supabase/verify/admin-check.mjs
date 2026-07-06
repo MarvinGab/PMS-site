@@ -280,4 +280,43 @@ let cycle;
   check('employee denied org.update in own org (role check)', ownOrg.status === 403 && ownOrg.body.error.code === 'FORBIDDEN');
 }
 
+// --- goal libraries + prefill (org-level) ---
+{
+  const lib = await callAdmin(superT, 'library.save', {
+    orgId: gamma.id, name: 'Sales Playbook', description: 'Standard sales KRAs',
+    items: [
+      { itemType: 'kra', key: 'k1', title: 'Revenue', perspective: 'Financial', weight: 60, displayOrder: 0 },
+      { itemType: 'kpi', key: 'k1a', parentKey: 'k1', title: 'New ARR', weight: 100, displayOrder: 1 },
+      { itemType: 'kra', key: 'k2', title: 'Customer Success', perspective: 'Customer', weight: 40, displayOrder: 2 },
+    ],
+  });
+  check('library.save creates library + items', lib.status === 200 && lib.body.data.items === 3);
+  const libId = lib.body.data.library.id;
+  const { data: itemRows } = await admin.from('goal_library_items').select('id, item_type, parent_item_id').eq('goal_library_id', libId);
+  check('library items persisted (2 kra + 1 kpi)', (itemRows ?? []).length === 3);
+  const kpi = (itemRows ?? []).find((r) => r.item_type === 'kpi');
+  check('kpi parent linked by payload key', kpi && kpi.parent_item_id !== null);
+
+  const badParent = await callAdmin(superT, 'library.save', {
+    orgId: gamma.id, name: 'Broken', items: [{ itemType: 'kpi', key: 'x', parentKey: 'nope', title: 'Orphan' }],
+  });
+  check('kpi with unknown parentKey rejected', badParent.status === 400);
+
+  const listed = await callAdmin(superT, 'library.list', { orgId: gamma.id });
+  check('library.list returns the saved library', listed.status === 200 && (listed.body.data.libraries ?? []).some((l) => l.id === libId));
+
+  const arch = await callAdmin(superT, 'library.archive', {
+    orgId: gamma.id, libraryId: libId, expectedVersion: lib.body.data.library.version,
+  });
+  check('library.archive sets status archived', arch.status === 200 && arch.body.data.library.status === 'archived');
+
+  const pf = await callAdmin(superT, 'prefill.save', {
+    orgId: gamma.id, name: 'Q1 Prefill',
+    items: [{ employeeCode: 'GAMMA001', kraTitle: 'Onboarding', kpiTitle: 'Time to value', weight: 100, displayOrder: 0 }],
+  });
+  check('prefill.save creates dataset + items', pf.status === 200 && pf.body.data.items === 1);
+  const empDenied = await callAdmin(empT, 'library.list', { orgId: gamma.id });
+  check('employee cannot list libraries', empDenied.status === 403);
+}
+
 console.log(`admin-check: PASS (${n} assertions)`);
