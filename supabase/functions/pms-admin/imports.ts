@@ -151,6 +151,8 @@ export const importHandlers: Record<string, Handler> = {
       p_org: orgId, p_import_run: importRunId, p_actor: ctx.userId, p_rows: clean,
     });
     if (error) {
+      if (error.code === 'P0002') throw new ApiError('NOT_FOUND', 'Import run not found', 404);
+      if (error.code === '55000') throw new ApiError('IMPORT_ALREADY_COMMITTED', 'This import was already committed', 409);
       if (error.code === '23503') throw new ApiError('BAD_REQUEST', 'A reporting reference did not resolve', 400);
       console.error('commit_roster_import_tx', error);
       throw new ApiError('DB_ERROR', 'Database error', 500);
