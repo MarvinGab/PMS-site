@@ -1,5 +1,5 @@
-import { ApiError, Handler, HandlerCtx } from '../_shared/kernel.ts';
-import { reqArray, reqInt, reqObject, reqUuid } from '../_shared/validate.ts';
+import { ApiError, Handler } from '../_shared/kernel.ts';
+import { reqArray, reqInt, reqUuid } from '../_shared/validate.ts';
 
 export const CANONICAL_COLUMNS = [
   'employeeCode', 'fullName', 'email', 'designation', 'department', 'grade',
@@ -113,8 +113,9 @@ export const importHandlers: Record<string, Handler> = {
       .select().eq('id', importRunId).eq('organization_id', orgId).maybeSingle();
     if (error) { console.error('import preview read', error); throw new ApiError('DB_ERROR', 'Database error', 500); }
     if (!run) throw new ApiError('NOT_FOUND', 'Import run not found', 404);
-    const { data: errs } = await ctx.admin.from('import_run_errors')
+    const { data: errs, error: errsErr } = await ctx.admin.from('import_run_errors')
       .select().eq('import_run_id', importRunId).order('row_number');
+    if (errsErr) { console.error('import preview errors read', errsErr); throw new ApiError('DB_ERROR', 'Database error', 500); }
     return { importRun: run, errors: errs ?? [] };
   },
 
