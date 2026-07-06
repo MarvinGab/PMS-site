@@ -378,6 +378,11 @@ let goodRun;
 
   const recommit = await callAdmin(superT, 'import.commit-roster', { orgId: gamma.id, importRunId: goodRun.id, rows: goodRows });
   check('re-commit of same run rejected', recommit.status === 409 && recommit.body.error.code === 'IMPORT_ALREADY_COMMITTED');
+
+  const dupRows = [{ employeeCode: 'G200', fullName: 'Dup Email', email: 'bea@x.com', groupName: 'Sales' }];
+  const dupVal = await callAdmin(superT, 'import.validate-roster', { orgId: gamma.id, rows: dupRows });
+  const dupCommit = await callAdmin(superT, 'import.commit-roster', { orgId: gamma.id, importRunId: dupVal.body.data.importRun.id, rows: dupRows });
+  check('duplicate email vs existing employee → 409', dupCommit.status === 409 && dupCommit.body.error.code === 'IMPORT_EMAIL_TAKEN');
 }
 
 // --- participants & assignments (fresh draft cycle; gamma's earlier one is archived) ---

@@ -231,6 +231,13 @@ assert.ok(org, 'seed org missing — run seed-foundation.mjs first');
     p_org: org.id, p_cycle: '00000000-0000-0000-0000-000000000000', p_expected_version: 1, p_actor: '00000000-0000-0000-0000-000000000000',
   });
   check('authenticated user cannot call activate_cycle_tx', activateRpcErr?.code === '42501');
+  const anon2 = anonClient();
+  const { error: anonRoster } = await anon2.rpc('commit_roster_import_tx', { p_org: org.id, p_import_run: '00000000-0000-0000-0000-000000000000', p_actor: '00000000-0000-0000-0000-000000000000', p_rows: [] });
+  check('anon cannot call commit_roster_import_tx', anonRoster !== null);
+  const { error: anonLink } = await anon2.rpc('link_invited_member_tx', { p_org: org.id, p_user: '00000000-0000-0000-0000-000000000000', p_employee: '00000000-0000-0000-0000-000000000000', p_email: 'x@x.com', p_link: 'x', p_actor: '00000000-0000-0000-0000-000000000000' });
+  check('anon cannot call link_invited_member_tx', anonLink !== null);
+  const { error: anonActivate } = await anon2.rpc('activate_cycle_tx', { p_org: org.id, p_cycle: '00000000-0000-0000-0000-000000000000', p_expected_version: 1, p_actor: '00000000-0000-0000-0000-000000000000' });
+  check('anon cannot call activate_cycle_tx', anonActivate !== null);
   const anon = anonClient();
   const { error: anonRpcErr } = await anon.rpc('create_organization_tx', {
     p_key: 'hacker-org', p_name: 'Hacker', p_actor: '00000000-0000-0000-0000-000000000000',

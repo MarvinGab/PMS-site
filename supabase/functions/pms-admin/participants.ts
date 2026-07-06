@@ -117,8 +117,9 @@ export const participantHandlers: Record<string, Handler> = {
       if (!d) throw new ApiError('BAD_REQUEST', `prefill dataset "${prefillDatasetName}" not found`, 400);
       prefillDatasetId = d.id;
     }
-    const { data: existingAssign } = await ctx.admin.from('cycle_participant_assignments')
+    const { data: existingAssign, error: exErr } = await ctx.admin.from('cycle_participant_assignments')
       .select('group_id, goal_library_id, prefill_dataset_id').eq('participant_id', participantId).maybeSingle();
+    if (exErr) { console.error('assign existing read', exErr); throw new ApiError('DB_ERROR', 'Database error', 500); }
     const finalGroupId = groupName !== null ? groupId : (existingAssign?.group_id ?? null);
     const finalLibraryId = goalLibraryName !== null ? goalLibraryId : (existingAssign?.goal_library_id ?? null);
     const finalPrefillId = prefillDatasetName !== null ? prefillDatasetId : (existingAssign?.prefill_dataset_id ?? null);
