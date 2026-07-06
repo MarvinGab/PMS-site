@@ -20,6 +20,8 @@ export const EXPECTED_TABLES = [
   'calibrations', 'cycle_publications', 'rating_acknowledgements',
   'notifications', 'email_jobs', 'email_delivery_attempts', 'background_jobs',
   'import_runs', 'import_run_errors', 'audit_logs',
+  // Plan 2a: HR-only cycle admin config
+  'cycle_admin_config',
 ];
 
 const admin = adminClient();
