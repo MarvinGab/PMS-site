@@ -380,4 +380,49 @@ let goodRun;
   check('re-commit of same run rejected', recommit.status === 409 && recommit.body.error.code === 'IMPORT_ALREADY_COMMITTED');
 }
 
+// --- participants & assignments (fresh draft cycle; gamma's earlier one is archived) ---
+{
+  const created = await callAdmin(superT, 'cycle.create-draft', {
+    orgId: gamma.id, name: 'FY28 Participation Cycle', frameworkId: 'kra-kpi',
+  });
+  check('fresh draft cycle for participants', created.status === 200);
+  const pcycle = created.body.data.cycle;
+  // Need a group to assign to.
+  await callAdmin(superT, 'cycle.save-section', {
+    orgId: gamma.id, cycleId: pcycle.id, cycleVersion: pcycle.version, section: 'groups',
+    rows: [{ name: 'Sales', targetLevel: 'kpi', ratingLevel: 'kpi' }],
+  });
+
+  const add = await callAdmin(superT, 'cycle.add-participants', {
+    orgId: gamma.id, cycleId: pcycle.id, employeeCodes: ['G100', 'G101', 'G102'],
+  });
+  check('add-participants adds PMS employees, skips roster-only', add.status === 200 && add.body.data.added === 2 && add.body.data.skipped.some((s) => s.includes('G102')));
+
+  const unknown = await callAdmin(superT, 'cycle.add-participants', {
+    orgId: gamma.id, cycleId: pcycle.id, employeeCodes: ['NOPE'],
+  });
+  check('add-participants rejects unknown code', unknown.status === 400);
+
+  const list = await callAdmin(superT, 'cycle.list-participants', { orgId: gamma.id, cycleId: pcycle.id });
+  check('list-participants returns 2 rows', list.status === 200 && (list.body.data.participants ?? []).length === 2);
+  const rita = list.body.data.participants.find((p) => p.employees.employee_code === 'G101');
+
+  const assign = await callAdmin(superT, 'cycle.assign-participant', {
+    orgId: gamma.id, cycleId: pcycle.id, participantId: rita.id, groupName: 'Sales', goalLibraryName: 'Sales Playbook',
+  });
+  check('assign-participant resolves group + library', assign.status === 200 && assign.body.data.assignment.group_id !== null);
+
+  const badGroup = await callAdmin(superT, 'cycle.assign-participant', {
+    orgId: gamma.id, cycleId: pcycle.id, participantId: rita.id, groupName: 'Ghost Group',
+  });
+  check('assign-participant rejects unknown group', badGroup.status === 400);
+
+  const remove = await callAdmin(superT, 'cycle.remove-participant', {
+    orgId: gamma.id, cycleId: pcycle.id, participantId: rita.id, expectedVersion: rita.version,
+  });
+  check('remove-participant sets status removed', remove.status === 200 && remove.body.data.participant.status === 'removed');
+
+  // stash pcycle id for Task 5/6 by re-reading in those sections via admin
+}
+
 console.log(`admin-check: PASS (${n} assertions)`);
