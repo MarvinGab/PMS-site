@@ -11,8 +11,10 @@ export const organizationHandlers: Record<string, Handler> = {
     requireSuperAdmin(ctx);
     const key = reqString(payload.key, 'key', 60).toLowerCase();
     const name = reqString(payload.name, 'name', 200);
-    const { data: org, error } = await ctx.admin.from('organizations')
-      .insert({ key, name }).select().single();
+    // Atomic org + branding + audit via RPC (kernel contract for multi-table writes).
+    const { data: org, error } = await ctx.admin.rpc('create_organization_tx', {
+      p_key: key, p_name: name, p_actor: ctx.userId,
+    });
     if (error) {
       if (error.code === '23505') {
         throw new ApiError('ORG_KEY_TAKEN', 'An organization with this key already exists', 409);
@@ -20,16 +22,6 @@ export const organizationHandlers: Record<string, Handler> = {
       console.error('org.create', error);
       throw new ApiError('DB_ERROR', 'Database error', 500);
     }
-    const { error: brandErr } = await ctx.admin.from('organization_branding')
-      .insert({ organization_id: org.id });
-    if (brandErr) {
-      console.error('org.create branding', brandErr);
-      throw new ApiError('DB_ERROR', 'Database error', 500);
-    }
-    await ctx.audit({
-      organizationId: org.id, action: 'org.create',
-      entityType: 'organization', entityId: org.id, after: org,
-    });
     return { organization: org };
   },
 
