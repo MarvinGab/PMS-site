@@ -201,6 +201,25 @@ assert.ok(org, 'seed org missing — run seed-foundation.mjs first');
   check('anon cannot call pms rpc helpers', anonErr !== null);
 }
 
+// --- creation RPCs are backend-only (never client-invokable) ---
+{
+  const { client: eveC } = await signIn(USERS.employee, PASSWORD);
+  const { error: orgRpcErr } = await eveC.rpc('create_organization_tx', {
+    p_key: 'hacker-org', p_name: 'Hacker', p_actor: '00000000-0000-0000-0000-000000000000',
+  });
+  check('authenticated user cannot call create_organization_tx', orgRpcErr !== null);
+  const { error: cycRpcErr } = await eveC.rpc('create_cycle_draft_tx', {
+    p_org: org.id, p_name: 'Hacker Cycle', p_period_label: null,
+    p_framework: 'kra', p_actor: '00000000-0000-0000-0000-000000000000', p_actor_role: 'employee',
+  });
+  check('authenticated user cannot call create_cycle_draft_tx', cycRpcErr !== null);
+  const anon = anonClient();
+  const { error: anonRpcErr } = await anon.rpc('create_organization_tx', {
+    p_key: 'hacker-org', p_name: 'Hacker', p_actor: '00000000-0000-0000-0000-000000000000',
+  });
+  check('anon cannot call create_organization_tx', anonRpcErr !== null);
+}
+
 // --- cross-tenant isolation: org B (beta-test) rows must never leak into org A queries ---
 {
   const { client: betaClient } = await signIn(USERS.beta, PASSWORD);
