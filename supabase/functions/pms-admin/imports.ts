@@ -131,4 +131,30 @@ export const importHandlers: Record<string, Handler> = {
     });
     return { importRun: run };
   },
+
+  'import.commit-roster': async (payload, ctx) => {
+    const orgId = reqUuid(payload.orgId, 'orgId');
+    ctx.requireOrgRole(orgId, ['hr_admin']);
+    const importRunId = reqUuid(payload.importRunId, 'importRunId');
+    const rows = reqArray(payload.rows, 'rows', 5000);
+    // Re-validate server-side; the client's earlier preview is advisory only.
+    const { clean, errors } = validateRosterRows(rows);
+    if (errors.length) {
+      throw new ApiError('IMPORT_INVALID', `Roster still has ${errors.length} error(s); re-validate before committing`, 400);
+    }
+    const { data: run, error: runErr } = await ctx.admin.from('import_runs')
+      .select('status').eq('id', importRunId).eq('organization_id', orgId).maybeSingle();
+    if (runErr) { console.error('commit run read', runErr); throw new ApiError('DB_ERROR', 'Database error', 500); }
+    if (!run) throw new ApiError('NOT_FOUND', 'Import run not found', 404);
+    if (run.status === 'committed') throw new ApiError('IMPORT_ALREADY_COMMITTED', 'This import was already committed', 409);
+    const { data: result, error } = await ctx.admin.rpc('commit_roster_import_tx', {
+      p_org: orgId, p_import_run: importRunId, p_actor: ctx.userId, p_rows: clean,
+    });
+    if (error) {
+      if (error.code === '23503') throw new ApiError('BAD_REQUEST', 'A reporting reference did not resolve', 400);
+      console.error('commit_roster_import_tx', error);
+      throw new ApiError('DB_ERROR', 'Database error', 500);
+    }
+    return { result };
+  },
 };

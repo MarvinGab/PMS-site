@@ -217,6 +217,11 @@ assert.ok(org, 'seed org missing — run seed-foundation.mjs first');
     p_framework: 'kra', p_actor: '00000000-0000-0000-0000-000000000000', p_actor_role: 'employee',
   });
   check('authenticated user cannot call create_cycle_draft_tx', cycRpcErr?.code === '42501');
+  const { error: rosterRpcErr } = await eveC.rpc('commit_roster_import_tx', {
+    p_org: org.id, p_import_run: '00000000-0000-0000-0000-000000000000',
+    p_actor: '00000000-0000-0000-0000-000000000000', p_rows: [],
+  });
+  check('authenticated user cannot call commit_roster_import_tx', rosterRpcErr?.code === '42501');
   const anon = anonClient();
   const { error: anonRpcErr } = await anon.rpc('create_organization_tx', {
     p_key: 'hacker-org', p_name: 'Hacker', p_actor: '00000000-0000-0000-0000-000000000000',

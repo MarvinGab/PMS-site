@@ -360,4 +360,24 @@ let goodRun;
   check('get-preview returns the run', preview.status === 200 && preview.body.data.importRun.id === goodRun.id);
 }
 
+// --- roster import: commit ---
+{
+  const goodRows = [
+    { employeeCode: 'G100', fullName: 'Boss Bea', email: 'bea@x.com', groupName: 'Leadership', department: 'Exec' },
+    { employeeCode: 'G101', fullName: 'Rep Rita', email: 'rita@x.com', groupName: 'Sales', department: 'Sales', managerCode: 'G100', hodCode: 'G100' },
+    { employeeCode: 'G102', fullName: 'Ext Ed', email: 'ed@x.com', groupName: 'NONE', designation: 'Advisor' },
+  ];
+  const commit = await callAdmin(superT, 'import.commit-roster', { orgId: gamma.id, importRunId: goodRun.id, rows: goodRows });
+  check('commit-roster succeeds', commit.status === 200 && commit.body.data.result.inserted === 3);
+  check('commit created reporting relationships', commit.body.data.result.relationships === 2);
+  const { data: emps } = await admin.from('employees').select('employee_code, group_name').eq('organization_id', gamma.id).in('employee_code', ['G100', 'G101', 'G102']);
+  check('all 3 employees persisted', (emps ?? []).length === 3);
+  check('roster-only employee kept group NONE', (emps ?? []).find((e) => e.employee_code === 'G102')?.group_name === 'NONE');
+  const { data: rels } = await admin.from('reporting_relationships').select('relation_type').eq('organization_id', gamma.id);
+  check('manager + hod relationships resolved', (rels ?? []).filter((x) => ['manager', 'hod'].includes(x.relation_type)).length >= 2);
+
+  const recommit = await callAdmin(superT, 'import.commit-roster', { orgId: gamma.id, importRunId: goodRun.id, rows: goodRows });
+  check('re-commit of same run rejected', recommit.status === 409 && recommit.body.error.code === 'IMPORT_ALREADY_COMMITTED');
+}
+
 console.log(`admin-check: PASS (${n} assertions)`);
