@@ -7,6 +7,7 @@ const scripts = [
   'supabase/verify/seed-foundation.mjs',
   'supabase/verify/rls-check.mjs',
   'supabase/verify/kernel-check.mjs',
+  'supabase/verify/admin-check.mjs',
 ];
 
 console.log('\n=== deno unit tests (kernel) ===');

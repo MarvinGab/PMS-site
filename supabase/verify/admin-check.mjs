@@ -64,4 +64,220 @@ const { data: gamma } = await admin.from('organizations').select().eq('key', GAM
   check('employee cannot call org actions', empTry.status === 403);
 }
 
+// --- cycle.create-draft ---
+let cycle;
+{
+  const denied = await callAdmin(empT, 'cycle.create-draft', {
+    orgId: gamma.id, name: 'FY27 Gamma Cycle', frameworkId: 'kra-kpi',
+  });
+  check('cycle.create-draft denied for employee', denied.status === 403);
+  const created = await callAdmin(superT, 'cycle.create-draft', {
+    orgId: gamma.id, name: 'FY27 Gamma Cycle', periodLabel: 'FY 2027-28', frameworkId: 'kra-kpi',
+  });
+  check('cycle.create-draft succeeds', created.status === 200 && created.body.data.cycle.status === 'draft');
+  cycle = created.body.data.cycle;
+  const second = await callAdmin(superT, 'cycle.create-draft', {
+    orgId: gamma.id, name: 'Second Working', frameworkId: 'kra',
+  });
+  check('second working cycle rejected', second.status === 409 && second.body.error.code === 'WORKING_CYCLE_EXISTS');
+  const { data: snapRows } = await admin.from('cycle_config_snapshots').select('id').eq('cycle_id', cycle.id);
+  const { data: acRows } = await admin.from('cycle_admin_config').select('id').eq('cycle_id', cycle.id);
+  check('snapshot + admin-config rows created with draft', (snapRows ?? []).length === 1 && (acRows ?? []).length === 1);
+}
+
+// --- cycle.save-section: every section round-trips ---
+{
+  let v = cycle.version;
+  const save = async (section, body) => {
+    const res = await callAdmin(superT, 'cycle.save-section', {
+      orgId: gamma.id, cycleId: cycle.id, cycleVersion: v, section, ...body,
+    });
+    assert.equal(res.status, 200, `save ${section}: ${JSON.stringify(res.body)}`);
+    v = res.body.data.cycle.version;
+    return res.body.data.rows;
+  };
+
+  check('perspectives save', await save('perspectives', { rows: [
+    { name: 'Financial', weight: 40, color: '#3b82f6', displayOrder: 0 },
+    { name: 'Customer', weight: 60, color: '#8b5cf6', displayOrder: 1 },
+  ] }) === 2);
+
+  check('groups save (with segments + assignment slots)', await save('groups', { rows: [
+    { name: 'Sales', segmentAttr: 'Department', segmentValues: ['Sales', 'Field Sales'],
+      canEditOwnGoals: true, hasLibrary: true, targetLevel: 'kpi', ratingLevel: 'kpi',
+      libraryAssignments: [{ slotKey: 'primary', slotLabel: 'Primary library', goalLibraryId: null }] },
+    { name: 'Everyone Else', isCatchAll: true, targetLevel: 'kra', ratingLevel: 'kra' },
+  ] }) === 2);
+
+  const { data: segRows } = await admin.from('cycle_group_segment_values').select('id').eq('cycle_id', cycle.id);
+  check('segment values written', (segRows ?? []).length === 2);
+
+  check('target_types save', await save('target_types', { rows: [
+    { key: 'number', name: 'Number', isNumeric: true },
+    { key: 'percent', name: 'Percentage', isNumeric: true, unit: '%', unitPosition: 'suffix', lowerIsBetter: false },
+  ] }) === 2);
+
+  check('rating_scale_levels save', await save('rating_scale_levels', { rows: [
+    { point: 1, label: 'Needs Improvement', code: 'NI', rangeFrom: 0, rangeTo: 39 },
+    { point: 2, label: 'Developing', code: 'DE', rangeFrom: 40, rangeTo: 59 },
+    { point: 3, label: 'Meets Expectations', code: 'ME', rangeFrom: 60, rangeTo: 79 },
+    { point: 4, label: 'Exceeds', code: 'EX', rangeFrom: 80, rangeTo: 94 },
+    { point: 5, label: 'Outstanding', code: 'OU', rangeFrom: 95, rangeTo: 100 },
+  ] }) === 5);
+
+  check('auto_rating_bands save', await save('auto_rating_bands', { rows: [
+    { fromPercent: 0, toPercent: 59, score: 2 },
+    { fromPercent: 60, toPercent: 94, score: 3.5 },
+    { fromPercent: 95, toPercent: 200, score: 5 },
+  ] }) === 3);
+
+  const badBand = await callAdmin(superT, 'cycle.save-section', {
+    orgId: gamma.id, cycleId: cycle.id, cycleVersion: v, section: 'auto_rating_bands',
+    rows: [{ fromPercent: 50, toPercent: 10, score: 1 }],
+  });
+  check('inverted auto-rating band rejected', badBand.status === 400 && badBand.body.error.code === 'BAD_REQUEST');
+  // Validation failures (400) do not consume a version bump (validate-first); we
+  // still re-read the fresh version from the DB as belt-and-braces.
+  const { data: cycNow } = await admin.from('appraisal_cycles').select('version').eq('id', cycle.id).single();
+  v = cycNow.version;
+
+  check('goal_rules save (cycle-wide + per-group)', await save('goal_rules', { rows: [
+    { groupName: null, minKras: 3, maxKras: 6, maxKpisPerKra: 4, minKpiWeight: 5, approvalRequired: true },
+    { groupName: 'Sales', minKras: 2, maxKras: 5, employeeCanAddGoals: true, maxEmployeeAddedGoals: 2 },
+  ] }) === 2);
+
+  const badRule = await callAdmin(superT, 'cycle.save-section', {
+    orgId: gamma.id, cycleId: cycle.id, cycleVersion: v, section: 'goal_rules',
+    rows: [{ groupName: 'No Such Group', minKras: 1 }],
+  });
+  check('goal rule with unknown group rejected', badRule.status === 400);
+  {
+    const { data: cycNow2 } = await admin.from('appraisal_cycles').select('version').eq('id', cycle.id).single();
+    v = cycNow2.version;
+  }
+
+  check('competency_config save', await save('competency_config', { config: {
+    enabled: true, maxPerEmployee: 4, competencyWeight: 20, ratedBy: 'manager',
+    allowSelfRate: false, employeeCanEdit: false, scope: 'group',
+  } }) === 1);
+
+  check('competency_assignments save', await save('competency_assignments', { rows: [
+    { groupName: 'Sales', competencyName: 'Customer Focus', kraShare: 80, competencyShare: 20 },
+    { groupName: null, competencyName: 'Integrity' },
+  ] }) === 2);
+
+  check('bell_curve_bands save', await save('bell_curve_bands', { rows: [
+    { ratingPoint: 2, targetPercent: 10, tolerancePercent: 5 },
+    { ratingPoint: 3, targetPercent: 60, tolerancePercent: 10 },
+    { ratingPoint: 5, targetPercent: 10, tolerancePercent: 5 },
+  ] }) === 3);
+
+  const stale = await callAdmin(superT, 'cycle.save-section', {
+    orgId: gamma.id, cycleId: cycle.id, cycleVersion: 1, section: 'perspectives', rows: [],
+  });
+  check('stale cycleVersion conflicts', stale.status === 409 && stale.body.error.code === 'CONFLICT');
+
+  cycle.version = v;
+}
+
+// --- windows, snapshot, admin config ---
+{
+  const win = await callAdmin(superT, 'cycle.set-windows', {
+    orgId: gamma.id, cycleId: cycle.id, cycleVersion: cycle.version,
+    windows: [
+      { key: 'goal_creation', startsOn: '2027-04-01', endsOn: '2027-04-20' },
+      { key: 'manager_approval', startsOn: '2027-04-15', endsOn: '2027-04-30' },
+      { key: 'self_evaluation', startsOn: '2028-02-01', endsOn: '2028-02-28' },
+      { key: 'manager_evaluation', startsOn: '2028-02-20', endsOn: '2028-03-15' },
+      { key: 'hod_review', startsOn: '2028-03-10', endsOn: '2028-03-25' },
+      { key: 'hr_calibration', startsOn: '2028-03-20', endsOn: '2028-04-05' },
+      { key: 'publishing_prep', startsOn: '2028-04-01', endsOn: '2028-04-10' },
+      { key: 'acknowledgement', startsOn: '2028-04-10', endsOn: '2028-04-25' },
+    ],
+  });
+  check('set-windows saves all 8 (overlaps allowed)', win.status === 200 && win.body.data.rows === 8);
+  cycle.version = win.body.data.cycle.version;
+
+  const badKey = await callAdmin(superT, 'cycle.set-windows', {
+    orgId: gamma.id, cycleId: cycle.id, cycleVersion: cycle.version,
+    windows: [{ key: 'lunch_break', startsOn: '2027-04-01', endsOn: '2027-04-02' }],
+  });
+  check('unknown window key rejected', badKey.status === 400);
+
+  const snap = await callAdmin(superT, 'cycle.set-snapshot-block', {
+    orgId: gamma.id, cycleId: cycle.id, snapshotVersion: 1, block: 'visibility',
+    data: { manager_rating_visible: 'after_publish', final_rating_visible: 'after_publish' },
+  });
+  check('snapshot visibility block saves', snap.status === 200);
+
+  const badVis = await callAdmin(superT, 'cycle.set-snapshot-block', {
+    orgId: gamma.id, cycleId: cycle.id, snapshotVersion: 2, block: 'visibility',
+    data: { manager_rating_visible: 'whenever', final_rating_visible: 'never' },
+  });
+  check('invalid visibility value rejected', badVis.status === 400);
+
+  const ac = await callAdmin(superT, 'cycle.set-admin-config', {
+    orgId: gamma.id, cycleId: cycle.id, adminConfigVersion: 1, block: 'bell',
+    data: { enabled: true, mode: 'org', preset: 'standard' },
+  });
+  check('admin-config bell block saves', ac.status === 200);
+}
+
+// --- lock stages ---
+{
+  await admin.from('appraisal_cycles').update({ status: 'active' }).eq('id', cycle.id);
+  const { data: cycNow } = await admin.from('appraisal_cycles').select('version').eq('id', cycle.id).single();
+  const locked = await callAdmin(superT, 'cycle.save-section', {
+    orgId: gamma.id, cycleId: cycle.id, cycleVersion: cycNow.version, section: 'perspectives', rows: [],
+  });
+  check('save-section locked once active', locked.status === 409 && locked.body.error.code === 'CYCLE_LOCKED');
+  const winLive = await callAdmin(superT, 'cycle.set-windows', {
+    orgId: gamma.id, cycleId: cycle.id, cycleVersion: cycNow.version,
+    windows: [{ key: 'acknowledgement', startsOn: '2028-04-10', endsOn: '2028-05-01' }],
+  });
+  check('windows still editable while active (calendar governs)', winLive.status === 200);
+  await admin.from('appraisal_cycles').update({ status: 'archived', archived_at: new Date().toISOString() }).eq('id', cycle.id);
+  const { data: cycArch } = await admin.from('appraisal_cycles').select('version').eq('id', cycle.id).single();
+  const winArch = await callAdmin(superT, 'cycle.set-windows', {
+    orgId: gamma.id, cycleId: cycle.id, cycleVersion: cycArch.version,
+    windows: [{ key: 'acknowledgement', startsOn: '2028-04-10', endsOn: '2028-05-01' }],
+  });
+  check('windows locked once archived', winArch.status === 409 && winArch.body.error.code === 'CYCLE_LOCKED');
+}
+
+// --- audit trail exists ---
+{
+  const { data: audits } = await admin.from('audit_logs')
+    .select('action').eq('organization_id', gamma.id);
+  check('audit rows written for admin actions', (audits ?? []).length >= 15);
+}
+
+// --- groups resave cascade-resets dependent per-group rows (documented behavior) ---
+{
+  const { data: beforeCa } = await admin.from('cycle_competency_assignments')
+    .select('id').eq('cycle_id', cycle.id).not('group_id', 'is', null);
+  check('group-scoped competency assignments exist before groups resave', (beforeCa ?? []).length === 1);
+  // cycle is archived by the lock-stage section; use a status flip to allow one more save
+  await admin.from('appraisal_cycles').update({ status: 'draft' }).eq('id', cycle.id);
+  const { data: cycV } = await admin.from('appraisal_cycles').select('version').eq('id', cycle.id).single();
+  const resave = await callAdmin(superT, 'cycle.save-section', {
+    orgId: gamma.id, cycleId: cycle.id, cycleVersion: cycV.version, section: 'groups',
+    rows: [{ name: 'Sales', targetLevel: 'kpi', ratingLevel: 'kpi' }],
+  });
+  check('groups resave succeeds', resave.status === 200);
+  const { data: afterCa } = await admin.from('cycle_competency_assignments')
+    .select('id').eq('cycle_id', cycle.id).not('group_id', 'is', null);
+  check('groups resave cascade-cleared group-scoped competency assignments', (afterCa ?? []).length === 0);
+  await admin.from('appraisal_cycles').update({ status: 'archived' }).eq('id', cycle.id);
+}
+
+// --- role denial inside one's own org ---
+{
+  const { data: acme } = await admin.from('organizations').select('id, version').eq('key', 'acme-test').single();
+  const ownOrg = await callAdmin(empT, 'org.update', {
+    orgId: acme.id, expectedVersion: acme.version, name: 'Employee Rename Attempt',
+  });
+  check('employee denied org.update in own org (role check)', ownOrg.status === 403 && ownOrg.body.error.code === 'FORBIDDEN');
+}
+
 console.log(`admin-check: PASS (${n} assertions)`);
