@@ -222,6 +222,11 @@ assert.ok(org, 'seed org missing — run seed-foundation.mjs first');
     p_actor: '00000000-0000-0000-0000-000000000000', p_rows: [],
   });
   check('authenticated user cannot call commit_roster_import_tx', rosterRpcErr?.code === '42501');
+  const { error: linkRpcErr } = await eveC.rpc('link_invited_member_tx', {
+    p_org: org.id, p_user: '00000000-0000-0000-0000-000000000000',
+    p_employee: '00000000-0000-0000-0000-000000000000', p_email: 'x@x.com', p_link: 'x', p_actor: '00000000-0000-0000-0000-000000000000',
+  });
+  check('authenticated user cannot call link_invited_member_tx', linkRpcErr?.code === '42501');
   const anon = anonClient();
   const { error: anonRpcErr } = await anon.rpc('create_organization_tx', {
     p_key: 'hacker-org', p_name: 'Hacker', p_actor: '00000000-0000-0000-0000-000000000000',

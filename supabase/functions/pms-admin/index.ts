@@ -4,6 +4,7 @@ import { cycleHandlers } from './cycles.ts';
 import { libraryHandlers } from './libraries.ts';
 import { importHandlers } from './imports.ts';
 import { participantHandlers } from './participants.ts';
+import { inviteHandlers } from './invites.ts';
 
 serveActions({
   'admin.whoami': (_payload, ctx) =>
@@ -13,4 +14,5 @@ serveActions({
   ...libraryHandlers,
   ...importHandlers,
   ...participantHandlers,
+  ...inviteHandlers,
 });

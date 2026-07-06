@@ -453,4 +453,23 @@ let goodRun;
   // stash pcycle id for Task 5/6 by re-reading in those sections via admin
 }
 
+// --- invites (uses the fresh participation cycle; re-derive it via admin) ---
+{
+  const { data: pcycle } = await admin.from('appraisal_cycles')
+    .select('id').eq('organization_id', gamma.id).eq('name', 'FY28 Participation Cycle').single();
+  // After Task 4, G100 (Bea) is still an active participant (only Rita/G101 was
+  // removed). This add is a no-op if already present; it just guarantees a target.
+  await callAdmin(superT, 'cycle.add-participants', { orgId: gamma.id, cycleId: pcycle.id, employeeCodes: ['G100'] });
+  const inv = await callAdmin(superT, 'cycle.invite-participants', { orgId: gamma.id, cycleId: pcycle.id });
+  check('invite-participants invites active PMS participants', inv.status === 200 && inv.body.data.invited >= 1);
+  const { data: bea } = await admin.from('employees').select('user_id').eq('organization_id', gamma.id).eq('employee_code', 'G100').single();
+  check('invited employee is now linked to a user', bea.user_id !== null);
+  const { data: member } = await admin.from('org_members').select('status').eq('organization_id', gamma.id).eq('user_id', bea.user_id).single();
+  check('invited member row is status invited', member.status === 'invited');
+  const { data: jobs } = await admin.from('email_jobs').select('template_key, status').eq('organization_id', gamma.id).eq('template_key', 'invite');
+  check('invite email job queued', (jobs ?? []).some((j) => j.status === 'queued'));
+  const reinvite = await callAdmin(superT, 'cycle.invite-participants', { orgId: gamma.id, cycleId: pcycle.id });
+  check('re-invite counts already-linked, no duplicate', reinvite.status === 200 && reinvite.body.data.alreadyLinked >= 1);
+}
+
 console.log(`admin-check: PASS (${n} assertions)`);
