@@ -63,10 +63,19 @@ async function replaceRows(
   return rows.length;
 }
 
+function assertNoDupes(values: (string | number)[], name: string, label: string) {
+  const seen = new Set<string>();
+  for (const v of values) {
+    const k = String(v);
+    if (seen.has(k)) throw new ApiError('BAD_REQUEST', `${name} has a duplicate ${label}: ${k}`, 400);
+    seen.add(k);
+  }
+}
+
 // ---------- per-section row builders ----------
 
 function perspectiveRows(orgId: string, cycleId: string, raw: unknown) {
-  return reqArray(raw, 'rows', 50).map((r, i) => {
+  const rows = reqArray(raw, 'rows', 50).map((r, i) => {
     const o = reqObject(r, `rows[${i}]`);
     return {
       organization_id: orgId, cycle_id: cycleId,
@@ -76,10 +85,12 @@ function perspectiveRows(orgId: string, cycleId: string, raw: unknown) {
       display_order: reqInt(o.displayOrder ?? i, `rows[${i}].displayOrder`),
     };
   });
+  assertNoDupes(rows.map((r) => r.name), 'rows', 'name');
+  return rows;
 }
 
 function targetTypeRows(orgId: string, cycleId: string, raw: unknown) {
-  return reqArray(raw, 'rows', 100).map((r, i) => {
+  const rows = reqArray(raw, 'rows', 100).map((r, i) => {
     const o = reqObject(r, `rows[${i}]`);
     return {
       organization_id: orgId, cycle_id: cycleId,
@@ -95,10 +106,12 @@ function targetTypeRows(orgId: string, cycleId: string, raw: unknown) {
       display_order: reqInt(o.displayOrder ?? i, `rows[${i}].displayOrder`),
     };
   });
+  assertNoDupes(rows.map((r) => r.target_type_key), 'rows', 'key');
+  return rows;
 }
 
 function ratingScaleLevelRows(orgId: string, cycleId: string, raw: unknown) {
-  return reqArray(raw, 'rows', 20).map((r, i) => {
+  const rows = reqArray(raw, 'rows', 20).map((r, i) => {
     const o = reqObject(r, `rows[${i}]`);
     return {
       organization_id: orgId, cycle_id: cycleId,
@@ -110,10 +123,12 @@ function ratingScaleLevelRows(orgId: string, cycleId: string, raw: unknown) {
       display_order: reqInt(o.displayOrder ?? i, `rows[${i}].displayOrder`),
     };
   });
+  assertNoDupes(rows.map((r) => r.point), 'rows', 'point');
+  return rows;
 }
 
 function autoRatingBandRows(orgId: string, cycleId: string, raw: unknown) {
-  return reqArray(raw, 'rows', 20).map((r, i) => {
+  const rows = reqArray(raw, 'rows', 20).map((r, i) => {
     const o = reqObject(r, `rows[${i}]`);
     const fromPercent = reqNumber(o.fromPercent, `rows[${i}].fromPercent`);
     const toPercent = reqNumber(o.toPercent, `rows[${i}].toPercent`);
@@ -126,10 +141,12 @@ function autoRatingBandRows(orgId: string, cycleId: string, raw: unknown) {
       score: reqNumber(o.score, `rows[${i}].score`),
     };
   });
+  assertNoDupes(rows.map((r) => r.from_percent), 'rows', 'fromPercent');
+  return rows;
 }
 
 function bellBandRows(orgId: string, cycleId: string, raw: unknown) {
-  return reqArray(raw, 'rows', 20).map((r, i) => {
+  const rows = reqArray(raw, 'rows', 20).map((r, i) => {
     const o = reqObject(r, `rows[${i}]`);
     return {
       organization_id: orgId, cycle_id: cycleId,
@@ -138,6 +155,8 @@ function bellBandRows(orgId: string, cycleId: string, raw: unknown) {
       tolerance_percent: reqNumber(o.tolerancePercent ?? 0, `rows[${i}].tolerancePercent`),
     };
   });
+  assertNoDupes(rows.map((r) => r.rating_point), 'rows', 'ratingPoint');
+  return rows;
 }
 
 async function cycleGroupMap(ctx: HandlerCtx, cycleId: string): Promise<Map<string, string>> {
@@ -197,7 +216,7 @@ async function competencyAssignmentRows(ctx: HandlerCtx, orgId: string, cycleId:
 }
 
 function parseGroups(orgId: string, cycleId: string, raw: unknown) {
-  return reqArray(raw, 'rows', 100).map((r, i) => {
+  const groups = reqArray(raw, 'rows', 100).map((r, i) => {
     const o = reqObject(r, `rows[${i}]`);
     return {
       row: {
@@ -226,6 +245,8 @@ function parseGroups(orgId: string, cycleId: string, raw: unknown) {
         }),
     };
   });
+  assertNoDupes(groups.map((g) => g.row.name), 'rows', 'group name');
+  return groups;
 }
 
 async function writeGroups(
