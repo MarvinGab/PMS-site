@@ -203,20 +203,20 @@ assert.ok(org, 'seed org missing — run seed-foundation.mjs first');
 
 // --- creation RPCs are backend-only (never client-invokable) ---
 {
+  // Discriminating: EXECUTE permission is checked before the function body runs,
+  // so a genuine denial is SQLSTATE 42501. A vacuous "some error happened" check
+  // would pass even in a vulnerable system when the body ran and tripped an FK
+  // (23503) or the working-cycle unique index (23505) — so we require 42501.
   const { client: eveC } = await signIn(USERS.employee, PASSWORD);
   const { error: orgRpcErr } = await eveC.rpc('create_organization_tx', {
     p_key: 'hacker-org', p_name: 'Hacker', p_actor: '00000000-0000-0000-0000-000000000000',
   });
-  check('authenticated user cannot call create_organization_tx', orgRpcErr !== null);
+  check('authenticated user cannot call create_organization_tx', orgRpcErr?.code === '42501');
   const { error: cycRpcErr } = await eveC.rpc('create_cycle_draft_tx', {
     p_org: org.id, p_name: 'Hacker Cycle', p_period_label: null,
     p_framework: 'kra', p_actor: '00000000-0000-0000-0000-000000000000', p_actor_role: 'employee',
   });
-  // Discriminating: EXECUTE permission is checked before the function body runs,
-  // so a denial is 42501 — never the 23505 the working-cycle unique index would
-  // throw if a vulnerable system actually let the insert run.
-  check('authenticated user cannot call create_cycle_draft_tx',
-    cycRpcErr !== null && cycRpcErr.code !== '23505');
+  check('authenticated user cannot call create_cycle_draft_tx', cycRpcErr?.code === '42501');
   const anon = anonClient();
   const { error: anonRpcErr } = await anon.rpc('create_organization_tx', {
     p_key: 'hacker-org', p_name: 'Hacker', p_actor: '00000000-0000-0000-0000-000000000000',
