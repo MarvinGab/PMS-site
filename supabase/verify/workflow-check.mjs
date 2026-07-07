@@ -554,5 +554,11 @@ export const closeout = await setupCloseoutCycle();
   check('a resolved acknowledgement cannot be changed', afterResolved.status === 409 && afterResolved.body.error.code === 'ACK_RESOLVED');
 }
 
+// --- ack.get reflects the resolved concern ---
+{
+  const got = await callWorkflow(tokens.employee, 'ack.get', { orgId: closeout.orgId, cycleId: closeout.cycleId });
+  check('ack.get returns the employee\'s resolved acknowledgement', got.status === 200 && got.body.data.acknowledgement.decision === 'concern' && got.body.data.acknowledgement.resolution_status === 'explained');
+}
+
 // The end marker; later tasks append sections before this and bump the count.
 console.log(`workflow-check: PASS (${n} assertions)`);
