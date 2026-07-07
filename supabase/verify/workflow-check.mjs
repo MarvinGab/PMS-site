@@ -538,6 +538,9 @@ export const closeout = await setupCloseoutCycle();
   const finalView = await callWorkflow(tokens.employee, 'eval.get', { orgId: closeout.orgId, cycleId: closeout.cycleId, employeeId: closeout.emp.EMP002, stage: 'hr_final' });
   check('employee sees their final rating after publish', finalView.status === 200 && finalView.body.data.evaluation !== null);
 
+  const accept = await callWorkflow(tokens.employee, 'ack.accept', { orgId: closeout.orgId, cycleId: closeout.cycleId });
+  check('employee accepts their rating', accept.status === 200 && accept.body.data.acknowledgement.decision === 'accepted');
+
   const concern = await callWorkflow(tokens.employee, 'ack.raise-concern', { orgId: closeout.orgId, cycleId: closeout.cycleId, reason: 'Expected higher' });
   check('employee raises a concern', concern.status === 200 && concern.body.data.acknowledgement.decision === 'concern' && concern.body.data.acknowledgement.resolution_status === 'open');
 
