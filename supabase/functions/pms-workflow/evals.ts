@@ -170,7 +170,7 @@ export const evalHandlers: Record<string, Handler> = {
     const octx = await scoringContext(ctx, orgId, cycleId, employeeId);
 
     // Resolve the goal items for target lookups (only the plan's items).
-    const { data: plan } = await ctx.admin.from('employee_goal_plans').select('id').eq('cycle_id', cycleId).eq('employee_id', employeeId).maybeSingle();
+    const { data: plan } = await ctx.admin.from('employee_goal_plans').select('id').eq('cycle_id', cycleId).eq('employee_id', employeeId).eq('organization_id', orgId).maybeSingle();
     if (!plan) { console.error('save-scores plan missing after assertPrereqs'); throw new ApiError('DB_ERROR', 'Database error', 500); }
     const { data: goalItems } = await ctx.admin.from('employee_goal_items')
       .select('id, item_type, parent_item_id, weight, target_type_key, target_value').eq('plan_id', plan.id);
@@ -214,7 +214,7 @@ export const evalHandlers: Record<string, Handler> = {
     // Recompute overall from the persisted score rows.
     const overall = await recomputeOverall(ctx, orgId, evaluation.id, goalItems ?? [], octx);
     const overallComment = optString(payload.overallComment, 'overallComment', 4000);
-    const fresh = await ctx.versionedUpdate('evaluations', orgId, evaluation.id, evalVersion, {
+    await ctx.versionedUpdate('evaluations', orgId, evaluation.id, evalVersion, {
       overall_score: overall, overall_comment: overallComment,
     });
     await ctx.audit({ organizationId: orgId, cycleId, action: 'eval.save-scores', entityType: 'evaluation', entityId: evaluation.id, note: `${stage} overall=${overall}` });
