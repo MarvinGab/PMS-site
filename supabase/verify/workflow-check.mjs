@@ -150,5 +150,39 @@ export const fixture = await setupActiveCycle();
   check('a manager cannot edit as if it were their own missing plan', notMine.status === 404 || notMine.status === 409);
 }
 
+// --- submit → send-back → resubmit → approve → reopen ---
+{
+  const get = await callWorkflow(tokens.employee, 'goal.get-plan', { orgId: fixture.orgId, cycleId: fixture.cycleId });
+  let v = get.body.data.plan.version;
+
+  const submit = await callWorkflow(tokens.employee, 'goal.submit', { orgId: fixture.orgId, cycleId: fixture.cycleId, planVersion: v });
+  check('employee submits the plan', submit.status === 200 && submit.body.data.plan.status === 'submitted');
+  v = submit.body.data.plan.version;
+
+  const empApprove = await callWorkflow(tokens.employee, 'goal.approve', { orgId: fixture.orgId, cycleId: fixture.cycleId, employeeId: fixture.emp.EMP002, planVersion: v });
+  check('employee cannot approve their own plan', empApprove.status === 403);
+
+  const sendBack = await callWorkflow(tokens.manager, 'goal.send-back', { orgId: fixture.orgId, cycleId: fixture.cycleId, employeeId: fixture.emp.EMP002, planVersion: v, note: 'Tighten the churn target' });
+  check('manager sends the plan back with a note', sendBack.status === 200 && sendBack.body.data.plan.status === 'sent_back');
+  v = sendBack.body.data.plan.version;
+
+  const resubmit = await callWorkflow(tokens.employee, 'goal.submit', { orgId: fixture.orgId, cycleId: fixture.cycleId, planVersion: v });
+  check('employee resubmits after send-back', resubmit.status === 200 && resubmit.body.data.plan.status === 'submitted');
+  v = resubmit.body.data.plan.version;
+
+  const approve = await callWorkflow(tokens.manager, 'goal.approve', { orgId: fixture.orgId, cycleId: fixture.cycleId, employeeId: fixture.emp.EMP002, planVersion: v });
+  check('manager approves the plan', approve.status === 200 && approve.body.data.plan.status === 'approved');
+  v = approve.body.data.plan.version;
+
+  const mgrReopen = await callWorkflow(tokens.manager, 'goal.reopen', { orgId: fixture.orgId, cycleId: fixture.cycleId, employeeId: fixture.emp.EMP002, planVersion: v });
+  check('manager cannot reopen (HR only)', mgrReopen.status === 403);
+
+  const reopen = await callWorkflow(tokens.hr, 'goal.reopen', { orgId: fixture.orgId, cycleId: fixture.cycleId, employeeId: fixture.emp.EMP002, planVersion: v });
+  check('HR reopens the approved plan', reopen.status === 200 && reopen.body.data.plan.status === 'reopened');
+
+  const { data: events } = await admin.from('goal_workflow_events').select('event_type').eq('cycle_id', fixture.cycleId).eq('employee_id', fixture.emp.EMP002);
+  check('workflow events recorded (submitted/sent_back/submitted/approved/reopened)', (events ?? []).length >= 5);
+}
+
 // The end marker; later tasks append sections before this and bump the count.
 console.log(`workflow-check: PASS (${n} assertions)`);
