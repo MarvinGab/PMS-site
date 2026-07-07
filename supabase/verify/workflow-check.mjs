@@ -118,7 +118,7 @@ export const fixture = await setupActiveCycle();
   const hodView = await callWorkflow(tokens.hod, 'goal.get-plan', { orgId: fixture.orgId, cycleId: fixture.cycleId, employeeId: fixture.emp.EMP002 });
   check('HOD can view a mapped employee plan', hodView.status === 200);
 
-  // A non-manager peer cannot view someone else's plan. EMP003 (Harry) is EMP002's HOD, so use EMP001 viewing EMP003.
+  // Eve (EMP002) is not Mary's (EMP001) manager/HOD — the reverse relation exists — so this must 403.
   const denied = await callWorkflow(tokens.employee, 'goal.get-plan', { orgId: fixture.orgId, cycleId: fixture.cycleId, employeeId: fixture.emp.EMP001 });
   check('employee cannot view another employee plan', denied.status === 403);
 }

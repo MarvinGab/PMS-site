@@ -64,7 +64,14 @@ export const goalHandlers: Record<string, Handler> = {
       throw new ApiError('DB_ERROR', 'Database error', 500);
     }
 
-    const seeded = await seedItems(ctx, orgId, cycleId, plan.id, employeeId);
+    let seeded: number;
+    try {
+      seeded = await seedItems(ctx, orgId, cycleId, plan.id, employeeId);
+    } catch (err) {
+      // Seeding failed mid-way — remove the empty plan so a retry re-seeds cleanly.
+      await ctx.admin.from('employee_goal_plans').delete().eq('id', plan.id).eq('organization_id', orgId);
+      throw err;
+    }
     await ctx.audit({
       organizationId: orgId, cycleId, action: 'goal.ensure-plan',
       entityType: 'employee_goal_plan', entityId: plan.id, note: `seeded ${seeded} item(s)`,
@@ -79,16 +86,18 @@ export const goalHandlers: Record<string, Handler> = {
 async function seedItems(
   ctx: HandlerCtx, orgId: string, cycleId: string, planId: string, employeeId: string,
 ): Promise<number> {
-  const { data: assign } = await ctx.admin.from('cycle_participant_assignments')
-    .select('goal_library_id, prefill_dataset_id').eq('cycle_id', cycleId).eq('employee_id', employeeId).maybeSingle();
+  const { data: assign, error: aErr } = await ctx.admin.from('cycle_participant_assignments')
+    .select('goal_library_id, prefill_dataset_id').eq('cycle_id', cycleId).eq('employee_id', employeeId).eq('organization_id', orgId).maybeSingle();
+  if (aErr) { console.error('seed assign', aErr); throw new ApiError('DB_ERROR', 'Database error', 500); }
   if (!assign) return 0;
 
   let seeded = 0;
 
   // 1) Library KRA/KPI tree (only if the library is active).
   if (assign.goal_library_id) {
-    const { data: lib } = await ctx.admin.from('goal_libraries')
-      .select('id, status').eq('id', assign.goal_library_id).maybeSingle();
+    const { data: lib, error: libErr } = await ctx.admin.from('goal_libraries')
+      .select('id, status').eq('id', assign.goal_library_id).eq('organization_id', orgId).maybeSingle();
+    if (libErr) { console.error('seed lib', libErr); throw new ApiError('DB_ERROR', 'Database error', 500); }
     if (lib && lib.status === 'active') {
       const { data: libItems } = await ctx.admin.from('goal_library_items')
         .select().eq('goal_library_id', assign.goal_library_id).order('display_order');
@@ -119,12 +128,15 @@ async function seedItems(
 
   // 2) Prefill rows for this employee's code (only if the dataset is active).
   if (assign.prefill_dataset_id) {
-    const { data: ds } = await ctx.admin.from('prefill_datasets')
-      .select('id, status').eq('id', assign.prefill_dataset_id).maybeSingle();
-    const { data: emp } = await ctx.admin.from('employees').select('employee_code').eq('id', employeeId).single();
+    const { data: ds, error: dsErr } = await ctx.admin.from('prefill_datasets')
+      .select('id, status').eq('id', assign.prefill_dataset_id).eq('organization_id', orgId).maybeSingle();
+    if (dsErr) { console.error('seed ds', dsErr); throw new ApiError('DB_ERROR', 'Database error', 500); }
+    const { data: emp, error: empErr } = await ctx.admin.from('employees').select('employee_code').eq('id', employeeId).single();
+    if (empErr) { console.error('seed emp', empErr); throw new ApiError('DB_ERROR', 'Database error', 500); }
     if (ds && ds.status === 'active' && emp) {
-      const { data: pf } = await ctx.admin.from('prefill_dataset_items')
+      const { data: pf, error: pfErr } = await ctx.admin.from('prefill_dataset_items')
         .select().eq('prefill_dataset_id', assign.prefill_dataset_id).eq('employee_code', emp.employee_code).order('display_order');
+      if (pfErr) { console.error('seed pf', pfErr); throw new ApiError('DB_ERROR', 'Database error', 500); }
       for (const it of pf ?? []) {
         // Prefill rows are flat KRA(+optional KPI title) — seed the KRA; if kpi_title present, seed a child KPI.
         const { data: kraRow, error } = await ctx.admin.from('employee_goal_items').insert({
