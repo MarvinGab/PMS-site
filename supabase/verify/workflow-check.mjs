@@ -123,5 +123,32 @@ export const fixture = await setupActiveCycle();
   check('employee cannot view another employee plan', denied.status === 403);
 }
 
+// --- goal.save-items: validates rules, replaces the tree ---
+{
+  const get = await callWorkflow(tokens.employee, 'goal.get-plan', { orgId: fixture.orgId, cycleId: fixture.cycleId });
+  const v = get.body.data.plan.version;
+  // A valid replacement: 2 KRAs (60/40) each with 1 KPI (100).
+  const goodItems = [
+    { key: 'k1', itemType: 'kra', title: 'Revenue', weight: 60, displayOrder: 0 },
+    { key: 'k1a', itemType: 'kpi', parentKey: 'k1', title: 'New ARR', weight: 100, displayOrder: 1 },
+    { key: 'k2', itemType: 'kra', title: 'Retention', weight: 40, displayOrder: 2 },
+    { key: 'k2a', itemType: 'kpi', parentKey: 'k2', title: 'Churn', weight: 100, displayOrder: 3 },
+  ];
+  const save = await callWorkflow(tokens.employee, 'goal.save-items', { orgId: fixture.orgId, cycleId: fixture.cycleId, planVersion: v, items: goodItems });
+  check('save-items replaces the goal tree', save.status === 200 && save.body.data.items.length === 4);
+
+  const badWeights = await callWorkflow(tokens.employee, 'goal.save-items', {
+    orgId: fixture.orgId, cycleId: fixture.cycleId, planVersion: save.body.data.plan.version,
+    items: [{ key: 'k1', itemType: 'kra', title: 'X', weight: 50, displayOrder: 0 }, { key: 'k1a', itemType: 'kpi', parentKey: 'k1', title: 'Y', weight: 100, displayOrder: 1 }],
+  });
+  check('save-items rejects KRA weights not summing to 100', badWeights.status === 422 && badWeights.body.error.code === 'GOAL_RULES');
+
+  const stale = await callWorkflow(tokens.employee, 'goal.save-items', { orgId: fixture.orgId, cycleId: fixture.cycleId, planVersion: 1, items: goodItems });
+  check('save-items rejects a stale plan version', stale.status === 409 && stale.body.error.code === 'CONFLICT');
+
+  const notMine = await callWorkflow(tokens.manager, 'goal.save-items', { orgId: fixture.orgId, cycleId: fixture.cycleId, planVersion: 1, items: goodItems });
+  check('a manager cannot edit as if it were their own missing plan', notMine.status === 404 || notMine.status === 409);
+}
+
 // The end marker; later tasks append sections before this and bump the count.
 console.log(`workflow-check: PASS (${n} assertions)`);

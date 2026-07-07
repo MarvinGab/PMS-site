@@ -1,7 +1,8 @@
 import { ApiError, Handler, HandlerCtx } from '../_shared/kernel.ts';
-import { optUuid, reqUuid } from '../_shared/validate.ts';
+import { optNumber, optString, optUuid, reqArray, reqEnum, reqInt, reqObject, reqString, reqUuid } from '../_shared/validate.ts';
 import { callerEmployeeId, isHodOf, isHrOrSuper, manages } from '../_shared/scope.ts';
-import { loadActiveCycle } from '../_shared/phase.ts';
+import { loadActiveCycle, requireWindowOrHr } from '../_shared/phase.ts';
+import { GoalNode, GoalRules, validateGoalTree } from './goalrules.ts';
 
 async function readPlanBundle(ctx: HandlerCtx, orgId: string, cycleId: string, employeeId: string) {
   const { data: plan, error } = await ctx.admin.from('employee_goal_plans')
@@ -22,6 +23,26 @@ async function canAccessTarget(ctx: HandlerCtx, orgId: string, targetEmployeeId:
   if (await manages(ctx, orgId, targetEmployeeId)) return true;
   if (await isHodOf(ctx, orgId, targetEmployeeId)) return true;
   return false;
+}
+
+const EDITABLE_PLAN = ['draft', 'sent_back', 'reopened'];
+
+async function mergedGoalRules(ctx: HandlerCtx, cycleId: string, groupId: string | null): Promise<GoalRules> {
+  const { data } = await ctx.admin.from('cycle_goal_rules')
+    .select().eq('cycle_id', cycleId);
+  const rows = data ?? [];
+  const groupRule = groupId ? rows.find((r) => r.group_id === groupId) : null;
+  const defaultRule = rows.find((r) => r.group_id === null);
+  return (groupRule ?? defaultRule ?? {
+    min_kras: null, max_kras: null, min_kpis_per_kra: null, max_kpis_per_kra: null,
+    min_kra_weight: null, max_kra_weight: null, min_kpi_weight: null,
+  }) as GoalRules;
+}
+
+async function participantGroupId(ctx: HandlerCtx, cycleId: string, employeeId: string): Promise<string | null> {
+  const { data } = await ctx.admin.from('cycle_participant_assignments')
+    .select('group_id').eq('cycle_id', cycleId).eq('employee_id', employeeId).maybeSingle();
+  return data?.group_id ?? null;
 }
 
 export const goalHandlers: Record<string, Handler> = {
@@ -78,6 +99,82 @@ export const goalHandlers: Record<string, Handler> = {
     });
     const bundle = await readPlanBundle(ctx, orgId, cycleId, employeeId);
     return { ...bundle, seeded };
+  },
+
+  'goal.save-items': async (payload, ctx) => {
+    const orgId = reqUuid(payload.orgId, 'orgId');
+    const cycleId = reqUuid(payload.cycleId, 'cycleId');
+    const planVersion = reqInt(payload.planVersion, 'planVersion');
+    await loadActiveCycle(ctx, orgId, cycleId);
+    const employeeId = callerEmployeeId(ctx, orgId);
+    await requireWindowOrHr(ctx, orgId, cycleId, 'goal_creation');
+
+    const { data: plan, error: pErr } = await ctx.admin.from('employee_goal_plans')
+      .select().eq('cycle_id', cycleId).eq('employee_id', employeeId).eq('organization_id', orgId).maybeSingle();
+    if (pErr) { console.error('save-items plan', pErr); throw new ApiError('DB_ERROR', 'Database error', 500); }
+    if (!plan) throw new ApiError('NOT_FOUND', 'No goal plan — call ensure-plan first', 404);
+    if (!EDITABLE_PLAN.includes(plan.status)) throw new ApiError('PLAN_LOCKED', `Goals can't be edited once the plan is ${plan.status}`, 409);
+
+    // The group must permit self-editing (unless HR is acting).
+    const groupId = await participantGroupId(ctx, cycleId, employeeId);
+    if (!isHrOrSuper(ctx, orgId) && groupId) {
+      const { data: group } = await ctx.admin.from('cycle_groups').select('can_edit_own_goals').eq('id', groupId).maybeSingle();
+      if (group && group.can_edit_own_goals === false) throw new ApiError('EDIT_NOT_ALLOWED', 'Your group does not allow editing goals', 403);
+    }
+
+    // Parse + validate the incoming tree (payload keys are caller-local).
+    const rawItems = reqArray(payload.items, 'items', 200).map((r, i) => {
+      const o = reqObject(r, `items[${i}]`);
+      return {
+        key: reqString(o.key, `items[${i}].key`, 120),
+        itemType: reqEnum(o.itemType, `items[${i}].itemType`, ['kra', 'kpi']),
+        parentKey: optString(o.parentKey, `items[${i}].parentKey`, 120),
+        title: reqString(o.title, `items[${i}].title`, 300),
+        description: optString(o.description, `items[${i}].description`, 2000),
+        perspective: optString(o.perspective, `items[${i}].perspective`, 120),
+        weight: optNumber(o.weight, `items[${i}].weight`),
+        target_type_key: optString(o.targetTypeKey, `items[${i}].targetTypeKey`, 60),
+        target_value: optString(o.targetValue, `items[${i}].targetValue`, 200),
+        display_order: reqInt(o.displayOrder ?? i, `items[${i}].displayOrder`),
+      };
+    });
+    const keys = rawItems.map((r) => r.key);
+    if (new Set(keys).size !== keys.length) throw new ApiError('BAD_REQUEST', 'items contain duplicate keys', 400);
+    const rules = await mergedGoalRules(ctx, cycleId, groupId);
+    validateGoalTree(rawItems as GoalNode[], rules);
+
+    // Claim the version token first (so a stale editor is rejected before we rewrite rows).
+    const freshPlan = await ctx.versionedUpdate('employee_goal_plans', orgId, plan.id, planVersion, { status: plan.status });
+
+    // Full replace: delete then two-pass insert (KRAs first to resolve KPI parentKey).
+    await ctx.admin.from('employee_goal_items').delete().eq('plan_id', plan.id).eq('organization_id', orgId);
+    const keyToId = new Map<string, string>();
+    for (const it of rawItems.filter((r) => r.itemType === 'kra')) {
+      const { data: row, error } = await ctx.admin.from('employee_goal_items').insert({
+        organization_id: orgId, cycle_id: cycleId, plan_id: plan.id, employee_id: employeeId,
+        item_type: 'kra', title: it.title, description: it.description, perspective: it.perspective,
+        weight: it.weight, target_type_key: it.target_type_key, target_value: it.target_value,
+        source: 'employee', display_order: it.display_order,
+      }).select('id').single();
+      if (error) { console.error('save kra', error); throw new ApiError('DB_ERROR', 'Database error', 500); }
+      keyToId.set(it.key, row.id);
+    }
+    for (const it of rawItems.filter((r) => r.itemType === 'kpi')) {
+      const parentId = it.parentKey ? keyToId.get(it.parentKey) ?? null : null;
+      const { error } = await ctx.admin.from('employee_goal_items').insert({
+        organization_id: orgId, cycle_id: cycleId, plan_id: plan.id, employee_id: employeeId,
+        item_type: 'kpi', parent_item_id: parentId, title: it.title, description: it.description,
+        perspective: it.perspective, weight: it.weight, target_type_key: it.target_type_key,
+        target_value: it.target_value, source: 'employee', display_order: it.display_order,
+      });
+      if (error) { console.error('save kpi', error); throw new ApiError('DB_ERROR', 'Database error', 500); }
+    }
+    await ctx.audit({
+      organizationId: orgId, cycleId, action: 'goal.save-items',
+      entityType: 'employee_goal_plan', entityId: plan.id, note: `${rawItems.length} item(s)`,
+    });
+    const { data: items } = await ctx.admin.from('employee_goal_items').select().eq('plan_id', plan.id).order('display_order');
+    return { plan: freshPlan, items: items ?? [] };
   },
 };
 
