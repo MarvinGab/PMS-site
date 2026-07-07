@@ -35,6 +35,14 @@
 - Verify counts at branch start: `admin-check` 86, `rls-check` 55, `workflow-check` 55. This plan grows `workflow-check` AND `admin-check`; each task states its expected totals.
 - **Go-live note (carry forward, unchanged):** Supabase Auth signups must be disabled manually in the dashboard before production — not automatable here.
 
+## Carried Over From Plan 3b (deferred items — status in this plan)
+
+- **Manual/calibrated score not validated against the rating scale** → CLOSED in Task 2: `calibration.adjust` rejects an `afterScore` outside the cycle's scale range (`BAD_REQUEST`). (3b's `eval.save-scores` manual path is still unbounded — a later hardening pass, not this plan.)
+- **Competency-path integration test** (seed→save→blend→overall with competencies enabled, untested server-side) → STILL DEFERRED — belongs to a scoring-hardening pass, not the closeout flow.
+- **Non-atomic multi-row `save-scores`** (concurrent-editor window) → STILL DEFERRED — pre-existing 3b behavior, out of 3c scope.
+- **`hr_final` requires only `manager` submitted (not `hod`)** → BY DESIGN, unchanged.
+- **Employee never sees the `hod` stage via `eval.get`** → BY DESIGN, unchanged; publishing (Task 3) unblocks only the employee's own `manager`/`hr_final` view.
+
 ---
 
 ### Task 1: Pure bell-curve engine
@@ -211,6 +219,21 @@ async function loadReviewCycle(ctx: HandlerCtx, orgId: string, cycleId: string) 
   return cycle;
 }
 
+// Guard a calibrated score against the cycle's rating scale (closes a 3b deferral: an
+// unbounded afterScore would store garbage and skew the bell curve). No scale defined → no bound.
+async function assertScoreInScale(ctx: HandlerCtx, orgId: string, cycleId: string, afterScore: number) {
+  const { data: pts, error } = await ctx.admin.from('cycle_rating_scale_levels')
+    .select('point').eq('cycle_id', cycleId).eq('organization_id', orgId);
+  if (error) { console.error('assertScoreInScale', error); throw new ApiError('DB_ERROR', 'Database error', 500); }
+  const points = (pts ?? []).map((p) => Number(p.point));
+  if (points.length === 0) return;
+  const lo = Math.min(...points);
+  const hi = Math.max(...points);
+  if (afterScore < lo || afterScore > hi) {
+    throw new ApiError('BAD_REQUEST', `afterScore must be within the rating scale (${lo}–${hi})`, 400);
+  }
+}
+
 export const calibrationHandlers: Record<string, Handler> = {
   'calibration.adjust': async (payload, ctx) => {
     const orgId = reqUuid(payload.orgId, 'orgId');
@@ -228,6 +251,7 @@ export const calibrationHandlers: Record<string, Handler> = {
       }
     }
     await loadReviewCycle(ctx, orgId, cycleId);
+    await assertScoreInScale(ctx, orgId, cycleId, afterScore);
 
     const { data: evaluation, error: eErr } = await ctx.admin.from('evaluations')
       .select().eq('cycle_id', cycleId).eq('employee_id', employeeId).eq('stage', stage).eq('organization_id', orgId).maybeSingle();
@@ -331,6 +355,10 @@ export const closeout = await setupCloseoutCycle();
   const empCal = await callWorkflow(tokens.employee, 'calibration.adjust', { orgId: closeout.orgId, cycleId: closeout.cycleId, employeeId: closeout.emp.EMP002, stage: 'hr_final', evalVersion: 1, afterScore: 5 });
   check('employee cannot calibrate', empCal.status === 403);
 
+  // afterScore outside the cycle's rating scale (2–5) is rejected before any write.
+  const oob = await callWorkflow(tokens.hr, 'calibration.adjust', { orgId: closeout.orgId, cycleId: closeout.cycleId, employeeId: closeout.emp.EMP002, stage: 'hr_final', evalVersion: 1, afterScore: 99 });
+  check('calibration rejects a score outside the rating scale', oob.status === 400 && oob.body.error.code === 'BAD_REQUEST');
+
   const { data: hrEval } = await admin.from('evaluations').select('id, version').eq('cycle_id', closeout.cycleId).eq('employee_id', closeout.emp.EMP002).eq('stage', 'hr_final').single();
   const hrCal = await callWorkflow(tokens.hr, 'calibration.adjust', { orgId: closeout.orgId, cycleId: closeout.cycleId, employeeId: closeout.emp.EMP002, stage: 'hr_final', evalVersion: hrEval.version, afterScore: 3 });
   check('HR calibrates the hr_final stage', hrCal.status === 200 && Number(hrCal.body.data.evaluation.overall_score) === 3);
@@ -340,7 +368,7 @@ export const closeout = await setupCloseoutCycle();
 - [ ] **Step 5: Run the check**
 
 Run: `node supabase/verify/seed-foundation.mjs && node supabase/verify/workflow-check.mjs`
-Expected: `workflow-check: PASS (59 assertions)` (55 + 4). (Trust the printed `n`; recount if it differs.)
+Expected: `workflow-check: PASS (60 assertions)` (55 + 5). (Trust the printed `n`; recount if it differs.)
 
 - [ ] **Step 6: Commit**
 
@@ -698,7 +726,7 @@ Before the final `console.log`, append (this publishes the closeout cycle via th
 - [ ] **Step 6: Run the check**
 
 Run: `node supabase/verify/seed-foundation.mjs && node supabase/verify/workflow-check.mjs`
-Expected: `workflow-check: PASS (66 assertions)` (59 + 7).
+Expected: `workflow-check: PASS (67 assertions)` (60 + 7).
 
 - [ ] **Step 7: Commit**
 
@@ -733,7 +761,7 @@ The accepted-decision happy path and the resolved-lock path are both already cov
 - [ ] **Step 2: Run the full gate**
 
 Run: `node supabase/verify/run-all.mjs`
-Expected: all six scripts pass — `admin-check: PASS (93 assertions)`, `workflow-check: PASS (67 assertions)` (66 + 1) — final `FOUNDATION SMOKE: ALL PASS`, exit 0. (Run in background if it exceeds the 2-minute foreground limit.)
+Expected: all six scripts pass — `admin-check: PASS (93 assertions)`, `workflow-check: PASS (68 assertions)` (67 + 1) — final `FOUNDATION SMOKE: ALL PASS`, exit 0. (Run in background if it exceeds the 2-minute foreground limit.)
 
 - [ ] **Step 3: Run lint**
 
