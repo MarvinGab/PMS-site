@@ -524,5 +524,32 @@ export const closeout = await setupCloseoutCycle();
   check('HR calibrates the hr_final stage', hrCal.status === 200 && Number(hrCal.body.data.evaluation.overall_score) === 3);
 }
 
+// --- publish the closeout cycle, then employee accept / raise-concern / HR resolve ---
+{
+  const superT = tokens.superadmin; const hrT = tokens.hr;
+  // Before publish: acceptance is blocked (NOT_PUBLISHED).
+  const early = await callWorkflow(tokens.employee, 'ack.accept', { orgId: closeout.orgId, cycleId: closeout.cycleId });
+  check('accept blocked before publish', early.status === 409 && early.body.error.code === 'NOT_PUBLISHED');
+
+  const pub = await callAdmin(superT, 'publish.publish', { orgId: closeout.orgId, cycleId: closeout.cycleId });
+  check('closeout cycle publishes (within tolerance)', pub.status === 200 && pub.body.data.cycle.status === 'published');
+
+  // Now the employee can see their final rating (3b visibility seam).
+  const finalView = await callWorkflow(tokens.employee, 'eval.get', { orgId: closeout.orgId, cycleId: closeout.cycleId, employeeId: closeout.emp.EMP002, stage: 'hr_final' });
+  check('employee sees their final rating after publish', finalView.status === 200 && finalView.body.data.evaluation !== null);
+
+  const concern = await callWorkflow(tokens.employee, 'ack.raise-concern', { orgId: closeout.orgId, cycleId: closeout.cycleId, reason: 'Expected higher' });
+  check('employee raises a concern', concern.status === 200 && concern.body.data.acknowledgement.decision === 'concern' && concern.body.data.acknowledgement.resolution_status === 'open');
+
+  const otherResolve = await callAdmin(tokens.employee, 'concern.resolve', { orgId: closeout.orgId, cycleId: closeout.cycleId, employeeId: closeout.emp.EMP002, resolution: 'explained', note: 'x' });
+  check('employee cannot resolve a concern', otherResolve.status === 403);
+
+  const resolve = await callAdmin(hrT, 'concern.resolve', { orgId: closeout.orgId, cycleId: closeout.cycleId, employeeId: closeout.emp.EMP002, resolution: 'explained', note: 'Discussed in 1:1' });
+  check('HR resolves the concern (explained)', resolve.status === 200 && resolve.body.data.acknowledgement.resolution_status === 'explained');
+
+  const afterResolved = await callWorkflow(tokens.employee, 'ack.accept', { orgId: closeout.orgId, cycleId: closeout.cycleId });
+  check('a resolved acknowledgement cannot be changed', afterResolved.status === 409 && afterResolved.body.error.code === 'ACK_RESOLVED');
+}
+
 // The end marker; later tasks append sections before this and bump the count.
 console.log(`workflow-check: PASS (${n} assertions)`);

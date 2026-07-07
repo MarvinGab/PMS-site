@@ -3,6 +3,7 @@ import { goalHandlers } from './goals.ts';
 import { goalFlowHandlers } from './goalflow.ts';
 import { evalHandlers } from './evals.ts';
 import { calibrationHandlers } from './calibration.ts';
+import { ackHandlers } from './acknowledge.ts';
 
 serveActions({
   'workflow.whoami': (_payload, ctx) =>
@@ -11,4 +12,5 @@ serveActions({
   ...goalFlowHandlers,
   ...evalHandlers,
   ...calibrationHandlers,
+  ...ackHandlers,
 });
