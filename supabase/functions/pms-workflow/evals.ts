@@ -1,6 +1,6 @@
 import { ApiError, Handler, HandlerCtx } from '../_shared/kernel.ts';
 import { optUuid, reqEnum, reqUuid } from '../_shared/validate.ts';
-import { callerEmployeeId, isHodOf, isHrOrSuper, manages } from '../_shared/scope.ts';
+import { callerEmployeeId, callerEmployeeIdOrNull, isHodOf, isHrOrSuper, manages } from '../_shared/scope.ts';
 
 export const STAGES = ['self', 'manager', 'hod', 'hr_final'];
 export const STAGE_WINDOW: Record<string, string> = {
@@ -64,7 +64,7 @@ async function readEvalBundle(ctx: HandlerCtx, orgId: string, cycleId: string, e
 // Score-visibility for reading someone else's manager/hr_final stage (mirrors RLS stage_visible).
 async function visibleToReader(ctx: HandlerCtx, orgId: string, cycleId: string, employeeId: string, stage: string): Promise<boolean> {
   if (isHrOrSuper(ctx, orgId)) return true;
-  const me = ctx.memberships.find((m) => m.organizationId === orgId)?.employeeId ?? null;
+  const me = callerEmployeeIdOrNull(ctx, orgId);
   const isOwn = me === employeeId;
   const isMgr = await manages(ctx, orgId, employeeId);
   const isHod = await isHodOf(ctx, orgId, employeeId);
@@ -75,11 +75,11 @@ async function visibleToReader(ctx: HandlerCtx, orgId: string, cycleId: string, 
     if (!isOwn) return false;
     // own view of manager/final: gated by the snapshot visibility + publication
     const key = stage === 'manager' ? 'manager_rating_visible' : 'final_rating_visible';
-    const { data: snap } = await ctx.admin.from('cycle_config_snapshots').select('snapshot').eq('cycle_id', cycleId).maybeSingle();
+    const { data: snap } = await ctx.admin.from('cycle_config_snapshots').select('snapshot').eq('cycle_id', cycleId).eq('organization_id', orgId).maybeSingle();
     const v = (snap?.snapshot?.visibility ?? {})[key] ?? 'after_publish';
     if (v === 'never') return false;
     if (v === 'immediate') return true;
-    const { data: pub } = await ctx.admin.from('cycle_publications').select('id').eq('cycle_id', cycleId).is('revoked_at', null).limit(1);
+    const { data: pub } = await ctx.admin.from('cycle_publications').select('id').eq('cycle_id', cycleId).eq('organization_id', orgId).is('revoked_at', null).limit(1);
     return (pub ?? []).length > 0;
   }
   return false;
