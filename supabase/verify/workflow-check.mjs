@@ -172,7 +172,7 @@ export async function setupEvalCycle() {
   return { orgId: org.id, cycleId: cycle.id, emp, planId: eplan.id };
 }
 
-// Fresh cycle in `review` with EMP002's hr_final evaluation submitted (overall 3.8),
+// Fresh cycle in `review` with EMP002's hr_final evaluation submitted (overall 4),
 // bell bands, and a snapshot enabling final acceptance — the closeout starting point.
 export async function setupCloseoutCycle() {
   const { data: org } = await admin.from('organizations').select('id').eq('key', 'acme-test').single();
@@ -511,6 +511,9 @@ export const closeout = await setupCloseoutCycle();
 
   const empCal = await callWorkflow(tokens.employee, 'calibration.adjust', { orgId: closeout.orgId, cycleId: closeout.cycleId, employeeId: closeout.emp.EMP002, stage: 'hr_final', evalVersion: 1, afterScore: 5 });
   check('employee cannot calibrate', empCal.status === 403);
+
+  const hodEscalate = await callWorkflow(tokens.hod, 'calibration.adjust', { orgId: closeout.orgId, cycleId: closeout.cycleId, employeeId: closeout.emp.EMP002, stage: 'hr_final', evalVersion: 1, afterScore: 5 });
+  check('HOD cannot calibrate the hr_final stage (no escalation)', hodEscalate.status === 403);
 
   // afterScore outside the cycle's rating scale (2–5) is rejected before any write.
   const oob = await callWorkflow(tokens.hr, 'calibration.adjust', { orgId: closeout.orgId, cycleId: closeout.cycleId, employeeId: closeout.emp.EMP002, stage: 'hr_final', evalVersion: 1, afterScore: 99 });

@@ -53,14 +53,17 @@ export const calibrationHandlers: Record<string, Handler> = {
     if (!evaluation) throw new ApiError('NOT_FOUND', 'Evaluation not found', 404);
     if (evaluation.status !== 'submitted') throw new ApiError('EVAL_NOT_SUBMITTED', 'Only a submitted evaluation can be calibrated', 409);
 
-    // Append-only before/after record.
+    // Apply the version-checked score change FIRST — the authoritative compare-and-swap.
+    // A stale evalVersion throws CONFLICT here, before any audit row is written.
+    const fresh = await ctx.versionedUpdate('evaluations', orgId, evaluation.id, evalVersion, { overall_score: afterScore });
+
+    // Only after the change lands, append the immutable before/after audit record.
     const { data: calibration, error: cErr } = await ctx.admin.from('calibrations').insert({
       organization_id: orgId, cycle_id: cycleId, employee_id: employeeId, stage,
       before_score: evaluation.overall_score, after_score: afterScore, note, actor_user_id: ctx.userId,
     }).select().single();
     if (cErr) { console.error('calibration insert', cErr); throw new ApiError('DB_ERROR', 'Database error', 500); }
 
-    const fresh = await ctx.versionedUpdate('evaluations', orgId, evaluation.id, evalVersion, { overall_score: afterScore });
     await ctx.audit({
       organizationId: orgId, cycleId, action: 'calibration.adjust', entityType: 'evaluation', entityId: evaluation.id,
       before: { overall_score: evaluation.overall_score }, after: { overall_score: afterScore }, note: `${stage} calibrated`,
