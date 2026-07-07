@@ -550,4 +550,66 @@ let goodRun;
   check('re-activating an active cycle is rejected', reactivate.status === 409 && reactivate.body.error.code === 'CYCLE_LOCKED');
 }
 
+// --- publishing: bell-check, publish (blocked/forced), revoke ---
+{
+  // Build a review-status gamma cycle with 2 participants who both have submitted hr_final finals.
+  await admin.from('appraisal_cycles').update({ status: 'archived', archived_at: new Date().toISOString() }).eq('organization_id', gamma.id).neq('status', 'archived');
+  const { data: pcycle } = await admin.from('appraisal_cycles').insert({ organization_id: gamma.id, name: 'Publish Cycle', framework_id: 'kra', status: 'review' }).select().single();
+  await admin.from('cycle_rating_scale_levels').insert([
+    { organization_id: gamma.id, cycle_id: pcycle.id, point: 3, label: 'Meets', range_from: 60, range_to: 89 },
+    { organization_id: gamma.id, cycle_id: pcycle.id, point: 5, label: 'Exceeds', range_from: 90, range_to: 200 },
+  ]);
+  // Bell bands demanding a 50/50 split with 0 tolerance — two people both at 5 will VIOLATE.
+  await admin.from('cycle_bell_curve_bands').insert([
+    { organization_id: gamma.id, cycle_id: pcycle.id, rating_point: 3, target_percent: 50, tolerance_percent: 0 },
+    { organization_id: gamma.id, cycle_id: pcycle.id, rating_point: 5, target_percent: 50, tolerance_percent: 0 },
+  ]);
+  // Two employees, both participants, each a submitted hr_final at score 5.
+  const empIds = [];
+  for (const code of ['PUB1', 'PUB2']) {
+    const { data: e } = await admin.from('employees').upsert({ organization_id: gamma.id, employee_code: code, full_name: code, email: `${code.toLowerCase()}@x.com`, group_name: 'Sales' }, { onConflict: 'organization_id,employee_code' }).select().single();
+    empIds.push(e.id);
+    await admin.from('cycle_participants').insert({ organization_id: gamma.id, cycle_id: pcycle.id, employee_id: e.id });
+    await admin.from('evaluations').insert({ organization_id: gamma.id, cycle_id: pcycle.id, employee_id: e.id, stage: 'hr_final', status: 'submitted', overall_score: 5, submitted_at: new Date().toISOString() });
+  }
+
+  // A third active participant with NO submitted final must block publish (FINALS_INCOMPLETE).
+  const { data: pub3 } = await admin.from('employees').upsert({ organization_id: gamma.id, employee_code: 'PUB3', full_name: 'PUB3', email: 'pub3@x.com', group_name: 'Sales' }, { onConflict: 'organization_id,employee_code' }).select().single();
+  await admin.from('cycle_participants').insert({ organization_id: gamma.id, cycle_id: pcycle.id, employee_id: pub3.id });
+  const incomplete = await callAdmin(superT, 'publish.publish', { orgId: gamma.id, cycleId: pcycle.id });
+  check('publish blocked when a participant has no submitted final', incomplete.status === 409 && incomplete.body.error.code === 'FINALS_INCOMPLETE');
+  // Give PUB3 a submitted final at 3 so the remaining assertions proceed (distribution 2@5 + 1@3 is still a bell violation).
+  await admin.from('evaluations').insert({ organization_id: gamma.id, cycle_id: pcycle.id, employee_id: pub3.id, stage: 'hr_final', status: 'submitted', overall_score: 3, submitted_at: new Date().toISOString() });
+
+  const bell = await callAdmin(superT, 'publish.bell-check', { orgId: gamma.id, cycleId: pcycle.id });
+  check('bell-check reports out of tolerance (both at 5)', bell.status === 200 && bell.body.data.withinTolerance === false);
+
+  const blocked = await callAdmin(superT, 'publish.publish', { orgId: gamma.id, cycleId: pcycle.id });
+  check('publish blocked by bell-curve violation', blocked.status === 409 && blocked.body.error.code === 'BELL_CURVE_VIOLATION');
+
+  const empBell = await callAdmin(empT, 'publish.bell-check', { orgId: gamma.id, cycleId: pcycle.id });
+  check('employee cannot run bell-check', empBell.status === 403);
+
+  const empPub = await callAdmin(empT, 'publish.publish', { orgId: gamma.id, cycleId: pcycle.id });
+  check('employee cannot publish', empPub.status === 403);
+
+  const forceBlank = await callAdmin(superT, 'publish.publish', { orgId: gamma.id, cycleId: pcycle.id, force: true, reason: '   ' });
+  check('forced publish requires a non-blank reason', forceBlank.status === 400 && forceBlank.body.error.code === 'BAD_REQUEST');
+
+  const forced = await callAdmin(superT, 'publish.publish', { orgId: gamma.id, cycleId: pcycle.id, force: true, reason: 'Exec sign-off' });
+  check('publish succeeds with force + reason', forced.status === 200 && forced.body.data.cycle.status === 'published');
+
+  const again = await callAdmin(superT, 'publish.publish', { orgId: gamma.id, cycleId: pcycle.id, force: true, reason: 'x' });
+  check('re-publish rejected while already published', again.status === 409 && again.body.error.code === 'ALREADY_PUBLISHED');
+
+  const empRevoke = await callAdmin(empT, 'publish.revoke', { orgId: gamma.id, cycleId: pcycle.id, reason: 'x' });
+  check('employee cannot revoke', empRevoke.status === 403);
+
+  const revoke = await callAdmin(superT, 'publish.revoke', { orgId: gamma.id, cycleId: pcycle.id, reason: 'Correction needed' });
+  check('revoke returns the cycle to review', revoke.status === 200 && revoke.body.data.cycle.status === 'review');
+
+  const revokeAgain = await callAdmin(superT, 'publish.revoke', { orgId: gamma.id, cycleId: pcycle.id, reason: 'x' });
+  check('revoke with no live publication rejected', revokeAgain.status === 409 && revokeAgain.body.error.code === 'NOT_PUBLISHED');
+}
+
 console.log(`admin-check: PASS (${n} assertions)`);
