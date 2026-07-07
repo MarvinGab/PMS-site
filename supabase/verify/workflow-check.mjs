@@ -106,6 +106,64 @@ export async function setupActiveCycle() {
 
 export const fixture = await setupActiveCycle();
 
+// Fresh active cycle for the evaluation tests: EMP002 has an APPROVED plan with
+// 2 KRAs (each one numeric-target KPI), a frozen rating scale + auto bands, and
+// self/manager_evaluation windows open. Self-contained; archives acme's working cycle first.
+export async function setupEvalCycle() {
+  const { data: org } = await admin.from('organizations').select('id').eq('key', 'acme-test').single();
+  const emp = {};
+  for (const code of ['EMP001', 'EMP002', 'EMP003']) {
+    const { data } = await admin.from('employees').select('id').eq('organization_id', org.id).eq('employee_code', code).single();
+    emp[code] = data.id;
+  }
+  await admin.from('appraisal_cycles').update({ status: 'archived', archived_at: new Date().toISOString() })
+    .eq('organization_id', org.id).neq('status', 'archived');
+  const { data: cycle } = await admin.from('appraisal_cycles').insert({
+    organization_id: org.id, name: 'Eval Cycle', framework_id: 'kra-kpi', status: 'active', activated_at: new Date().toISOString(),
+  }).select().single();
+  const iso2 = (d) => d.toISOString().slice(0, 10);
+  const pastW = iso2(new Date(Date.now() - 3 * 864e5));
+  const futW = iso2(new Date(Date.now() + 30 * 864e5));
+  await admin.from('cycle_phase_windows').insert([
+    { organization_id: org.id, cycle_id: cycle.id, window_key: 'self_evaluation', starts_on: pastW, ends_on: futW },
+    { organization_id: org.id, cycle_id: cycle.id, window_key: 'manager_evaluation', starts_on: pastW, ends_on: futW },
+  ]);
+  await admin.from('cycle_rating_scale_levels').insert([
+    { organization_id: org.id, cycle_id: cycle.id, point: 2, label: 'Below', range_from: 0, range_to: 59 },
+    { organization_id: org.id, cycle_id: cycle.id, point: 3, label: 'Meets', range_from: 60, range_to: 89 },
+    { organization_id: org.id, cycle_id: cycle.id, point: 5, label: 'Exceeds', range_from: 90, range_to: 200 },
+  ]);
+  await admin.from('cycle_auto_rating_bands').insert([
+    { organization_id: org.id, cycle_id: cycle.id, from_percent: 0, to_percent: 59, score: 2 },
+    { organization_id: org.id, cycle_id: cycle.id, from_percent: 60, to_percent: 89, score: 3 },
+    { organization_id: org.id, cycle_id: cycle.id, from_percent: 90, to_percent: 200, score: 5 },
+  ]);
+  await admin.from('cycle_target_types').insert({
+    organization_id: org.id, cycle_id: cycle.id, target_type_key: 'number', name: 'Number', is_numeric: true, lower_is_better: false,
+  });
+  // EMP002 assigned to a rating_level=kpi group (so KPIs carry scores).
+  const { data: group } = await admin.from('cycle_groups').insert({
+    organization_id: org.id, cycle_id: cycle.id, name: 'Sales', target_level: 'kpi', rating_level: 'kpi',
+  }).select().single();
+  const { data: part } = await admin.from('cycle_participants').insert({
+    organization_id: org.id, cycle_id: cycle.id, employee_id: emp.EMP002,
+  }).select().single();
+  await admin.from('cycle_participant_assignments').insert({
+    organization_id: org.id, cycle_id: cycle.id, participant_id: part.id, employee_id: emp.EMP002, group_id: group.id,
+  });
+  const { data: eplan } = await admin.from('employee_goal_plans').insert({
+    organization_id: org.id, cycle_id: cycle.id, employee_id: emp.EMP002, status: 'approved', approved_at: new Date().toISOString(),
+  }).select().single();
+  const mk = async (fields) => (await admin.from('employee_goal_items').insert({
+    organization_id: org.id, cycle_id: cycle.id, plan_id: eplan.id, employee_id: emp.EMP002, ...fields,
+  }).select().single()).data;
+  const kraA = await mk({ item_type: 'kra', title: 'Revenue', weight: 60, display_order: 0 });
+  await mk({ item_type: 'kpi', parent_item_id: kraA.id, title: 'New ARR', weight: 100, target_type_key: 'number', target_value: '100', display_order: 1 });
+  const kraB = await mk({ item_type: 'kra', title: 'Retention', weight: 40, display_order: 2 });
+  await mk({ item_type: 'kpi', parent_item_id: kraB.id, title: 'Churn', weight: 100, target_type_key: 'number', target_value: '100', display_order: 3 });
+  return { orgId: org.id, cycleId: cycle.id, emp, planId: eplan.id };
+}
+
 // --- goal.ensure-plan seeds from library + prefill; goal.get-plan reads it ---
 {
   const ensure = await callWorkflow(tokens.employee, 'goal.ensure-plan', { orgId: fixture.orgId, cycleId: fixture.cycleId });
@@ -249,6 +307,28 @@ export const fixture = await setupActiveCycle();
   });
   // HR has no employee row in acme, so save-items (which acts on the caller's own plan) is NO_EMPLOYEE, proving HR-bypass is about the window, not identity.
   check('HR save-items on own-plan path needs an employee row', hrSaveClosed.status === 403 && hrSaveClosed.body.error.code === 'NO_EMPLOYEE');
+}
+
+// ============ EVALUATIONS (Plan 3b) ============
+export const evalFixture = await setupEvalCycle();
+
+// --- eval.ensure seeds score rows; eval.get reads them (self stage) ---
+{
+  const ensure = await callWorkflow(tokens.employee, 'eval.ensure', { orgId: evalFixture.orgId, cycleId: evalFixture.cycleId, stage: 'self' });
+  check('eval.ensure creates a draft self evaluation', ensure.status === 200 && ensure.body.data.evaluation.stage === 'self' && ensure.body.data.evaluation.status === 'draft');
+  check('eval.ensure seeds a goal-score row per KPI (2)', ensure.body.data.goalScores.length === 2);
+
+  const again = await callWorkflow(tokens.employee, 'eval.ensure', { orgId: evalFixture.orgId, cycleId: evalFixture.cycleId, stage: 'self' });
+  check('eval.ensure is idempotent (seeded 0)', again.status === 200 && again.body.data.seeded === 0);
+
+  const get = await callWorkflow(tokens.employee, 'eval.get', { orgId: evalFixture.orgId, cycleId: evalFixture.cycleId, employeeId: evalFixture.emp.EMP002, stage: 'self' });
+  check('eval.get returns own self evaluation', get.status === 200 && get.body.data.goalScores.length === 2);
+
+  const mgrPrereq = await callWorkflow(tokens.manager, 'eval.ensure', { orgId: evalFixture.orgId, cycleId: evalFixture.cycleId, stage: 'manager', employeeId: evalFixture.emp.EMP002 });
+  check('manager eval blocked until self submitted', mgrPrereq.status === 409 && mgrPrereq.body.error.code === 'SELF_NOT_SUBMITTED');
+
+  const peek = await callWorkflow(tokens.employee, 'eval.get', { orgId: evalFixture.orgId, cycleId: evalFixture.cycleId, employeeId: evalFixture.emp.EMP001, stage: 'self' });
+  check('employee cannot view another employee evaluation', peek.status === 403);
 }
 
 // The end marker; later tasks append sections before this and bump the count.
