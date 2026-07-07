@@ -221,6 +221,40 @@ export const evalHandlers: Record<string, Handler> = {
     const bundle = await readEvalBundle(ctx, orgId, cycleId, employeeId, stage);
     return bundle;
   },
+
+  'eval.submit': async (payload, ctx) => {
+    const orgId = reqUuid(payload.orgId, 'orgId');
+    const cycleId = reqUuid(payload.cycleId, 'cycleId');
+    const employeeId = reqUuid(payload.employeeId, 'employeeId');
+    const stage = reqEnum(payload.stage, 'stage', STAGES);
+    const evalVersion = reqInt(payload.evalVersion, 'evalVersion');
+    await assertStageAuth(ctx, orgId, employeeId, stage);
+    await loadEvaluableCycle(ctx, orgId, cycleId);
+    await assertPrereqs(ctx, orgId, cycleId, employeeId, stage);
+    await requireWindowOrHr(ctx, orgId, cycleId, STAGE_WINDOW[stage]);
+
+    const { data: evaluation, error: eErr } = await ctx.admin.from('evaluations')
+      .select().eq('cycle_id', cycleId).eq('employee_id', employeeId).eq('stage', stage).eq('organization_id', orgId).maybeSingle();
+    if (eErr) { console.error('submit eval', eErr); throw new ApiError('DB_ERROR', 'Database error', 500); }
+    if (!evaluation) throw new ApiError('NOT_FOUND', 'No evaluation to submit', 404);
+    if (evaluation.status !== 'draft') throw new ApiError('EVAL_LOCKED', `A ${evaluation.status} evaluation cannot be submitted again`, 409);
+
+    const { data: scores } = await ctx.admin.from('evaluation_goal_scores').select('score').eq('evaluation_id', evaluation.id);
+    if (!(scores ?? []).some((s) => s.score != null)) throw new ApiError('NOTHING_SCORED', 'Score at least one goal before submitting', 422);
+
+    // Freeze the overall one more time.
+    const octx = await scoringContext(ctx, orgId, cycleId, employeeId);
+    const { data: plan } = await ctx.admin.from('employee_goal_plans').select('id').eq('cycle_id', cycleId).eq('employee_id', employeeId).maybeSingle();
+    if (!plan) { console.error('eval.submit plan missing after assertPrereqs'); throw new ApiError('DB_ERROR', 'Database error', 500); }
+    const { data: goalItems } = await ctx.admin.from('employee_goal_items').select('id, item_type, parent_item_id, weight').eq('plan_id', plan.id);
+    const overall = await recomputeOverall(ctx, orgId, evaluation.id, goalItems ?? [], octx);
+
+    const fresh = await ctx.versionedUpdate('evaluations', orgId, evaluation.id, evalVersion, {
+      status: 'submitted', submitted_at: new Date().toISOString(), submitted_by: ctx.userId, overall_score: overall,
+    });
+    await ctx.audit({ organizationId: orgId, cycleId, action: 'eval.submit', entityType: 'evaluation', entityId: evaluation.id, before: { status: 'draft' }, after: { status: 'submitted', overall_score: overall } });
+    return { evaluation: fresh };
+  },
 };
 
 // Seed a goal-score row per scored item (per rating_level) + a competency-score row per plan competency.

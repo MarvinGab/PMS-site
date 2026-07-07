@@ -366,5 +366,37 @@ export const evalFixture = await setupEvalCycle();
   check('save-scores rejects a stale eval version', stale.status === 409 && stale.body.error.code === 'CONFLICT');
 }
 
+// --- self submit unlocks manager; manager rates + submits ---
+{
+  // Ensure self is scored (Task 3 left it draft with scores) then submit.
+  const selfGet = await callWorkflow(tokens.employee, 'eval.get', { orgId: evalFixture.orgId, cycleId: evalFixture.cycleId, employeeId: evalFixture.emp.EMP002, stage: 'self' });
+  const selfSubmit = await callWorkflow(tokens.employee, 'eval.submit', { orgId: evalFixture.orgId, cycleId: evalFixture.cycleId, employeeId: evalFixture.emp.EMP002, stage: 'self', evalVersion: selfGet.body.data.evaluation.version });
+  check('employee submits self evaluation', selfSubmit.status === 200 && selfSubmit.body.data.evaluation.status === 'submitted');
+
+  const reSubmit = await callWorkflow(tokens.employee, 'eval.submit', { orgId: evalFixture.orgId, cycleId: evalFixture.cycleId, employeeId: evalFixture.emp.EMP002, stage: 'self', evalVersion: selfSubmit.body.data.evaluation.version });
+  check('re-submitting a submitted self evaluation is rejected', reSubmit.status === 409 && reSubmit.body.error.code === 'EVAL_LOCKED');
+
+  // Now the manager stage is unlocked.
+  const mgrEnsure = await callWorkflow(tokens.manager, 'eval.ensure', { orgId: evalFixture.orgId, cycleId: evalFixture.cycleId, stage: 'manager', employeeId: evalFixture.emp.EMP002 });
+  check('manager eval unlocked after self submitted', mgrEnsure.status === 200 && mgrEnsure.body.data.evaluation.stage === 'manager');
+  const mIds = mgrEnsure.body.data.goalScores.map((r) => r.goal_item_id);
+
+  const empRatesMgr = await callWorkflow(tokens.employee, 'eval.save-scores', { orgId: evalFixture.orgId, cycleId: evalFixture.cycleId, employeeId: evalFixture.emp.EMP002, stage: 'manager', evalVersion: mgrEnsure.body.data.evaluation.version, goalScores: [] });
+  check('employee cannot write the manager stage', empRatesMgr.status === 403);
+
+  const mgrSave = await callWorkflow(tokens.manager, 'eval.save-scores', {
+    orgId: evalFixture.orgId, cycleId: evalFixture.cycleId, employeeId: evalFixture.emp.EMP002, stage: 'manager', evalVersion: mgrEnsure.body.data.evaluation.version,
+    goalScores: [{ goalItemId: mIds[0], achievementValue: '95' }, { goalItemId: mIds[1], achievementValue: '95' }],
+  });
+  check('manager saves scores', mgrSave.status === 200 && Number(mgrSave.body.data.evaluation.overall_score) === 5);
+
+  const mgrSubmit = await callWorkflow(tokens.manager, 'eval.submit', { orgId: evalFixture.orgId, cycleId: evalFixture.cycleId, employeeId: evalFixture.emp.EMP002, stage: 'manager', evalVersion: mgrSave.body.data.evaluation.version });
+  check('manager submits evaluation', mgrSubmit.status === 200 && mgrSubmit.body.data.evaluation.status === 'submitted');
+
+  // Employee cannot yet see the manager rating (after_publish default, unpublished).
+  const empView = await callWorkflow(tokens.employee, 'eval.get', { orgId: evalFixture.orgId, cycleId: evalFixture.cycleId, employeeId: evalFixture.emp.EMP002, stage: 'manager' });
+  check('employee cannot see manager rating before publish', empView.status === 403);
+}
+
 // The end marker; later tasks append sections before this and bump the count.
 console.log(`workflow-check: PASS (${n} assertions)`);
