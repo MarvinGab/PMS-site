@@ -22,7 +22,7 @@
 - **KRA roll-up** (only when `rating_level = kpi`): a KRA's score = weight-average of its KPI scores by KPI `weight` (KPIs with null weight are treated as equal weight); a KRA with no scored KPIs is skipped.
 - **Goal score:** weight-average of KRA scores by KRA `weight` (null weight → equal). When `rating_level = kra`, use the KRA scores directly.
 - **Competency score** (only when `cycle_competency_config.enabled`): plain average of the stage's competency scores that are non-null.
-- **Overall score:** competencies enabled → `goal * (1 - cw/100) + competency * (cw/100)` where `cw = competency_weight` (0 if null); competencies disabled → `goal`. Round to 2 decimals. If nothing is scored, overall = null.
+- **Overall score:** competencies enabled AND a competency score exists → `goal * (1 - cw/100) + competency * (cw/100)` where `cw = competency_weight` (0 if null); competencies disabled, OR enabled but no competency score yet → `goal` (goal-only; do NOT deflate the overall for competencies the evaluator hasn't scored). Round to 2 decimals. If nothing is scored, overall = null.
 
 ## Global Constraints
 
@@ -127,7 +127,7 @@ Deno.test('computeGoalScore null when nothing scored', () => {
 Deno.test('computeOverall blends competencies', () => {
   assertEquals(computeOverall(4, 2, true, 25), 3.5);   // 4*0.75 + 2*0.25
   assertEquals(computeOverall(4, 2, false, 25), 4);    // disabled → goal
-  assertEquals(computeOverall(4, null, true, 25), 3);  // 4*0.75 + 0*0.25 (no comp scores → 0 weight? treat null comp as goal-only)
+  assertEquals(computeOverall(4, null, true, 25), 4);  // enabled but no competency score yet → goal-only (don't deflate for unscored competencies)
 });
 
 Deno.test('round2', () => {
