@@ -70,12 +70,10 @@ export function computeOverall(
   goalScore: number | null, competencyScore: number | null,
   competenciesEnabled: boolean, competencyWeight: number | null,
 ): number | null {
-  if (!competenciesEnabled) {
+  if (!competenciesEnabled || competencyScore == null) {
     return goalScore == null ? null : round2(goalScore);
   }
-  if (goalScore == null && competencyScore == null) return null;
   const cw = (competencyWeight ?? 0) / 100;
   const g = goalScore ?? 0;
-  const c = competencyScore ?? 0; // no competency score → treat as 0, not goal-only
-  return round2(g * (1 - cw) + c * cw);
+  return round2(g * (1 - cw) + competencyScore * cw);
 }

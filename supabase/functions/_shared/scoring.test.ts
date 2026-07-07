@@ -62,7 +62,7 @@ Deno.test('computeGoalScore null when nothing scored', () => {
 Deno.test('computeOverall blends competencies', () => {
   assertEquals(computeOverall(4, 2, true, 25), 3.5);   // 4*0.75 + 2*0.25
   assertEquals(computeOverall(4, 2, false, 25), 4);    // disabled → goal
-  assertEquals(computeOverall(4, null, true, 25), 3);  // 4*0.75 + 0*0.25 (no comp scores → 0 weight? treat null comp as goal-only)
+  assertEquals(computeOverall(4, null, true, 25), 4);  // enabled but no competency score yet → goal-only
 });
 
 Deno.test('round2', () => {
