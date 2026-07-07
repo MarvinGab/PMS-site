@@ -41,15 +41,15 @@ export function validateGoalTree(items: GoalNode[], rules: GoalRules): void {
     }
     const childWeights = children.map((c) => c.weight).filter((w): w is number => w != null);
     if (childWeights.length > 0) {
-      if (rules.min_kpi_weight != null && childWeights.some((w) => w < rules.min_kpi_weight!)) {
-        bad(`A KPI under "${kra.key}" is below the minimum weight ${rules.min_kpi_weight}`);
-      }
+      if (childWeights.length !== children.length) bad(`All KPIs under "${kra.key}" must have a weight if any do`);
+      if (rules.min_kpi_weight != null && childWeights.some((w) => w < rules.min_kpi_weight!)) bad(`A KPI under "${kra.key}" is below the minimum weight ${rules.min_kpi_weight}`);
       if (Math.abs(sum(childWeights) - 100) > EPS) bad(`KPI weights under "${kra.key}" must sum to 100`);
     }
   }
 
   const kraWeights = kras.map((k) => k.weight).filter((w): w is number => w != null);
-  if (kraWeights.length > 0 && Math.abs(sum(kraWeights) - 100) > EPS) {
-    bad('KRA weights must sum to 100');
+  if (kraWeights.length > 0) {
+    if (kraWeights.length !== kras.length) bad('All KRAs must have a weight if any do');
+    if (Math.abs(sum(kraWeights) - 100) > EPS) bad('KRA weights must sum to 100');
   }
 }

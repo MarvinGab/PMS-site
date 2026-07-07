@@ -33,3 +33,8 @@ Deno.test('KPI weights within a KRA not summing to 100 fails', () => {
 Deno.test('a KRA with no KPIs fails min_kpis_per_kra', () => {
   assertThrows(() => validateGoalTree([kra('a', 100)], rules), ApiError);
 });
+
+Deno.test('a mix of weighted and null-weight KRAs fails', () => {
+  assertThrows(() => validateGoalTree(
+    [kra('a', 100), kpi('a1', 'a', 100), kra('b', null as unknown as number), kpi('b1', 'b', 100)], rules), ApiError);
+});

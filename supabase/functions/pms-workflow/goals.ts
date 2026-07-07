@@ -28,8 +28,9 @@ async function canAccessTarget(ctx: HandlerCtx, orgId: string, targetEmployeeId:
 const EDITABLE_PLAN = ['draft', 'sent_back', 'reopened'];
 
 async function mergedGoalRules(ctx: HandlerCtx, cycleId: string, groupId: string | null): Promise<GoalRules> {
-  const { data } = await ctx.admin.from('cycle_goal_rules')
+  const { data, error } = await ctx.admin.from('cycle_goal_rules')
     .select().eq('cycle_id', cycleId);
+  if (error) { console.error('mergedGoalRules', error); throw new ApiError('DB_ERROR', 'Database error', 500); }
   const rows = data ?? [];
   const groupRule = groupId ? rows.find((r) => r.group_id === groupId) : null;
   const defaultRule = rows.find((r) => r.group_id === null);
@@ -40,8 +41,9 @@ async function mergedGoalRules(ctx: HandlerCtx, cycleId: string, groupId: string
 }
 
 async function participantGroupId(ctx: HandlerCtx, cycleId: string, employeeId: string): Promise<string | null> {
-  const { data } = await ctx.admin.from('cycle_participant_assignments')
+  const { data, error } = await ctx.admin.from('cycle_participant_assignments')
     .select('group_id').eq('cycle_id', cycleId).eq('employee_id', employeeId).maybeSingle();
+  if (error) { console.error('participantGroupId', error); throw new ApiError('DB_ERROR', 'Database error', 500); }
   return data?.group_id ?? null;
 }
 
@@ -118,7 +120,8 @@ export const goalHandlers: Record<string, Handler> = {
     // The group must permit self-editing (unless HR is acting).
     const groupId = await participantGroupId(ctx, cycleId, employeeId);
     if (!isHrOrSuper(ctx, orgId) && groupId) {
-      const { data: group } = await ctx.admin.from('cycle_groups').select('can_edit_own_goals').eq('id', groupId).maybeSingle();
+      const { data: group, error: gErr } = await ctx.admin.from('cycle_groups').select('can_edit_own_goals').eq('id', groupId).maybeSingle();
+      if (gErr) { console.error('save-items group', gErr); throw new ApiError('DB_ERROR', 'Database error', 500); }
       if (group && group.can_edit_own_goals === false) throw new ApiError('EDIT_NOT_ALLOWED', 'Your group does not allow editing goals', 403);
     }
 
