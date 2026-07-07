@@ -172,6 +172,54 @@ export async function setupEvalCycle() {
   return { orgId: org.id, cycleId: cycle.id, emp, planId: eplan.id };
 }
 
+// Fresh cycle in `review` with EMP002's hr_final evaluation submitted (overall 3.8),
+// bell bands, and a snapshot enabling final acceptance — the closeout starting point.
+export async function setupCloseoutCycle() {
+  const { data: org } = await admin.from('organizations').select('id').eq('key', 'acme-test').single();
+  const emp = {};
+  for (const code of ['EMP001', 'EMP002', 'EMP003']) {
+    const { data } = await admin.from('employees').select('id').eq('organization_id', org.id).eq('employee_code', code).single();
+    emp[code] = data.id;
+  }
+  await admin.from('appraisal_cycles').update({ status: 'archived', archived_at: new Date().toISOString() })
+    .eq('organization_id', org.id).neq('status', 'archived');
+  const { data: cycle } = await admin.from('appraisal_cycles').insert({
+    organization_id: org.id, name: 'Closeout Cycle', framework_id: 'kra-kpi', status: 'review',
+  }).select().single();
+  const iso = (d) => d.toISOString().slice(0, 10);
+  const past = iso(new Date(Date.now() - 3 * 864e5));
+  const fut = iso(new Date(Date.now() + 30 * 864e5));
+  await admin.from('cycle_phase_windows').insert([
+    { organization_id: org.id, cycle_id: cycle.id, window_key: 'hod_review', starts_on: past, ends_on: fut },
+    { organization_id: org.id, cycle_id: cycle.id, window_key: 'hr_calibration', starts_on: past, ends_on: fut },
+  ]);
+  await admin.from('cycle_rating_scale_levels').insert([
+    { organization_id: org.id, cycle_id: cycle.id, point: 2, label: 'Below', range_from: 0, range_to: 59 },
+    { organization_id: org.id, cycle_id: cycle.id, point: 3, label: 'Meets', range_from: 60, range_to: 89 },
+    { organization_id: org.id, cycle_id: cycle.id, point: 5, label: 'Exceeds', range_from: 90, range_to: 200 },
+  ]);
+  await admin.from('cycle_bell_curve_bands').insert([
+    { organization_id: org.id, cycle_id: cycle.id, rating_point: 2, target_percent: 0, tolerance_percent: 100 },
+    { organization_id: org.id, cycle_id: cycle.id, rating_point: 3, target_percent: 50, tolerance_percent: 100 },
+    { organization_id: org.id, cycle_id: cycle.id, rating_point: 5, target_percent: 50, tolerance_percent: 100 },
+  ]);
+  await admin.from('cycle_config_snapshots').insert({
+    organization_id: org.id, cycle_id: cycle.id,
+    snapshot: { visibility: { manager_rating_visible: 'after_publish', final_rating_visible: 'after_publish' }, features: { finalEmployeeAcceptanceEnabled: true } },
+  });
+  const { data: part } = await admin.from('cycle_participants').insert({ organization_id: org.id, cycle_id: cycle.id, employee_id: emp.EMP002 }).select().single();
+  await admin.from('cycle_participant_assignments').insert({ organization_id: org.id, cycle_id: cycle.id, participant_id: part.id, employee_id: emp.EMP002 });
+  // A submitted hr_final evaluation with overall 4 (the number under calibration).
+  await admin.from('evaluations').insert({
+    organization_id: org.id, cycle_id: cycle.id, employee_id: emp.EMP002, stage: 'hr_final', status: 'submitted', overall_score: 4, submitted_at: new Date().toISOString(),
+  });
+  // Also a submitted hod evaluation for the HOD-calibration test.
+  await admin.from('evaluations').insert({
+    organization_id: org.id, cycle_id: cycle.id, employee_id: emp.EMP002, stage: 'hod', status: 'submitted', overall_score: 4, submitted_at: new Date().toISOString(),
+  });
+  return { orgId: org.id, cycleId: cycle.id, emp };
+}
+
 // --- goal.ensure-plan seeds from library + prefill; goal.get-plan reads it ---
 {
   const ensure = await callWorkflow(tokens.employee, 'goal.ensure-plan', { orgId: fixture.orgId, cycleId: fixture.cycleId });
@@ -449,6 +497,28 @@ export const evalFixture = await setupEvalCycle();
   check('HR saves final scores', hrSave.status === 200);
   const hrSubmit = await callWorkflow(tokens.hr, 'eval.submit', { orgId: evalFixture.orgId, cycleId: evalFixture.cycleId, employeeId: evalFixture.emp.EMP002, stage: 'hr_final', evalVersion: hrSave.body.data.evaluation.version });
   check('HR submits the final evaluation', hrSubmit.status === 200 && hrSubmit.body.data.evaluation.status === 'submitted');
+}
+
+// ============ CLOSEOUT (Plan 3c) ============
+export const closeout = await setupCloseoutCycle();
+
+// --- calibration records before/after and updates the evaluation ---
+{
+  const { data: hodEval } = await admin.from('evaluations').select('id, version, overall_score').eq('cycle_id', closeout.cycleId).eq('employee_id', closeout.emp.EMP002).eq('stage', 'hod').single();
+  const hodCal = await callWorkflow(tokens.hod, 'calibration.adjust', { orgId: closeout.orgId, cycleId: closeout.cycleId, employeeId: closeout.emp.EMP002, stage: 'hod', evalVersion: hodEval.version, afterScore: 3, note: 'Moderated down' });
+  check('HOD calibrates the hod stage', hodCal.status === 200 && Number(hodCal.body.data.evaluation.overall_score) === 3);
+  check('calibration records before/after', Number(hodCal.body.data.calibration.before_score) === 4 && Number(hodCal.body.data.calibration.after_score) === 3);
+
+  const empCal = await callWorkflow(tokens.employee, 'calibration.adjust', { orgId: closeout.orgId, cycleId: closeout.cycleId, employeeId: closeout.emp.EMP002, stage: 'hr_final', evalVersion: 1, afterScore: 5 });
+  check('employee cannot calibrate', empCal.status === 403);
+
+  // afterScore outside the cycle's rating scale (2–5) is rejected before any write.
+  const oob = await callWorkflow(tokens.hr, 'calibration.adjust', { orgId: closeout.orgId, cycleId: closeout.cycleId, employeeId: closeout.emp.EMP002, stage: 'hr_final', evalVersion: 1, afterScore: 99 });
+  check('calibration rejects a score outside the rating scale', oob.status === 400 && oob.body.error.code === 'BAD_REQUEST');
+
+  const { data: hrEval } = await admin.from('evaluations').select('id, version').eq('cycle_id', closeout.cycleId).eq('employee_id', closeout.emp.EMP002).eq('stage', 'hr_final').single();
+  const hrCal = await callWorkflow(tokens.hr, 'calibration.adjust', { orgId: closeout.orgId, cycleId: closeout.cycleId, employeeId: closeout.emp.EMP002, stage: 'hr_final', evalVersion: hrEval.version, afterScore: 3 });
+  check('HR calibrates the hr_final stage', hrCal.status === 200 && Number(hrCal.body.data.evaluation.overall_score) === 3);
 }
 
 // The end marker; later tasks append sections before this and bump the count.
