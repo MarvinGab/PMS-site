@@ -27,22 +27,24 @@ async function canAccessTarget(ctx: HandlerCtx, orgId: string, targetEmployeeId:
 
 const EDITABLE_PLAN = ['draft', 'sent_back', 'reopened'];
 
-async function mergedGoalRules(ctx: HandlerCtx, cycleId: string, groupId: string | null): Promise<GoalRules> {
-  const { data, error } = await ctx.admin.from('cycle_goal_rules')
-    .select().eq('cycle_id', cycleId);
-  if (error) { console.error('mergedGoalRules', error); throw new ApiError('DB_ERROR', 'Database error', 500); }
+// Resolve the merged goal rules (group-specific, falling back to the cycle default) for an employee.
+export async function resolveGoalRules(ctx: HandlerCtx, orgId: string, cycleId: string, employeeId: string): Promise<GoalRules> {
+  const { data: assign, error: aErr } = await ctx.admin.from('cycle_participant_assignments')
+    .select('group_id').eq('organization_id', orgId).eq('cycle_id', cycleId).eq('employee_id', employeeId).maybeSingle();
+  if (aErr) { console.error('resolveGoalRules assign', aErr); throw new ApiError('DB_ERROR', 'Database error', 500); }
+  const groupId = assign?.group_id ?? null;
+  const { data, error } = await ctx.admin.from('cycle_goal_rules').select().eq('organization_id', orgId).eq('cycle_id', cycleId);
+  if (error) { console.error('resolveGoalRules rules', error); throw new ApiError('DB_ERROR', 'Database error', 500); }
   const rows = data ?? [];
-  const groupRule = groupId ? rows.find((r) => r.group_id === groupId) : null;
-  const defaultRule = rows.find((r) => r.group_id === null);
-  return (groupRule ?? defaultRule ?? {
+  return (rows.find((r) => groupId && r.group_id === groupId) ?? rows.find((r) => r.group_id === null) ?? {
     min_kras: null, max_kras: null, min_kpis_per_kra: null, max_kpis_per_kra: null,
     min_kra_weight: null, max_kra_weight: null, min_kpi_weight: null,
   }) as GoalRules;
 }
 
-async function participantGroupId(ctx: HandlerCtx, cycleId: string, employeeId: string): Promise<string | null> {
+async function participantGroupId(ctx: HandlerCtx, orgId: string, cycleId: string, employeeId: string): Promise<string | null> {
   const { data, error } = await ctx.admin.from('cycle_participant_assignments')
-    .select('group_id').eq('cycle_id', cycleId).eq('employee_id', employeeId).maybeSingle();
+    .select('group_id').eq('organization_id', orgId).eq('cycle_id', cycleId).eq('employee_id', employeeId).maybeSingle();
   if (error) { console.error('participantGroupId', error); throw new ApiError('DB_ERROR', 'Database error', 500); }
   return data?.group_id ?? null;
 }
@@ -107,8 +109,8 @@ export const goalHandlers: Record<string, Handler> = {
     const orgId = reqUuid(payload.orgId, 'orgId');
     const cycleId = reqUuid(payload.cycleId, 'cycleId');
     const planVersion = reqInt(payload.planVersion, 'planVersion');
-    await loadActiveCycle(ctx, orgId, cycleId);
     const employeeId = callerEmployeeId(ctx, orgId);
+    await loadActiveCycle(ctx, orgId, cycleId);
     await requireWindowOrHr(ctx, orgId, cycleId, 'goal_creation');
 
     const { data: plan, error: pErr } = await ctx.admin.from('employee_goal_plans')
@@ -118,9 +120,9 @@ export const goalHandlers: Record<string, Handler> = {
     if (!EDITABLE_PLAN.includes(plan.status)) throw new ApiError('PLAN_LOCKED', `Goals can't be edited once the plan is ${plan.status}`, 409);
 
     // The group must permit self-editing (unless HR is acting).
-    const groupId = await participantGroupId(ctx, cycleId, employeeId);
+    const groupId = await participantGroupId(ctx, orgId, cycleId, employeeId);
     if (!isHrOrSuper(ctx, orgId) && groupId) {
-      const { data: group, error: gErr } = await ctx.admin.from('cycle_groups').select('can_edit_own_goals').eq('id', groupId).maybeSingle();
+      const { data: group, error: gErr } = await ctx.admin.from('cycle_groups').select('can_edit_own_goals').eq('id', groupId).eq('organization_id', orgId).maybeSingle();
       if (gErr) { console.error('save-items group', gErr); throw new ApiError('DB_ERROR', 'Database error', 500); }
       if (group && group.can_edit_own_goals === false) throw new ApiError('EDIT_NOT_ALLOWED', 'Your group does not allow editing goals', 403);
     }
@@ -143,7 +145,7 @@ export const goalHandlers: Record<string, Handler> = {
     });
     const keys = rawItems.map((r) => r.key);
     if (new Set(keys).size !== keys.length) throw new ApiError('BAD_REQUEST', 'items contain duplicate keys', 400);
-    const rules = await mergedGoalRules(ctx, cycleId, groupId);
+    const rules = await resolveGoalRules(ctx, orgId, cycleId, employeeId);
     validateGoalTree(rawItems as GoalNode[], rules);
 
     // Claim the version token first (so a stale editor is rejected before we rewrite rows).

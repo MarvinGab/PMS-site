@@ -3,6 +3,7 @@ import { optString, reqInt, reqString, reqUuid } from '../_shared/validate.ts';
 import { callerEmployeeId, isHrOrSuper, manages } from '../_shared/scope.ts';
 import { loadActiveCycle, requireWindowOrHr } from '../_shared/phase.ts';
 import { GoalNode, validateGoalTree } from './goalrules.ts';
+import { resolveGoalRules } from './goals.ts';
 
 async function loadPlanById(ctx: HandlerCtx, orgId: string, cycleId: string, employeeId: string) {
   const { data: plan, error } = await ctx.admin.from('employee_goal_plans')
@@ -20,26 +21,13 @@ async function appendEvent(ctx: HandlerCtx, orgId: string, cycleId: string, plan
   if (error) { console.error('appendEvent', error); throw new ApiError('DB_ERROR', 'Database error', 500); }
 }
 
-// The merged-rules loader + node shape are duplicated minimally here to keep goalflow self-contained.
-async function mergedRules(ctx: HandlerCtx, cycleId: string, employeeId: string) {
-  const { data: assign } = await ctx.admin.from('cycle_participant_assignments')
-    .select('group_id').eq('cycle_id', cycleId).eq('employee_id', employeeId).maybeSingle();
-  const groupId = assign?.group_id ?? null;
-  const { data } = await ctx.admin.from('cycle_goal_rules').select().eq('cycle_id', cycleId);
-  const rows = data ?? [];
-  return (rows.find((r) => groupId && r.group_id === groupId) ?? rows.find((r) => r.group_id === null) ?? {
-    min_kras: null, max_kras: null, min_kpis_per_kra: null, max_kpis_per_kra: null,
-    min_kra_weight: null, max_kra_weight: null, min_kpi_weight: null,
-  });
-}
-
 export const goalFlowHandlers: Record<string, Handler> = {
   'goal.submit': async (payload, ctx) => {
     const orgId = reqUuid(payload.orgId, 'orgId');
     const cycleId = reqUuid(payload.cycleId, 'cycleId');
     const planVersion = reqInt(payload.planVersion, 'planVersion');
-    await loadActiveCycle(ctx, orgId, cycleId);
     const employeeId = callerEmployeeId(ctx, orgId);
+    await loadActiveCycle(ctx, orgId, cycleId);
     await requireWindowOrHr(ctx, orgId, cycleId, 'goal_creation');
     const plan = await loadPlanById(ctx, orgId, cycleId, employeeId);
     if (!['draft', 'sent_back', 'reopened'].includes(plan.status)) {
@@ -51,7 +39,7 @@ export const goalFlowHandlers: Record<string, Handler> = {
     const nodes: GoalNode[] = items.map((it) => ({
       key: it.id, itemType: it.item_type, parentKey: it.parent_item_id, weight: it.weight,
     }));
-    validateGoalTree(nodes, await mergedRules(ctx, cycleId, employeeId) as any);
+    validateGoalTree(nodes, await resolveGoalRules(ctx, orgId, cycleId, employeeId));
     const fresh = await ctx.versionedUpdate('employee_goal_plans', orgId, plan.id, planVersion, {
       status: 'submitted', submitted_at: new Date().toISOString(),
     });
@@ -65,10 +53,10 @@ export const goalFlowHandlers: Record<string, Handler> = {
     const cycleId = reqUuid(payload.cycleId, 'cycleId');
     const employeeId = reqUuid(payload.employeeId, 'employeeId');
     const planVersion = reqInt(payload.planVersion, 'planVersion');
-    await loadActiveCycle(ctx, orgId, cycleId);
     if (!isHrOrSuper(ctx, orgId) && !(await manages(ctx, orgId, employeeId))) {
       throw new ApiError('FORBIDDEN', 'Only the manager can approve this plan', 403);
     }
+    await loadActiveCycle(ctx, orgId, cycleId);
     await requireWindowOrHr(ctx, orgId, cycleId, 'manager_approval');
     const plan = await loadPlanById(ctx, orgId, cycleId, employeeId);
     if (plan.status !== 'submitted') throw new ApiError('PLAN_STATE', `Only a submitted plan can be approved (this is ${plan.status})`, 409);
@@ -86,10 +74,10 @@ export const goalFlowHandlers: Record<string, Handler> = {
     const employeeId = reqUuid(payload.employeeId, 'employeeId');
     const planVersion = reqInt(payload.planVersion, 'planVersion');
     const note = reqString(payload.note, 'note', 2000);
-    await loadActiveCycle(ctx, orgId, cycleId);
     if (!isHrOrSuper(ctx, orgId) && !(await manages(ctx, orgId, employeeId))) {
       throw new ApiError('FORBIDDEN', 'Only the manager can send back this plan', 403);
     }
+    await loadActiveCycle(ctx, orgId, cycleId);
     await requireWindowOrHr(ctx, orgId, cycleId, 'manager_approval');
     const plan = await loadPlanById(ctx, orgId, cycleId, employeeId);
     if (plan.status !== 'submitted') throw new ApiError('PLAN_STATE', `Only a submitted plan can be sent back (this is ${plan.status})`, 409);

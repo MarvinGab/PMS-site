@@ -67,6 +67,9 @@ export async function setupActiveCycle() {
   const { data: group } = await admin.from('cycle_groups').insert({
     organization_id: org.id, cycle_id: cycle.id, name: 'Sales', target_level: 'kpi', rating_level: 'kpi', can_edit_own_goals: true,
   }).select().single();
+  const { data: noEditGroup } = await admin.from('cycle_groups').insert({
+    organization_id: org.id, cycle_id: cycle.id, name: 'NoEdit', target_level: 'kra', rating_level: 'kra', can_edit_own_goals: false,
+  }).select().single();
   const { data: lib } = await admin.from('goal_libraries').insert({
     organization_id: org.id, name: `WF Lib ${cycle.id.slice(0, 8)}`,
   }).select().single();
@@ -93,6 +96,9 @@ export async function setupActiveCycle() {
   await admin.from('cycle_participant_assignments').insert({
     organization_id: org.id, cycle_id: cycle.id, participant_id: parts.EMP002, employee_id: emp.EMP002,
     group_id: group.id, goal_library_id: lib.id, prefill_dataset_id: pfd.id,
+  });
+  await admin.from('cycle_participant_assignments').insert({
+    organization_id: org.id, cycle_id: cycle.id, participant_id: parts.EMP003, employee_id: emp.EMP003, group_id: noEditGroup.id,
   });
   await admin.from('appraisal_cycles').update({ status: 'active', activated_at: new Date().toISOString() }).eq('id', cycle.id);
   return { orgId: org.id, cycleId: cycle.id, emp, groupId: group.id };
@@ -148,6 +154,13 @@ export const fixture = await setupActiveCycle();
 
   const notMine = await callWorkflow(tokens.manager, 'goal.save-items', { orgId: fixture.orgId, cycleId: fixture.cycleId, planVersion: 1, items: goodItems });
   check('a manager cannot edit as if it were their own missing plan', notMine.status === 404 || notMine.status === 409);
+
+  const harryEnsure = await callWorkflow(tokens.hod, 'goal.ensure-plan', { orgId: fixture.orgId, cycleId: fixture.cycleId });
+  const harrySave = await callWorkflow(tokens.hod, 'goal.save-items', {
+    orgId: fixture.orgId, cycleId: fixture.cycleId, planVersion: harryEnsure.body.data.plan.version,
+    items: [{ key: 'k1', itemType: 'kra', title: 'X', weight: 100, displayOrder: 0 }, { key: 'k1a', itemType: 'kpi', parentKey: 'k1', title: 'Y', weight: 100, displayOrder: 1 }],
+  });
+  check('save-items refused for a no-edit group (EDIT_NOT_ALLOWED)', harrySave.status === 403 && harrySave.body.error.code === 'EDIT_NOT_ALLOWED');
 }
 
 // --- submit → send-back → resubmit → approve → reopen ---
@@ -170,9 +183,23 @@ export const fixture = await setupActiveCycle();
   check('employee resubmits after send-back', resubmit.status === 200 && resubmit.body.data.plan.status === 'submitted');
   v = resubmit.body.data.plan.version;
 
+  const isoD = (d) => d.toISOString().slice(0, 10);
+  // The window's starts_on is 5 days ago (set in setupActiveCycle) and the table has a
+  // check (ends_on >= starts_on) constraint, so "closed" here means ends_on = yesterday
+  // (still >= starts_on, but < today so the window reads as closed).
+  const pastEnd = isoD(new Date(Date.now() - 1 * 864e5));
+  await admin.from('cycle_phase_windows').update({ ends_on: pastEnd }).eq('cycle_id', fixture.cycleId).eq('window_key', 'manager_approval');
+  const closedApprove = await callWorkflow(tokens.manager, 'goal.approve', { orgId: fixture.orgId, cycleId: fixture.cycleId, employeeId: fixture.emp.EMP002, planVersion: v });
+  check('approve refused when manager_approval window closed', closedApprove.status === 409 && closedApprove.body.error.code === 'WINDOW_CLOSED');
+  const futureEnd = isoD(new Date(Date.now() + 30 * 864e5));
+  await admin.from('cycle_phase_windows').update({ ends_on: futureEnd }).eq('cycle_id', fixture.cycleId).eq('window_key', 'manager_approval');
+
   const approve = await callWorkflow(tokens.manager, 'goal.approve', { orgId: fixture.orgId, cycleId: fixture.cycleId, employeeId: fixture.emp.EMP002, planVersion: v });
   check('manager approves the plan', approve.status === 200 && approve.body.data.plan.status === 'approved');
   v = approve.body.data.plan.version;
+
+  const mgrOther = await callWorkflow(tokens.manager, 'goal.approve', { orgId: fixture.orgId, cycleId: fixture.cycleId, employeeId: fixture.emp.EMP003, planVersion: 1 });
+  check('manager cannot approve a non-report (EMP003)', mgrOther.status === 403 && mgrOther.body.error.code === 'FORBIDDEN');
 
   const mgrReopen = await callWorkflow(tokens.manager, 'goal.reopen', { orgId: fixture.orgId, cycleId: fixture.cycleId, employeeId: fixture.emp.EMP002, planVersion: v });
   check('manager cannot reopen (HR only)', mgrReopen.status === 403);
