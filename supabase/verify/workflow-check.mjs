@@ -184,5 +184,45 @@ export const fixture = await setupActiveCycle();
   check('workflow events recorded (submitted/sent_back/submitted/approved/reopened)', (events ?? []).length >= 5);
 }
 
+// --- phase gating: goal edits refused when the goal_creation window is closed ---
+{
+  const iso = (d) => d.toISOString().slice(0, 10);
+  const now = new Date();
+  const longAgoStart = iso(new Date(now.getTime() - 60 * 864e5));
+  const longAgoEnd = iso(new Date(now.getTime() - 30 * 864e5));
+  // Archive the WF cycle and stand up a closed-window cycle with EMP002 as participant.
+  await admin.from('appraisal_cycles').update({ status: 'archived', archived_at: new Date().toISOString() })
+    .eq('organization_id', fixture.orgId).neq('status', 'archived');
+  const { data: c2 } = await admin.from('appraisal_cycles').insert({
+    organization_id: fixture.orgId, name: 'WF Closed', framework_id: 'kra', status: 'setup',
+  }).select().single();
+  await admin.from('cycle_phase_windows').insert([
+    { organization_id: fixture.orgId, cycle_id: c2.id, window_key: 'goal_creation', starts_on: longAgoStart, ends_on: longAgoEnd },
+  ]);
+  const { data: p2 } = await admin.from('cycle_participants').insert({
+    organization_id: fixture.orgId, cycle_id: c2.id, employee_id: fixture.emp.EMP002,
+  }).select().single();
+  await admin.from('cycle_participant_assignments').insert({
+    organization_id: fixture.orgId, cycle_id: c2.id, participant_id: p2.id, employee_id: fixture.emp.EMP002,
+  });
+  await admin.from('appraisal_cycles').update({ status: 'active', activated_at: new Date().toISOString() }).eq('id', c2.id);
+
+  const ensure = await callWorkflow(tokens.employee, 'goal.ensure-plan', { orgId: fixture.orgId, cycleId: c2.id });
+  check('ensure-plan works regardless of window', ensure.status === 200);
+  const v = ensure.body.data.plan.version;
+  const saveClosed = await callWorkflow(tokens.employee, 'goal.save-items', {
+    orgId: fixture.orgId, cycleId: c2.id, planVersion: v,
+    items: [{ key: 'k1', itemType: 'kra', title: 'X', weight: 100, displayOrder: 0 }, { key: 'k1a', itemType: 'kpi', parentKey: 'k1', title: 'Y', weight: 100, displayOrder: 1 }],
+  });
+  check('employee edit refused when goal_creation window closed', saveClosed.status === 409 && saveClosed.body.error.code === 'WINDOW_CLOSED');
+
+  const hrSaveClosed = await callWorkflow(tokens.hr, 'goal.save-items', {
+    orgId: fixture.orgId, cycleId: c2.id, planVersion: v,
+    items: [{ key: 'k1', itemType: 'kra', title: 'X', weight: 100, displayOrder: 0 }, { key: 'k1a', itemType: 'kpi', parentKey: 'k1', title: 'Y', weight: 100, displayOrder: 1 }],
+  });
+  // HR has no employee row in acme, so save-items (which acts on the caller's own plan) is NO_EMPLOYEE, proving HR-bypass is about the window, not identity.
+  check('HR save-items on own-plan path needs an employee row', hrSaveClosed.status === 403 && hrSaveClosed.body.error.code === 'NO_EMPLOYEE');
+}
+
 // The end marker; later tasks append sections before this and bump the count.
 console.log(`workflow-check: PASS (${n} assertions)`);
