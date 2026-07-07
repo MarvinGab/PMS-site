@@ -213,10 +213,11 @@ export const evalHandlers: Record<string, Handler> = {
 
     // Recompute overall from the persisted score rows.
     const overall = await recomputeOverall(ctx, orgId, evaluation.id, goalItems ?? [], octx);
-    const overallComment = optString(payload.overallComment, 'overallComment', 4000);
-    await ctx.versionedUpdate('evaluations', orgId, evaluation.id, evalVersion, {
-      overall_score: overall, overall_comment: overallComment,
-    });
+    const patch: Record<string, unknown> = { overall_score: overall };
+    if (payload.overallComment !== undefined) {
+      patch.overall_comment = optString(payload.overallComment, 'overallComment', 4000);
+    }
+    await ctx.versionedUpdate('evaluations', orgId, evaluation.id, evalVersion, patch);
     await ctx.audit({ organizationId: orgId, cycleId, action: 'eval.save-scores', entityType: 'evaluation', entityId: evaluation.id, note: `${stage} overall=${overall}` });
     const bundle = await readEvalBundle(ctx, orgId, cycleId, employeeId, stage);
     return bundle;
@@ -244,7 +245,7 @@ export const evalHandlers: Record<string, Handler> = {
 
     // Freeze the overall one more time.
     const octx = await scoringContext(ctx, orgId, cycleId, employeeId);
-    const { data: plan } = await ctx.admin.from('employee_goal_plans').select('id').eq('cycle_id', cycleId).eq('employee_id', employeeId).maybeSingle();
+    const { data: plan } = await ctx.admin.from('employee_goal_plans').select('id').eq('cycle_id', cycleId).eq('employee_id', employeeId).eq('organization_id', orgId).maybeSingle();
     if (!plan) { console.error('eval.submit plan missing after assertPrereqs'); throw new ApiError('DB_ERROR', 'Database error', 500); }
     const { data: goalItems } = await ctx.admin.from('employee_goal_items').select('id, item_type, parent_item_id, weight').eq('plan_id', plan.id);
     const overall = await recomputeOverall(ctx, orgId, evaluation.id, goalItems ?? [], octx);

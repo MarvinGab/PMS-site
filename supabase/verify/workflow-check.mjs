@@ -161,6 +161,14 @@ export async function setupEvalCycle() {
   await mk({ item_type: 'kpi', parent_item_id: kraA.id, title: 'New ARR', weight: 100, target_type_key: 'number', target_value: '100', display_order: 1 });
   const kraB = await mk({ item_type: 'kra', title: 'Retention', weight: 40, display_order: 2 });
   await mk({ item_type: 'kpi', parent_item_id: kraB.id, title: 'Churn', weight: 100, target_type_key: 'number', target_value: '100', display_order: 3 });
+  await admin.from('cycle_participants').insert({ organization_id: org.id, cycle_id: cycle.id, employee_id: emp.EMP001 });
+  const { data: draftPlan } = await admin.from('employee_goal_plans').insert({
+    organization_id: org.id, cycle_id: cycle.id, employee_id: emp.EMP001, status: 'draft',
+  }).select().single();
+  await admin.from('employee_goal_items').insert({
+    organization_id: org.id, cycle_id: cycle.id, plan_id: draftPlan.id, employee_id: emp.EMP001,
+    item_type: 'kra', title: 'Draft KRA', weight: 100, display_order: 0,
+  });
   return { orgId: org.id, cycleId: cycle.id, emp, planId: eplan.id };
 }
 
@@ -311,6 +319,12 @@ export async function setupEvalCycle() {
 
 // ============ EVALUATIONS (Plan 3b) ============
 export const evalFixture = await setupEvalCycle();
+
+// --- eval.ensure blocked when the employee's own goal plan is not approved ---
+{
+  const notApproved = await callWorkflow(tokens.manager, 'eval.ensure', { orgId: evalFixture.orgId, cycleId: evalFixture.cycleId, stage: 'self' });
+  check('eval blocked when goals not approved (GOALS_NOT_APPROVED)', notApproved.status === 409 && notApproved.body.error.code === 'GOALS_NOT_APPROVED');
+}
 
 // --- eval.ensure seeds score rows; eval.get reads them (self stage) ---
 {
