@@ -18,14 +18,17 @@ async function finalScores(ctx: HandlerCtx, orgId: string, cycleId: string): Pro
 }
 
 async function bellContext(ctx: HandlerCtx, orgId: string, cycleId: string) {
-  const { data: pts } = await ctx.admin.from('cycle_rating_scale_levels').select('point').eq('cycle_id', cycleId).eq('organization_id', orgId);
-  const { data: bands } = await ctx.admin.from('cycle_bell_curve_bands').select('rating_point, target_percent, tolerance_percent').eq('cycle_id', cycleId).eq('organization_id', orgId);
+  const { data: pts, error: pErr } = await ctx.admin.from('cycle_rating_scale_levels').select('point').eq('cycle_id', cycleId).eq('organization_id', orgId);
+  if (pErr) { console.error('bellContext points', pErr); throw new ApiError('DB_ERROR', 'Database error', 500); }
+  const { data: bands, error: bErr } = await ctx.admin.from('cycle_bell_curve_bands').select('rating_point, target_percent, tolerance_percent').eq('cycle_id', cycleId).eq('organization_id', orgId);
+  if (bErr) { console.error('bellContext bands', bErr); throw new ApiError('DB_ERROR', 'Database error', 500); }
   return { points: (pts ?? []).map((p) => Number(p.point)), bands: (bands ?? []) as BellBand[] };
 }
 
 async function livePublication(ctx: HandlerCtx, orgId: string, cycleId: string) {
-  const { data } = await ctx.admin.from('cycle_publications')
+  const { data, error } = await ctx.admin.from('cycle_publications')
     .select().eq('cycle_id', cycleId).eq('organization_id', orgId).is('revoked_at', null).order('published_at', { ascending: false }).limit(1);
+  if (error) { console.error('livePublication', error); throw new ApiError('DB_ERROR', 'Database error', 500); }
   return (data ?? [])[0] ?? null;
 }
 
@@ -66,7 +69,15 @@ export const publishingHandlers: Record<string, Handler> = {
     const { data: publication, error: pErr } = await ctx.admin.from('cycle_publications')
       .insert({ organization_id: orgId, cycle_id: cycleId, published_by: ctx.userId, reason: force ? reason : null }).select().single();
     if (pErr) { console.error('publish insert', pErr); throw new ApiError('DB_ERROR', 'Database error', 500); }
-    const freshCycle = await ctx.versionedUpdate('appraisal_cycles', orgId, cycleId, cycle.version, { status: 'published' });
+    let freshCycle;
+    try {
+      freshCycle = await ctx.versionedUpdate('appraisal_cycles', orgId, cycleId, cycle.version, { status: 'published' });
+    } catch (e) {
+      // Status flip failed — delete the row we just inserted so it can't disclose finals for a
+      // still-'review' cycle (3b visibility keys off a non-revoked cycle_publications row). Nothing depends on it yet.
+      await ctx.admin.from('cycle_publications').delete().eq('id', publication.id).eq('organization_id', orgId);
+      throw e;
+    }
     await ctx.audit({ organizationId: orgId, cycleId, action: 'publish.publish', entityType: 'cycle_publication', entityId: publication.id, note: force ? `forced: ${reason}` : 'within tolerance' });
     return { publication, cycle: freshCycle };
   },
