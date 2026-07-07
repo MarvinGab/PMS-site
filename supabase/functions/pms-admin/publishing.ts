@@ -47,7 +47,8 @@ export const publishingHandlers: Record<string, Handler> = {
     ctx.requireOrgRole(orgId, ['hr_admin']);
     const cycleId = reqUuid(payload.cycleId, 'cycleId');
     const force = optBool(payload.force, 'force');
-    const reason = optString(payload.reason, 'reason', 2000);
+    // A forced override must carry a real (non-blank) justification — it lands in the audit trail.
+    const reason = force ? reqString(payload.reason, 'reason', 2000) : optString(payload.reason, 'reason', 2000);
 
     const { data: cycle, error: cErr } = await ctx.admin.from('appraisal_cycles').select('id, status, version').eq('id', cycleId).eq('organization_id', orgId).maybeSingle();
     if (cErr) { console.error('publish cycle', cErr); throw new ApiError('DB_ERROR', 'Database error', 500); }
@@ -92,9 +93,18 @@ export const publishingHandlers: Record<string, Handler> = {
     const updated = await ctx.versionedUpdate('cycle_publications', orgId, pub.id, pub.version, {
       revoked_at: new Date().toISOString(), revoked_by: ctx.userId, reason,
     });
-    const { data: cycle, error: cErr } = await ctx.admin.from('appraisal_cycles').select('version').eq('id', cycleId).eq('organization_id', orgId).single();
-    if (cErr || !cycle) { console.error('revoke cycle', cErr); throw new ApiError('DB_ERROR', 'Database error', 500); }
-    const freshCycle = await ctx.versionedUpdate('appraisal_cycles', orgId, cycleId, cycle.version, { status: 'review' });
+    let freshCycle;
+    try {
+      const { data: cycle, error: cErr } = await ctx.admin.from('appraisal_cycles').select('version').eq('id', cycleId).eq('organization_id', orgId).single();
+      if (cErr || !cycle) { console.error('revoke cycle', cErr); throw new ApiError('DB_ERROR', 'Database error', 500); }
+      freshCycle = await ctx.versionedUpdate('appraisal_cycles', orgId, cycleId, cycle.version, { status: 'review' });
+    } catch (e) {
+      // Cycle flip failed — restore the publication we just revoked so the cycle isn't wedged
+      // ('published' with no live publication → neither publishable nor revocable via the API).
+      // Mirror publish.publish's rollback (best-effort; nothing keys off these until the flip lands).
+      await ctx.admin.from('cycle_publications').update({ revoked_at: null, revoked_by: null }).eq('id', pub.id).eq('organization_id', orgId);
+      throw e;
+    }
     await ctx.audit({ organizationId: orgId, cycleId, action: 'publish.revoke', entityType: 'cycle_publication', entityId: pub.id, note: reason });
     return { cycle: freshCycle, publication: updated };
   },

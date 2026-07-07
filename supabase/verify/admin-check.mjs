@@ -593,6 +593,9 @@ let goodRun;
   const empPub = await callAdmin(empT, 'publish.publish', { orgId: gamma.id, cycleId: pcycle.id });
   check('employee cannot publish', empPub.status === 403);
 
+  const forceBlank = await callAdmin(superT, 'publish.publish', { orgId: gamma.id, cycleId: pcycle.id, force: true, reason: '   ' });
+  check('forced publish requires a non-blank reason', forceBlank.status === 400 && forceBlank.body.error.code === 'BAD_REQUEST');
+
   const forced = await callAdmin(superT, 'publish.publish', { orgId: gamma.id, cycleId: pcycle.id, force: true, reason: 'Exec sign-off' });
   check('publish succeeds with force + reason', forced.status === 200 && forced.body.data.cycle.status === 'published');
 
