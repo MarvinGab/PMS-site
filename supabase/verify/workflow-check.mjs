@@ -331,5 +331,40 @@ export const evalFixture = await setupEvalCycle();
   check('employee cannot view another employee evaluation', peek.status === 403);
 }
 
+// --- eval.save-scores computes achievement % + auto rating + overall ---
+{
+  const get = await callWorkflow(tokens.employee, 'eval.get', { orgId: evalFixture.orgId, cycleId: evalFixture.cycleId, employeeId: evalFixture.emp.EMP002, stage: 'self' });
+  const v = get.body.data.evaluation.version;
+  const ids = get.body.data.goalScores.map((r) => r.goal_item_id);
+  // Score KPI A at 120% (→ band score 5) and KPI B at 50% (→ band score 2).
+  const save = await callWorkflow(tokens.employee, 'eval.save-scores', {
+    orgId: evalFixture.orgId, cycleId: evalFixture.cycleId, employeeId: evalFixture.emp.EMP002, stage: 'self', evalVersion: v,
+    goalScores: [
+      { goalItemId: ids[0], achievementValue: '120' },
+      { goalItemId: ids[1], achievementValue: '50' },
+    ],
+    overallComment: 'Solid year',
+  });
+  check('save-scores succeeds', save.status === 200);
+  const scoreA = save.body.data.goalScores.find((r) => r.goal_item_id === ids[0]);
+  check('achievement % computed (120)', Number(scoreA.achievement_percent) === 120);
+  check('auto rating from bands (5)', Number(scoreA.score) === 5);
+  // KRA A=5 (w60), KRA B=2 (w40) → 5*0.6 + 2*0.4 = 3.8
+  check('overall rolled up (3.8)', Number(save.body.data.evaluation.overall_score) === 3.8);
+
+  const manual = await callWorkflow(tokens.employee, 'eval.save-scores', {
+    orgId: evalFixture.orgId, cycleId: evalFixture.cycleId, employeeId: evalFixture.emp.EMP002, stage: 'self', evalVersion: save.body.data.evaluation.version,
+    goalScores: [{ goalItemId: ids[0], achievementValue: '120', score: 3 }],
+  });
+  const scoreAManual = manual.body.data.goalScores.find((r) => r.goal_item_id === ids[0]);
+  check('manual score overrides auto rating', Number(scoreAManual.score) === 3);
+
+  const stale = await callWorkflow(tokens.employee, 'eval.save-scores', {
+    orgId: evalFixture.orgId, cycleId: evalFixture.cycleId, employeeId: evalFixture.emp.EMP002, stage: 'self', evalVersion: 1,
+    goalScores: [],
+  });
+  check('save-scores rejects a stale eval version', stale.status === 409 && stale.body.error.code === 'CONFLICT');
+}
+
 // The end marker; later tasks append sections before this and bump the count.
 console.log(`workflow-check: PASS (${n} assertions)`);

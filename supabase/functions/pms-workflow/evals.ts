@@ -1,6 +1,9 @@
 import { ApiError, Handler, HandlerCtx } from '../_shared/kernel.ts';
 import { optUuid, reqEnum, reqUuid } from '../_shared/validate.ts';
 import { callerEmployeeId, callerEmployeeIdOrNull, isHodOf, isHrOrSuper, manages } from '../_shared/scope.ts';
+import { optNumber, optString, reqArray, reqInt, reqObject, reqString } from '../_shared/validate.ts';
+import { requireWindowOrHr } from '../_shared/phase.ts';
+import { achievementPercent, Band, computeGoalScore, computeOverall, ratingFromBands, ScoredItem } from '../_shared/scoring.ts';
 
 export const STAGES = ['self', 'manager', 'hod', 'hr_final'];
 export const STAGE_WINDOW: Record<string, string> = {
@@ -85,6 +88,25 @@ async function visibleToReader(ctx: HandlerCtx, orgId: string, cycleId: string, 
   return false;
 }
 
+async function scoringContext(ctx: HandlerCtx, orgId: string, cycleId: string, employeeId: string) {
+  const { data: bands } = await ctx.admin.from('cycle_auto_rating_bands')
+    .select('from_percent, to_percent, score').eq('cycle_id', cycleId).eq('organization_id', orgId);
+  const { data: targetTypes } = await ctx.admin.from('cycle_target_types')
+    .select('target_type_key, is_numeric, lower_is_better').eq('cycle_id', cycleId).eq('organization_id', orgId);
+  const { data: cfg } = await ctx.admin.from('cycle_competency_config').select('enabled, competency_weight').eq('cycle_id', cycleId).maybeSingle();
+  const ratingLevel = await ratingLevelFor(ctx, cycleId, employeeId);
+  const lowerByKey = new Map<string, { isNumeric: boolean; lower: boolean }>(
+    (targetTypes ?? []).map((t) => [t.target_type_key, { isNumeric: t.is_numeric, lower: t.lower_is_better }]),
+  );
+  return { bands: (bands ?? []) as Band[], lowerByKey, cfg: cfg ?? { enabled: false, competency_weight: null }, ratingLevel };
+}
+
+function num(v: string | null): number | null {
+  if (v == null || v.trim() === '') return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
 export const evalHandlers: Record<string, Handler> = {
   'eval.get': async (payload, ctx) => {
     const orgId = reqUuid(payload.orgId, 'orgId');
@@ -127,6 +149,78 @@ export const evalHandlers: Record<string, Handler> = {
     const bundle = await readEvalBundle(ctx, orgId, cycleId, employeeId, stage);
     return { ...bundle, seeded };
   },
+
+  'eval.save-scores': async (payload, ctx) => {
+    const orgId = reqUuid(payload.orgId, 'orgId');
+    const cycleId = reqUuid(payload.cycleId, 'cycleId');
+    const employeeId = reqUuid(payload.employeeId, 'employeeId');
+    const stage = reqEnum(payload.stage, 'stage', STAGES);
+    const evalVersion = reqInt(payload.evalVersion, 'evalVersion');
+    await assertStageAuth(ctx, orgId, employeeId, stage);
+    await loadEvaluableCycle(ctx, orgId, cycleId);
+    await assertPrereqs(ctx, orgId, cycleId, employeeId, stage);
+    await requireWindowOrHr(ctx, orgId, cycleId, STAGE_WINDOW[stage]);
+
+    const { data: evaluation, error: eErr } = await ctx.admin.from('evaluations')
+      .select().eq('cycle_id', cycleId).eq('employee_id', employeeId).eq('stage', stage).eq('organization_id', orgId).maybeSingle();
+    if (eErr) { console.error('save-scores eval', eErr); throw new ApiError('DB_ERROR', 'Database error', 500); }
+    if (!evaluation) throw new ApiError('NOT_FOUND', 'No evaluation — call eval.ensure first', 404);
+    if (evaluation.status !== 'draft') throw new ApiError('EVAL_LOCKED', `A ${evaluation.status} evaluation cannot be edited`, 409);
+
+    const octx = await scoringContext(ctx, orgId, cycleId, employeeId);
+
+    // Resolve the goal items for target lookups (only the plan's items).
+    const { data: plan } = await ctx.admin.from('employee_goal_plans').select('id').eq('cycle_id', cycleId).eq('employee_id', employeeId).maybeSingle();
+    if (!plan) { console.error('save-scores plan missing after assertPrereqs'); throw new ApiError('DB_ERROR', 'Database error', 500); }
+    const { data: goalItems } = await ctx.admin.from('employee_goal_items')
+      .select('id, item_type, parent_item_id, weight, target_type_key, target_value').eq('plan_id', plan.id);
+    const itemById = new Map((goalItems ?? []).map((g) => [g.id, g]));
+
+    // Apply each submitted goal score.
+    const goalRows = reqArray(payload.goalScores ?? [], 'goalScores', 500);
+    for (let i = 0; i < goalRows.length; i++) {
+      const o = reqObject(goalRows[i], `goalScores[${i}]`);
+      const goalItemId = reqUuid(o.goalItemId, `goalScores[${i}].goalItemId`);
+      const item = itemById.get(goalItemId);
+      if (!item) throw new ApiError('BAD_REQUEST', `goalScores[${i}] references an item not in this plan`, 400);
+      const achievementValue = optString(o.achievementValue, `goalScores[${i}].achievementValue`, 200);
+      const manualScore = optNumber(o.score, `goalScores[${i}].score`);
+      const comment = optString(o.comment, `goalScores[${i}].comment`, 2000);
+      const tt = item.target_type_key ? octx.lowerByKey.get(item.target_type_key) : undefined;
+      const pct = (tt?.isNumeric ?? false)
+        ? achievementPercent(num(achievementValue), num(item.target_value), tt?.lower ?? false)
+        : null;
+      const auto = ratingFromBands(pct, octx.bands);
+      const score = manualScore ?? auto;
+      const { error } = await ctx.admin.from('evaluation_goal_scores').upsert({
+        organization_id: orgId, cycle_id: cycleId, evaluation_id: evaluation.id, goal_item_id: goalItemId,
+        achievement_value: achievementValue, achievement_percent: pct, score, comment,
+      }, { onConflict: 'evaluation_id,goal_item_id' });
+      if (error) { console.error('save goal score', error); throw new ApiError('DB_ERROR', 'Database error', 500); }
+    }
+
+    // Apply competency scores (if any provided).
+    const compRows = reqArray(payload.competencyScores ?? [], 'competencyScores', 200);
+    for (let i = 0; i < compRows.length; i++) {
+      const o = reqObject(compRows[i], `competencyScores[${i}]`);
+      const competencyName = reqString(o.competencyName, `competencyScores[${i}].competencyName`, 200);
+      const { error } = await ctx.admin.from('evaluation_competency_scores').upsert({
+        organization_id: orgId, cycle_id: cycleId, evaluation_id: evaluation.id, competency_name: competencyName,
+        score: optNumber(o.score, `competencyScores[${i}].score`), comment: optString(o.comment, `competencyScores[${i}].comment`, 2000),
+      }, { onConflict: 'evaluation_id,competency_name' });
+      if (error) { console.error('save comp score', error); throw new ApiError('DB_ERROR', 'Database error', 500); }
+    }
+
+    // Recompute overall from the persisted score rows.
+    const overall = await recomputeOverall(ctx, orgId, evaluation.id, goalItems ?? [], octx);
+    const overallComment = optString(payload.overallComment, 'overallComment', 4000);
+    const fresh = await ctx.versionedUpdate('evaluations', orgId, evaluation.id, evalVersion, {
+      overall_score: overall, overall_comment: overallComment,
+    });
+    await ctx.audit({ organizationId: orgId, cycleId, action: 'eval.save-scores', entityType: 'evaluation', entityId: evaluation.id, note: `${stage} overall=${overall}` });
+    const bundle = await readEvalBundle(ctx, orgId, cycleId, employeeId, stage);
+    return bundle;
+  },
 };
 
 // Seed a goal-score row per scored item (per rating_level) + a competency-score row per plan competency.
@@ -160,6 +254,27 @@ async function seedScores(ctx: HandlerCtx, orgId: string, cycleId: string, emplo
     }
   }
   return seeded;
+}
+
+async function recomputeOverall(
+  ctx: HandlerCtx, orgId: string, evaluationId: string,
+  goalItems: { id: string; item_type: string; parent_item_id: string | null; weight: number | null }[],
+  octx: { cfg: { enabled: boolean; competency_weight: number | null }; ratingLevel: 'kra' | 'kpi' },
+): Promise<number | null> {
+  const { data: gs } = await ctx.admin.from('evaluation_goal_scores').select('goal_item_id, score').eq('evaluation_id', evaluationId);
+  const scoreByItem = new Map((gs ?? []).map((r) => [r.goal_item_id, r.score]));
+  const scored: ScoredItem[] = goalItems.map((it) => ({
+    itemId: it.id, itemType: it.item_type as 'kra' | 'kpi', parentId: it.parent_item_id, weight: it.weight,
+    score: scoreByItem.has(it.id) ? (scoreByItem.get(it.id) as number | null) : null,
+  }));
+  const goalScore = computeGoalScore(scored, octx.ratingLevel);
+  let competencyScore: number | null = null;
+  if (octx.cfg.enabled) {
+    const { data: cs } = await ctx.admin.from('evaluation_competency_scores').select('score').eq('evaluation_id', evaluationId);
+    const vals = (cs ?? []).map((r) => r.score).filter((s): s is number => s != null);
+    competencyScore = vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : null;
+  }
+  return computeOverall(goalScore, competencyScore, octx.cfg.enabled, octx.cfg.competency_weight);
 }
 
 export async function ratingLevelFor(ctx: HandlerCtx, cycleId: string, employeeId: string): Promise<'kra' | 'kpi'> {
