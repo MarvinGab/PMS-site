@@ -1209,6 +1209,11 @@ git commit -m "test(workflow): phase-gating checks + smoke-gate wiring"
 
 ---
 
+## Documented Decisions (from whole-branch review)
+
+- **`cycle_goal_rules.approval_required` is not honored in 3a.** Goal approval is always via the manager (or HR) here; a submitted plan always waits for `goal.approve`. Auto-approve-on-submit when `approval_required = false` is deferred to Plan 3b (where the `approved` status first drives the evaluation flow). This is a deliberate choice, not a bug.
+- **An ungrouped participant (no `cycle_participant_assignments.group_id`) has no `can_edit_own_goals` restriction** — the default is "unrestricted self-edit". This only affects the participant's own plan (no cross-employee impact). Intentional default; 3b should not treat it as a defect.
+
 ## Out of Scope (Plan 3b — next)
 
 - Self / manager / HOD / HR-final evaluations (`evaluations`, `evaluation_goal_scores`, `evaluation_competency_scores`), the scoring engine (achievement %, auto-rating bands, lower-is-better, competency share, final score) computed and stored server-side, HOD/HR calibration (`calibrations`), bell-curve checks, publishing (`cycle_publications`), and acknowledgements/concerns (`rating_acknowledgements`) with the accept/raise-concern/resolve flow.
