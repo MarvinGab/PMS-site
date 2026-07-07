@@ -69,3 +69,34 @@ Deno.test('round2', () => {
   assertEquals(round2(3.14159), 3.14);
   assertEquals(round2(3.2), 3.2);
 });
+
+Deno.test('mixed weighted/null-weight KPIs fall back to equal average', () => {
+  // KRA a: kpi w50 s5, kpi wNull s1 → equal avg (5+1)/2 = 3
+  const items = [
+    { itemId: 'a', itemType: 'kra' as const, parentId: null, weight: 100, score: null },
+    { itemId: 'a1', itemType: 'kpi' as const, parentId: 'a', weight: 50, score: 5 },
+    { itemId: 'a2', itemType: 'kpi' as const, parentId: 'a', weight: null, score: 1 },
+  ];
+  assertEquals(computeGoalScore(items, 'kpi'), 3);
+});
+
+Deno.test('ratingFromBands nearest fallback across a gap', () => {
+  const bands = [{ from_percent: 0, to_percent: 40, score: 2 }, { from_percent: 60, to_percent: 100, score: 5 }];
+  assertEquals(ratingFromBands(50, bands), 2);   // equidistant → earlier band
+  assertEquals(ratingFromBands(200, bands), 5);  // above all → nearest is band2
+  assertEquals(ratingFromBands(55, bands), 5);   // closer to band2 (dist 5) than band1 (dist 15)
+});
+
+Deno.test('computeGoalScore skips a KRA whose KPIs are all unscored (kpi level)', () => {
+  const items = [
+    { itemId: 'a', itemType: 'kra' as const, parentId: null, weight: 60, score: null },
+    { itemId: 'a1', itemType: 'kpi' as const, parentId: 'a', weight: 100, score: 4 },
+    { itemId: 'b', itemType: 'kra' as const, parentId: null, weight: 40, score: null },
+    { itemId: 'b1', itemType: 'kpi' as const, parentId: 'b', weight: 100, score: null },
+  ];
+  assertEquals(computeGoalScore(items, 'kpi'), 4); // only KRA a counts, not averaged-in zero
+});
+
+Deno.test('computeOverall competency-only when goals unscored', () => {
+  assertEquals(computeOverall(null, 3, true, 25), 3);
+});

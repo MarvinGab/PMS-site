@@ -36,17 +36,18 @@ export function ratingFromBands(pct: number | null, bands: Band[]): number | nul
   return best ? best.score : null;
 }
 
-// Weight-average a set of {weight, score}; null weights count as equal (1).
+// Average a set of {weight, score}, ignoring null scores. If every scored item
+// has a positive weight, weight the average; if any weight is null/0, the spec's
+// "null weight = equal" applies → plain average of all scored items.
 function weightedAverage(entries: { weight: number | null; score: number | null }[]): number | null {
   const scored = entries.filter((e) => e.score != null);
   if (scored.length === 0) return null;
-  const anyWeight = scored.some((e) => e.weight != null && e.weight > 0);
-  let num = 0, den = 0;
-  for (const e of scored) {
-    const w = anyWeight ? (e.weight ?? 0) : 1;
-    num += w * (e.score as number);
-    den += w;
+  const allWeighted = scored.every((e) => e.weight != null && e.weight > 0);
+  if (!allWeighted) {
+    return scored.reduce((a, e) => a + (e.score as number), 0) / scored.length;
   }
+  let num = 0, den = 0;
+  for (const e of scored) { num += (e.weight as number) * (e.score as number); den += (e.weight as number); }
   return den === 0 ? null : num / den;
 }
 
@@ -73,7 +74,7 @@ export function computeOverall(
   if (!competenciesEnabled || competencyScore == null) {
     return goalScore == null ? null : round2(goalScore);
   }
+  if (goalScore == null) return round2(competencyScore);
   const cw = (competencyWeight ?? 0) / 100;
-  const g = goalScore ?? 0;
-  return round2(g * (1 - cw) + competencyScore * cw);
+  return round2(goalScore * (1 - cw) + competencyScore * cw);
 }
