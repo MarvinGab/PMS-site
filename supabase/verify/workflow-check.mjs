@@ -398,5 +398,44 @@ export const evalFixture = await setupEvalCycle();
   check('employee cannot see manager rating before publish', empView.status === 403);
 }
 
+// --- HOD sees mapped employee stages; HR-final closes it out ---
+{
+  const iso3 = (d) => d.toISOString().slice(0, 10);
+  const pastW = iso3(new Date(Date.now() - 3 * 864e5));
+  const futW = iso3(new Date(Date.now() + 30 * 864e5));
+  await admin.from('cycle_phase_windows').insert([
+    { organization_id: evalFixture.orgId, cycle_id: evalFixture.cycleId, window_key: 'hod_review', starts_on: pastW, ends_on: futW },
+    { organization_id: evalFixture.orgId, cycle_id: evalFixture.cycleId, window_key: 'hr_calibration', starts_on: pastW, ends_on: futW },
+  ]);
+  await admin.from('appraisal_cycles').update({ status: 'review' }).eq('id', evalFixture.cycleId);
+
+  const empSubmitMgr = await callWorkflow(tokens.employee, 'eval.submit', { orgId: evalFixture.orgId, cycleId: evalFixture.cycleId, employeeId: evalFixture.emp.EMP002, stage: 'manager', evalVersion: 1 });
+  check('employee cannot submit the manager stage', empSubmitMgr.status === 403);
+
+  // HOD (Harry, EMP003 maps EMP002 via hod) can view the submitted manager stage.
+  const hodView = await callWorkflow(tokens.hod, 'eval.get', { orgId: evalFixture.orgId, cycleId: evalFixture.cycleId, employeeId: evalFixture.emp.EMP002, stage: 'manager' });
+  check('HOD can view the manager evaluation of a mapped employee', hodView.status === 200 && hodView.body.data.evaluation !== null);
+
+  // HOD stage ensure + submit.
+  const hodEnsure = await callWorkflow(tokens.hod, 'eval.ensure', { orgId: evalFixture.orgId, cycleId: evalFixture.cycleId, stage: 'hod', employeeId: evalFixture.emp.EMP002 });
+  check('HOD stage can be created after manager submitted', hodEnsure.status === 200);
+  const hIds = hodEnsure.body.data.goalScores.map((r) => r.goal_item_id);
+
+  const hodEmpty = await callWorkflow(tokens.hod, 'eval.submit', { orgId: evalFixture.orgId, cycleId: evalFixture.cycleId, employeeId: evalFixture.emp.EMP002, stage: 'hod', evalVersion: hodEnsure.body.data.evaluation.version });
+  check('submit refused when nothing is scored (NOTHING_SCORED)', hodEmpty.status === 422 && hodEmpty.body.error.code === 'NOTHING_SCORED');
+
+  const hodSave = await callWorkflow(tokens.hod, 'eval.save-scores', { orgId: evalFixture.orgId, cycleId: evalFixture.cycleId, employeeId: evalFixture.emp.EMP002, stage: 'hod', evalVersion: hodEnsure.body.data.evaluation.version, goalScores: [{ goalItemId: hIds[0], score: 4 }, { goalItemId: hIds[1], score: 4 }] });
+  check('HOD saves calibrated scores', hodSave.status === 200 && Number(hodSave.body.data.evaluation.overall_score) === 4);
+
+  // HR-final (hr user has no employee row but is hr_admin — HR bypass on stage + window).
+  const hrEnsure = await callWorkflow(tokens.hr, 'eval.ensure', { orgId: evalFixture.orgId, cycleId: evalFixture.cycleId, stage: 'hr_final', employeeId: evalFixture.emp.EMP002 });
+  check('HR-final stage can be created', hrEnsure.status === 200 && hrEnsure.body.data.evaluation.stage === 'hr_final');
+  const fIds = hrEnsure.body.data.goalScores.map((r) => r.goal_item_id);
+  const hrSave = await callWorkflow(tokens.hr, 'eval.save-scores', { orgId: evalFixture.orgId, cycleId: evalFixture.cycleId, employeeId: evalFixture.emp.EMP002, stage: 'hr_final', evalVersion: hrEnsure.body.data.evaluation.version, goalScores: [{ goalItemId: fIds[0], score: 5 }, { goalItemId: fIds[1], score: 3 }] });
+  check('HR saves final scores', hrSave.status === 200);
+  const hrSubmit = await callWorkflow(tokens.hr, 'eval.submit', { orgId: evalFixture.orgId, cycleId: evalFixture.cycleId, employeeId: evalFixture.emp.EMP002, stage: 'hr_final', evalVersion: hrSave.body.data.evaluation.version });
+  check('HR submits the final evaluation', hrSubmit.status === 200 && hrSubmit.body.data.evaluation.status === 'submitted');
+}
+
 // The end marker; later tasks append sections before this and bump the count.
 console.log(`workflow-check: PASS (${n} assertions)`);
