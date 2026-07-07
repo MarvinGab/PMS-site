@@ -106,6 +106,72 @@ export async function setupActiveCycle() {
 
 export const fixture = await setupActiveCycle();
 
+// Fresh active cycle for the evaluation tests: EMP002 has an APPROVED plan with
+// 2 KRAs (each one numeric-target KPI), a frozen rating scale + auto bands, and
+// self/manager_evaluation windows open. Self-contained; archives acme's working cycle first.
+export async function setupEvalCycle() {
+  const { data: org } = await admin.from('organizations').select('id').eq('key', 'acme-test').single();
+  const emp = {};
+  for (const code of ['EMP001', 'EMP002', 'EMP003']) {
+    const { data } = await admin.from('employees').select('id').eq('organization_id', org.id).eq('employee_code', code).single();
+    emp[code] = data.id;
+  }
+  await admin.from('appraisal_cycles').update({ status: 'archived', archived_at: new Date().toISOString() })
+    .eq('organization_id', org.id).neq('status', 'archived');
+  const { data: cycle } = await admin.from('appraisal_cycles').insert({
+    organization_id: org.id, name: 'Eval Cycle', framework_id: 'kra-kpi', status: 'active', activated_at: new Date().toISOString(),
+  }).select().single();
+  const iso2 = (d) => d.toISOString().slice(0, 10);
+  const pastW = iso2(new Date(Date.now() - 3 * 864e5));
+  const futW = iso2(new Date(Date.now() + 30 * 864e5));
+  await admin.from('cycle_phase_windows').insert([
+    { organization_id: org.id, cycle_id: cycle.id, window_key: 'self_evaluation', starts_on: pastW, ends_on: futW },
+    { organization_id: org.id, cycle_id: cycle.id, window_key: 'manager_evaluation', starts_on: pastW, ends_on: futW },
+  ]);
+  await admin.from('cycle_rating_scale_levels').insert([
+    { organization_id: org.id, cycle_id: cycle.id, point: 2, label: 'Below', range_from: 0, range_to: 59 },
+    { organization_id: org.id, cycle_id: cycle.id, point: 3, label: 'Meets', range_from: 60, range_to: 89 },
+    { organization_id: org.id, cycle_id: cycle.id, point: 5, label: 'Exceeds', range_from: 90, range_to: 200 },
+  ]);
+  await admin.from('cycle_auto_rating_bands').insert([
+    { organization_id: org.id, cycle_id: cycle.id, from_percent: 0, to_percent: 59, score: 2 },
+    { organization_id: org.id, cycle_id: cycle.id, from_percent: 60, to_percent: 89, score: 3 },
+    { organization_id: org.id, cycle_id: cycle.id, from_percent: 90, to_percent: 200, score: 5 },
+  ]);
+  await admin.from('cycle_target_types').insert({
+    organization_id: org.id, cycle_id: cycle.id, target_type_key: 'number', name: 'Number', is_numeric: true, lower_is_better: false,
+  });
+  // EMP002 assigned to a rating_level=kpi group (so KPIs carry scores).
+  const { data: group } = await admin.from('cycle_groups').insert({
+    organization_id: org.id, cycle_id: cycle.id, name: 'Sales', target_level: 'kpi', rating_level: 'kpi',
+  }).select().single();
+  const { data: part } = await admin.from('cycle_participants').insert({
+    organization_id: org.id, cycle_id: cycle.id, employee_id: emp.EMP002,
+  }).select().single();
+  await admin.from('cycle_participant_assignments').insert({
+    organization_id: org.id, cycle_id: cycle.id, participant_id: part.id, employee_id: emp.EMP002, group_id: group.id,
+  });
+  const { data: eplan } = await admin.from('employee_goal_plans').insert({
+    organization_id: org.id, cycle_id: cycle.id, employee_id: emp.EMP002, status: 'approved', approved_at: new Date().toISOString(),
+  }).select().single();
+  const mk = async (fields) => (await admin.from('employee_goal_items').insert({
+    organization_id: org.id, cycle_id: cycle.id, plan_id: eplan.id, employee_id: emp.EMP002, ...fields,
+  }).select().single()).data;
+  const kraA = await mk({ item_type: 'kra', title: 'Revenue', weight: 60, display_order: 0 });
+  await mk({ item_type: 'kpi', parent_item_id: kraA.id, title: 'New ARR', weight: 100, target_type_key: 'number', target_value: '100', display_order: 1 });
+  const kraB = await mk({ item_type: 'kra', title: 'Retention', weight: 40, display_order: 2 });
+  await mk({ item_type: 'kpi', parent_item_id: kraB.id, title: 'Churn', weight: 100, target_type_key: 'number', target_value: '100', display_order: 3 });
+  await admin.from('cycle_participants').insert({ organization_id: org.id, cycle_id: cycle.id, employee_id: emp.EMP001 });
+  const { data: draftPlan } = await admin.from('employee_goal_plans').insert({
+    organization_id: org.id, cycle_id: cycle.id, employee_id: emp.EMP001, status: 'draft',
+  }).select().single();
+  await admin.from('employee_goal_items').insert({
+    organization_id: org.id, cycle_id: cycle.id, plan_id: draftPlan.id, employee_id: emp.EMP001,
+    item_type: 'kra', title: 'Draft KRA', weight: 100, display_order: 0,
+  });
+  return { orgId: org.id, cycleId: cycle.id, emp, planId: eplan.id };
+}
+
 // --- goal.ensure-plan seeds from library + prefill; goal.get-plan reads it ---
 {
   const ensure = await callWorkflow(tokens.employee, 'goal.ensure-plan', { orgId: fixture.orgId, cycleId: fixture.cycleId });
@@ -249,6 +315,140 @@ export const fixture = await setupActiveCycle();
   });
   // HR has no employee row in acme, so save-items (which acts on the caller's own plan) is NO_EMPLOYEE, proving HR-bypass is about the window, not identity.
   check('HR save-items on own-plan path needs an employee row', hrSaveClosed.status === 403 && hrSaveClosed.body.error.code === 'NO_EMPLOYEE');
+}
+
+// ============ EVALUATIONS (Plan 3b) ============
+export const evalFixture = await setupEvalCycle();
+
+// --- eval.ensure blocked when the employee's own goal plan is not approved ---
+{
+  const notApproved = await callWorkflow(tokens.manager, 'eval.ensure', { orgId: evalFixture.orgId, cycleId: evalFixture.cycleId, stage: 'self' });
+  check('eval blocked when goals not approved (GOALS_NOT_APPROVED)', notApproved.status === 409 && notApproved.body.error.code === 'GOALS_NOT_APPROVED');
+}
+
+// --- eval.ensure seeds score rows; eval.get reads them (self stage) ---
+{
+  const ensure = await callWorkflow(tokens.employee, 'eval.ensure', { orgId: evalFixture.orgId, cycleId: evalFixture.cycleId, stage: 'self' });
+  check('eval.ensure creates a draft self evaluation', ensure.status === 200 && ensure.body.data.evaluation.stage === 'self' && ensure.body.data.evaluation.status === 'draft');
+  check('eval.ensure seeds a goal-score row per KPI (2)', ensure.body.data.goalScores.length === 2);
+
+  const again = await callWorkflow(tokens.employee, 'eval.ensure', { orgId: evalFixture.orgId, cycleId: evalFixture.cycleId, stage: 'self' });
+  check('eval.ensure is idempotent (seeded 0)', again.status === 200 && again.body.data.seeded === 0);
+
+  const get = await callWorkflow(tokens.employee, 'eval.get', { orgId: evalFixture.orgId, cycleId: evalFixture.cycleId, employeeId: evalFixture.emp.EMP002, stage: 'self' });
+  check('eval.get returns own self evaluation', get.status === 200 && get.body.data.goalScores.length === 2);
+
+  const mgrPrereq = await callWorkflow(tokens.manager, 'eval.ensure', { orgId: evalFixture.orgId, cycleId: evalFixture.cycleId, stage: 'manager', employeeId: evalFixture.emp.EMP002 });
+  check('manager eval blocked until self submitted', mgrPrereq.status === 409 && mgrPrereq.body.error.code === 'SELF_NOT_SUBMITTED');
+
+  const peek = await callWorkflow(tokens.employee, 'eval.get', { orgId: evalFixture.orgId, cycleId: evalFixture.cycleId, employeeId: evalFixture.emp.EMP001, stage: 'self' });
+  check('employee cannot view another employee evaluation', peek.status === 403);
+}
+
+// --- eval.save-scores computes achievement % + auto rating + overall ---
+{
+  const get = await callWorkflow(tokens.employee, 'eval.get', { orgId: evalFixture.orgId, cycleId: evalFixture.cycleId, employeeId: evalFixture.emp.EMP002, stage: 'self' });
+  const v = get.body.data.evaluation.version;
+  const ids = get.body.data.goalScores.map((r) => r.goal_item_id);
+  // Score KPI A at 120% (→ band score 5) and KPI B at 50% (→ band score 2).
+  const save = await callWorkflow(tokens.employee, 'eval.save-scores', {
+    orgId: evalFixture.orgId, cycleId: evalFixture.cycleId, employeeId: evalFixture.emp.EMP002, stage: 'self', evalVersion: v,
+    goalScores: [
+      { goalItemId: ids[0], achievementValue: '120' },
+      { goalItemId: ids[1], achievementValue: '50' },
+    ],
+    overallComment: 'Solid year',
+  });
+  check('save-scores succeeds', save.status === 200);
+  const scoreA = save.body.data.goalScores.find((r) => r.goal_item_id === ids[0]);
+  check('achievement % computed (120)', Number(scoreA.achievement_percent) === 120);
+  check('auto rating from bands (5)', Number(scoreA.score) === 5);
+  // KRA A=5 (w60), KRA B=2 (w40) → 5*0.6 + 2*0.4 = 3.8
+  check('overall rolled up (3.8)', Number(save.body.data.evaluation.overall_score) === 3.8);
+
+  const manual = await callWorkflow(tokens.employee, 'eval.save-scores', {
+    orgId: evalFixture.orgId, cycleId: evalFixture.cycleId, employeeId: evalFixture.emp.EMP002, stage: 'self', evalVersion: save.body.data.evaluation.version,
+    goalScores: [{ goalItemId: ids[0], achievementValue: '120', score: 3 }],
+  });
+  const scoreAManual = manual.body.data.goalScores.find((r) => r.goal_item_id === ids[0]);
+  check('manual score overrides auto rating', Number(scoreAManual.score) === 3);
+
+  const stale = await callWorkflow(tokens.employee, 'eval.save-scores', {
+    orgId: evalFixture.orgId, cycleId: evalFixture.cycleId, employeeId: evalFixture.emp.EMP002, stage: 'self', evalVersion: 1,
+    goalScores: [],
+  });
+  check('save-scores rejects a stale eval version', stale.status === 409 && stale.body.error.code === 'CONFLICT');
+}
+
+// --- self submit unlocks manager; manager rates + submits ---
+{
+  // Ensure self is scored (Task 3 left it draft with scores) then submit.
+  const selfGet = await callWorkflow(tokens.employee, 'eval.get', { orgId: evalFixture.orgId, cycleId: evalFixture.cycleId, employeeId: evalFixture.emp.EMP002, stage: 'self' });
+  const selfSubmit = await callWorkflow(tokens.employee, 'eval.submit', { orgId: evalFixture.orgId, cycleId: evalFixture.cycleId, employeeId: evalFixture.emp.EMP002, stage: 'self', evalVersion: selfGet.body.data.evaluation.version });
+  check('employee submits self evaluation', selfSubmit.status === 200 && selfSubmit.body.data.evaluation.status === 'submitted');
+
+  const reSubmit = await callWorkflow(tokens.employee, 'eval.submit', { orgId: evalFixture.orgId, cycleId: evalFixture.cycleId, employeeId: evalFixture.emp.EMP002, stage: 'self', evalVersion: selfSubmit.body.data.evaluation.version });
+  check('re-submitting a submitted self evaluation is rejected', reSubmit.status === 409 && reSubmit.body.error.code === 'EVAL_LOCKED');
+
+  // Now the manager stage is unlocked.
+  const mgrEnsure = await callWorkflow(tokens.manager, 'eval.ensure', { orgId: evalFixture.orgId, cycleId: evalFixture.cycleId, stage: 'manager', employeeId: evalFixture.emp.EMP002 });
+  check('manager eval unlocked after self submitted', mgrEnsure.status === 200 && mgrEnsure.body.data.evaluation.stage === 'manager');
+  const mIds = mgrEnsure.body.data.goalScores.map((r) => r.goal_item_id);
+
+  const empRatesMgr = await callWorkflow(tokens.employee, 'eval.save-scores', { orgId: evalFixture.orgId, cycleId: evalFixture.cycleId, employeeId: evalFixture.emp.EMP002, stage: 'manager', evalVersion: mgrEnsure.body.data.evaluation.version, goalScores: [] });
+  check('employee cannot write the manager stage', empRatesMgr.status === 403);
+
+  const mgrSave = await callWorkflow(tokens.manager, 'eval.save-scores', {
+    orgId: evalFixture.orgId, cycleId: evalFixture.cycleId, employeeId: evalFixture.emp.EMP002, stage: 'manager', evalVersion: mgrEnsure.body.data.evaluation.version,
+    goalScores: [{ goalItemId: mIds[0], achievementValue: '95' }, { goalItemId: mIds[1], achievementValue: '95' }],
+  });
+  check('manager saves scores', mgrSave.status === 200 && Number(mgrSave.body.data.evaluation.overall_score) === 5);
+
+  const mgrSubmit = await callWorkflow(tokens.manager, 'eval.submit', { orgId: evalFixture.orgId, cycleId: evalFixture.cycleId, employeeId: evalFixture.emp.EMP002, stage: 'manager', evalVersion: mgrSave.body.data.evaluation.version });
+  check('manager submits evaluation', mgrSubmit.status === 200 && mgrSubmit.body.data.evaluation.status === 'submitted');
+
+  // Employee cannot yet see the manager rating (after_publish default, unpublished).
+  const empView = await callWorkflow(tokens.employee, 'eval.get', { orgId: evalFixture.orgId, cycleId: evalFixture.cycleId, employeeId: evalFixture.emp.EMP002, stage: 'manager' });
+  check('employee cannot see manager rating before publish', empView.status === 403);
+}
+
+// --- HOD sees mapped employee stages; HR-final closes it out ---
+{
+  const iso3 = (d) => d.toISOString().slice(0, 10);
+  const pastW = iso3(new Date(Date.now() - 3 * 864e5));
+  const futW = iso3(new Date(Date.now() + 30 * 864e5));
+  await admin.from('cycle_phase_windows').insert([
+    { organization_id: evalFixture.orgId, cycle_id: evalFixture.cycleId, window_key: 'hod_review', starts_on: pastW, ends_on: futW },
+    { organization_id: evalFixture.orgId, cycle_id: evalFixture.cycleId, window_key: 'hr_calibration', starts_on: pastW, ends_on: futW },
+  ]);
+  await admin.from('appraisal_cycles').update({ status: 'review' }).eq('id', evalFixture.cycleId);
+
+  const empSubmitMgr = await callWorkflow(tokens.employee, 'eval.submit', { orgId: evalFixture.orgId, cycleId: evalFixture.cycleId, employeeId: evalFixture.emp.EMP002, stage: 'manager', evalVersion: 1 });
+  check('employee cannot submit the manager stage', empSubmitMgr.status === 403);
+
+  // HOD (Harry, EMP003 maps EMP002 via hod) can view the submitted manager stage.
+  const hodView = await callWorkflow(tokens.hod, 'eval.get', { orgId: evalFixture.orgId, cycleId: evalFixture.cycleId, employeeId: evalFixture.emp.EMP002, stage: 'manager' });
+  check('HOD can view the manager evaluation of a mapped employee', hodView.status === 200 && hodView.body.data.evaluation !== null);
+
+  // HOD stage ensure + submit.
+  const hodEnsure = await callWorkflow(tokens.hod, 'eval.ensure', { orgId: evalFixture.orgId, cycleId: evalFixture.cycleId, stage: 'hod', employeeId: evalFixture.emp.EMP002 });
+  check('HOD stage can be created after manager submitted', hodEnsure.status === 200);
+  const hIds = hodEnsure.body.data.goalScores.map((r) => r.goal_item_id);
+
+  const hodEmpty = await callWorkflow(tokens.hod, 'eval.submit', { orgId: evalFixture.orgId, cycleId: evalFixture.cycleId, employeeId: evalFixture.emp.EMP002, stage: 'hod', evalVersion: hodEnsure.body.data.evaluation.version });
+  check('submit refused when nothing is scored (NOTHING_SCORED)', hodEmpty.status === 422 && hodEmpty.body.error.code === 'NOTHING_SCORED');
+
+  const hodSave = await callWorkflow(tokens.hod, 'eval.save-scores', { orgId: evalFixture.orgId, cycleId: evalFixture.cycleId, employeeId: evalFixture.emp.EMP002, stage: 'hod', evalVersion: hodEnsure.body.data.evaluation.version, goalScores: [{ goalItemId: hIds[0], score: 4 }, { goalItemId: hIds[1], score: 4 }] });
+  check('HOD saves calibrated scores', hodSave.status === 200 && Number(hodSave.body.data.evaluation.overall_score) === 4);
+
+  // HR-final (hr user has no employee row but is hr_admin — HR bypass on stage + window).
+  const hrEnsure = await callWorkflow(tokens.hr, 'eval.ensure', { orgId: evalFixture.orgId, cycleId: evalFixture.cycleId, stage: 'hr_final', employeeId: evalFixture.emp.EMP002 });
+  check('HR-final stage can be created', hrEnsure.status === 200 && hrEnsure.body.data.evaluation.stage === 'hr_final');
+  const fIds = hrEnsure.body.data.goalScores.map((r) => r.goal_item_id);
+  const hrSave = await callWorkflow(tokens.hr, 'eval.save-scores', { orgId: evalFixture.orgId, cycleId: evalFixture.cycleId, employeeId: evalFixture.emp.EMP002, stage: 'hr_final', evalVersion: hrEnsure.body.data.evaluation.version, goalScores: [{ goalItemId: fIds[0], score: 5 }, { goalItemId: fIds[1], score: 3 }] });
+  check('HR saves final scores', hrSave.status === 200);
+  const hrSubmit = await callWorkflow(tokens.hr, 'eval.submit', { orgId: evalFixture.orgId, cycleId: evalFixture.cycleId, employeeId: evalFixture.emp.EMP002, stage: 'hr_final', evalVersion: hrSave.body.data.evaluation.version });
+  check('HR submits the final evaluation', hrSubmit.status === 200 && hrSubmit.body.data.evaluation.status === 'submitted');
 }
 
 // The end marker; later tasks append sections before this and bump the count.
