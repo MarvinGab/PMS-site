@@ -5,17 +5,35 @@ function backoffMinutes(n: number): number { return Math.min(60, 2 ** n); }
 
 type BgJob = { id: string; organization_id: string; cycle_id: string | null; job_type: string; payload: Record<string, unknown>; retry_count: number; max_retries: number };
 
-// Insert an email job (queued) + always an in-app notification. Email is toggle-gated by the caller.
-async function enqueueEmail(ctx: JobsCtx, orgId: string, cycleId: string | null, templateKey: string, email: string, memberId: string | null, subject: string, payload: Record<string, unknown>) {
-  await ctx.admin.from('email_jobs').insert({ organization_id: orgId, cycle_id: cycleId, template_key: templateKey, recipient_email: email, recipient_member_id: memberId, subject, payload, status: 'queued' });
+// Insert a queued email job. Returns false (logged) on a DB error so the caller never over-counts
+// a write that didn't land, and a done job's result stays truthful.
+async function enqueueEmail(ctx: JobsCtx, orgId: string, cycleId: string | null, templateKey: string, email: string, memberId: string | null, subject: string, payload: Record<string, unknown>): Promise<boolean> {
+  const { error } = await ctx.admin.from('email_jobs').insert({ organization_id: orgId, cycle_id: cycleId, template_key: templateKey, recipient_email: email, recipient_member_id: memberId, subject, payload, status: 'queued' });
+  if (error) { console.error('enqueueEmail insert', error); return false; }
+  return true;
 }
-async function notify(ctx: JobsCtx, orgId: string, cycleId: string | null, memberId: string, type: string, title: string, body: string) {
-  await ctx.admin.from('notifications').insert({ organization_id: orgId, cycle_id: cycleId, recipient_member_id: memberId, type, title, body });
+async function notify(ctx: JobsCtx, orgId: string, cycleId: string | null, memberId: string, type: string, title: string, body: string): Promise<boolean> {
+  const { error } = await ctx.admin.from('notifications').insert({ organization_id: orgId, cycle_id: cycleId, recipient_member_id: memberId, type, title, body });
+  if (error) { console.error('notify insert', error); return false; }
+  return true;
+}
+
+// Idempotency probes for publish_notification (at-least-once retries must not double-send).
+async function hasNotification(ctx: JobsCtx, orgId: string, cycleId: string, memberId: string, type: string): Promise<boolean> {
+  const { data, error } = await ctx.admin.from('notifications').select('id').eq('organization_id', orgId).eq('cycle_id', cycleId).eq('recipient_member_id', memberId).eq('type', type).limit(1);
+  if (error) { console.error('hasNotification', error); throw Object.assign(new Error('Database error'), { code: 'DB_ERROR', status: 500 }); }
+  return (data ?? []).length > 0;
+}
+async function hasEmailJob(ctx: JobsCtx, orgId: string, cycleId: string, memberId: string, templateKey: string): Promise<boolean> {
+  const { data, error } = await ctx.admin.from('email_jobs').select('id').eq('organization_id', orgId).eq('cycle_id', cycleId).eq('recipient_member_id', memberId).eq('template_key', templateKey).limit(1);
+  if (error) { console.error('hasEmailJob', error); throw Object.assign(new Error('Database error'), { code: 'DB_ERROR', status: 500 }); }
+  return (data ?? []).length > 0;
 }
 
 // Is the cycle's email mirror toggle on? Snapshot notification block; default OFF unless explicitly enabled.
 async function emailMirrorEnabled(ctx: JobsCtx, orgId: string, cycleId: string): Promise<boolean> {
-  const { data } = await ctx.admin.from('cycle_config_snapshots').select('snapshot').eq('cycle_id', cycleId).eq('organization_id', orgId).maybeSingle();
+  const { data, error } = await ctx.admin.from('cycle_config_snapshots').select('snapshot').eq('cycle_id', cycleId).eq('organization_id', orgId).maybeSingle();
+  if (error) { console.error('emailMirrorEnabled', error); throw Object.assign(new Error('Database error'), { code: 'DB_ERROR', status: 500 }); }
   const snap = (data?.snapshot ?? {}) as Record<string, any>;
   return snap?.notifications?.emailCommsEnabled === true || snap?.features?.emailCommsEnabled === true;
 }
@@ -29,8 +47,13 @@ async function participants(ctx: JobsCtx, orgId: string, cycleId: string) {
   return data ?? [];
 }
 async function memberIdForUser(ctx: JobsCtx, orgId: string, userId: string): Promise<string | null> {
-  const { data } = await ctx.admin.from('org_members').select('id').eq('organization_id', orgId).eq('user_id', userId).maybeSingle();
+  const { data, error } = await ctx.admin.from('org_members').select('id').eq('organization_id', orgId).eq('user_id', userId).maybeSingle();
+  if (error) { console.error('memberIdForUser', error); throw Object.assign(new Error('Database error'), { code: 'DB_ERROR', status: 500 }); }
   return data?.id ?? null;
+}
+async function setProgress(ctx: JobsCtx, jobId: string, progress: number, total: number) {
+  const { error } = await ctx.admin.from('background_jobs').update({ progress, total }).eq('id', jobId);
+  if (error) console.error('setProgress', jobId, error);
 }
 
 async function runPublishNotification(ctx: JobsCtx, job: BgJob): Promise<{ emails: number; notifications: number }> {
@@ -38,17 +61,24 @@ async function runPublishNotification(ctx: JobsCtx, job: BgJob): Promise<{ email
   if (!cycleId) throw Object.assign(new Error('publish_notification requires cycleId'), { code: 'BAD_REQUEST', status: 400 });
   const emailOn = await emailMirrorEnabled(ctx, job.organization_id, cycleId);
   const parts = await participants(ctx, job.organization_id, cycleId);
-  const { data: cyc } = await ctx.admin.from('appraisal_cycles').select('name').eq('id', cycleId).eq('organization_id', job.organization_id).maybeSingle();
+  const { data: cyc, error: cErr } = await ctx.admin.from('appraisal_cycles').select('name').eq('id', cycleId).eq('organization_id', job.organization_id).maybeSingle();
+  if (cErr) { console.error('publish cycle name', cErr); throw Object.assign(new Error('Database error'), { code: 'DB_ERROR', status: 500 }); }
   const cycleName = cyc?.name ?? 'your cycle';
   let emails = 0, notifications = 0, done = 0;
   for (const p of parts) {
     const e = p.employees as unknown as { email: string | null; user_id: string | null } | null;
     done += 1;
-    await ctx.admin.from('background_jobs').update({ progress: done, total: parts.length }).eq('id', job.id);
+    await setProgress(ctx, job.id, done, parts.length);
     if (!e?.user_id) continue;
     const memberId = await memberIdForUser(ctx, job.organization_id, e.user_id);
-    if (memberId) { await notify(ctx, job.organization_id, cycleId, memberId, 'result_published', 'Results published', `Your ${cycleName} results are available.`); notifications += 1; }
-    if (emailOn && e.email) { await enqueueEmail(ctx, job.organization_id, cycleId, 'publish', e.email, memberId, 'Your appraisal results are published', { cycleName, orgName: '' }); emails += 1; }
+    if (!memberId) continue;
+    // Idempotent under at-least-once retries: skip anyone already notified/emailed for this cycle.
+    if (!(await hasNotification(ctx, job.organization_id, cycleId, memberId, 'result_published'))) {
+      if (await notify(ctx, job.organization_id, cycleId, memberId, 'result_published', 'Results published', `Your ${cycleName} results are available.`)) notifications += 1;
+    }
+    if (emailOn && e.email && !(await hasEmailJob(ctx, job.organization_id, cycleId, memberId, 'publish'))) {
+      if (await enqueueEmail(ctx, job.organization_id, cycleId, 'publish', e.email, memberId, 'Your appraisal results are published', { cycleName, orgName: '' })) emails += 1;
+    }
   }
   return { emails, notifications };
 }
@@ -60,14 +90,21 @@ async function runReminderBatch(ctx: JobsCtx, job: BgJob): Promise<{ emails: num
   const emailOn = await emailMirrorEnabled(ctx, job.organization_id, cycleId);
   const parts = await participants(ctx, job.organization_id, cycleId);
   let emails = 0, notifications = 0, done = 0;
+  // Reminders are intentionally repeatable (HR may send several batches over a cycle), so — unlike
+  // publish_notification — there is deliberately NO dedup here. This is at-least-once: a rare mid-loop
+  // retry may re-notify participants already processed on the prior attempt. Accepted: an extra
+  // reminder is harmless, and suppressing legitimate repeat reminder batches would be worse.
   for (const p of parts) {
     const e = p.employees as unknown as { email: string | null; user_id: string | null } | null;
     done += 1;
-    await ctx.admin.from('background_jobs').update({ progress: done, total: parts.length }).eq('id', job.id);
+    await setProgress(ctx, job.id, done, parts.length);
     if (!e?.user_id) continue;
     const memberId = await memberIdForUser(ctx, job.organization_id, e.user_id);
-    if (memberId) { await notify(ctx, job.organization_id, cycleId, memberId, 'reminder', 'Reminder', `Please complete ${stage}.`); notifications += 1; }
-    if (emailOn && e.email) { await enqueueEmail(ctx, job.organization_id, cycleId, 'reminder', e.email, memberId, `Reminder: ${stage}`, { stage, cycleName: '' }); emails += 1; }
+    if (!memberId) continue;
+    if (await notify(ctx, job.organization_id, cycleId, memberId, 'reminder', 'Reminder', `Please complete ${stage}.`)) notifications += 1;
+    if (emailOn && e.email) {
+      if (await enqueueEmail(ctx, job.organization_id, cycleId, 'reminder', e.email, memberId, `Reminder: ${stage}`, { stage, cycleName: '' })) emails += 1;
+    }
   }
   return { emails, notifications };
 }

@@ -84,6 +84,13 @@ async function enqueueEmail(template = 'publish') {
   check('a result_published notification was created', (notes ?? []).length >= 1);
   const { data: mails } = await admin.from('email_jobs').select('template_key, status').eq('cycle_id', cyc.id).eq('template_key', 'publish');
   check('a publish email_job was queued (toggle on)', (mails ?? []).length >= 1 && mails[0].status === 'queued');
+
+  // Idempotency: re-running publish_notification for the same cycle must NOT duplicate the fan-out.
+  const { data: bg2 } = await admin.from('background_jobs').insert({ organization_id: org.id, cycle_id: cyc.id, job_type: 'publish_notification', payload: { cycleId: cyc.id }, status: 'queued' }).select().single();
+  const run2 = await callJobs('jobs.run-background', {});
+  check('re-run publish_notification is claimed + done', run2.status === 200 && run2.body.data.ranJob === bg2.id);
+  const { data: notes2 } = await admin.from('notifications').select('id').eq('cycle_id', cyc.id).eq('type', 'result_published');
+  check('no duplicate result_published notification on re-run (idempotent)', (notes2 ?? []).length === 1);
 }
 
 // --- run-background with an empty queue returns ranJob null ---
