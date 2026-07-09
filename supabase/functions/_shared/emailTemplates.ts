@@ -43,10 +43,13 @@ export function renderEmail(
       return { subject, html, text };
     }
     default: {
-      const subject = esc(payload.subject ?? fallbackSubject);
+      // `subject` is a plaintext email header — returned raw. HTML-escaping it would corrupt
+      // legitimate subjects (e.g. "Q&A"); HTML sinks escape at render. The html body below
+      // IS escaped (layout() escapes the title, esc() escapes the body) — the real injection sink.
+      const rawSubject = String(payload.subject ?? fallbackSubject);
       const bodyText = String(payload.body ?? payload.message ?? '');
-      const html = layout(String(payload.subject ?? fallbackSubject), `<p>${esc(bodyText)}</p>`);
-      return { subject: String(payload.subject ?? fallbackSubject), html, text: bodyText || String(payload.subject ?? fallbackSubject) };
+      const html = layout(rawSubject, `<p>${esc(bodyText)}</p>`);
+      return { subject: rawSubject, html, text: bodyText || rawSubject };
     }
   }
 }

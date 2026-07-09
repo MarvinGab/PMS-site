@@ -31,3 +31,13 @@ Deno.test('payload values are HTML-escaped', () => {
   assertEquals(r.html.includes('<script>x</script>'), false);
   assertStringIncludes(r.html, '&lt;script&gt;');
 });
+
+Deno.test('generic fallback escapes the HTML body/title but keeps the subject plaintext', () => {
+  const r = renderEmail('mystery', { subject: 'Q&A <b>', body: '<script>x</script>' }, 'Notification');
+  // Subject is a plaintext email header — returned verbatim (not HTML-mangled).
+  assertEquals(r.subject, 'Q&A <b>');
+  // The html (the real injection sink) escapes both the title and the body.
+  assertEquals(r.html.includes('<script>x</script>'), false);
+  assertStringIncludes(r.html, '&lt;script&gt;');
+  assertStringIncludes(r.html, 'Q&amp;A &lt;b&gt;');
+});
