@@ -68,6 +68,10 @@ async function enqueueEmail(template = 'publish') {
 
 // --- background: publish_notification expands to notifications (+ emails when toggle on) ---
 {
+  // Clear any queued background jobs left by EARLIER suites (admin-check enqueues gamma jobs).
+  // claim_background_job claims the globally-oldest queued row, so our own job must be the only
+  // queued one for run-background to claim it deterministically.
+  await admin.from('background_jobs').update({ status: 'cancelled' }).eq('status', 'queued');
   // Fresh cycle for acme with email mirror ON and EMP002 (Eve, linked user) as an active participant.
   await admin.from('appraisal_cycles').update({ status: 'archived', archived_at: new Date().toISOString() }).eq('organization_id', org.id).neq('status', 'archived');
   const { data: cyc } = await admin.from('appraisal_cycles').insert({ organization_id: org.id, name: 'Jobs Cycle', framework_id: 'kra', status: 'published' }).select().single();
@@ -95,7 +99,7 @@ async function enqueueEmail(template = 'publish') {
 
 // --- run-background with an empty queue returns ranJob null ---
 {
-  await admin.from('background_jobs').update({ status: 'cancelled' }).eq('organization_id', org.id).eq('status', 'queued');
+  await admin.from('background_jobs').update({ status: 'cancelled' }).eq('status', 'queued');
   const empty = await callJobs('jobs.run-background', {});
   check('run-background is a no-op on an empty queue', empty.status === 200 && empty.body.data.ranJob === null);
 }
