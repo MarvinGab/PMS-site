@@ -8,6 +8,7 @@ import { inviteHandlers } from './invites.ts';
 import { activationHandlers } from './activation.ts';
 import { publishingHandlers } from './publishing.ts';
 import { concernHandlers } from './concerns.ts';
+import { jobsHandlers } from './jobs.ts';
 
 serveActions({
   'admin.whoami': (_payload, ctx) =>
@@ -21,4 +22,5 @@ serveActions({
   ...activationHandlers,
   ...publishingHandlers,
   ...concernHandlers,
+  ...jobsHandlers,
 });

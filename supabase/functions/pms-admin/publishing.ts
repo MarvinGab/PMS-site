@@ -79,6 +79,11 @@ export const publishingHandlers: Record<string, Handler> = {
       await ctx.admin.from('cycle_publications').delete().eq('id', publication.id).eq('organization_id', orgId);
       throw e;
     }
+    // Queue the publish-notification fan-out (emails + in-app notifications) for the worker.
+    const { error: jobErr } = await ctx.admin.from('background_jobs')
+      .insert({ organization_id: orgId, cycle_id: cycleId, job_type: 'publish_notification', payload: { cycleId }, created_by: ctx.userId, status: 'queued' });
+    if (jobErr) console.error('enqueue publish_notification', jobErr); // non-fatal: results are published regardless
+
     await ctx.audit({ organizationId: orgId, cycleId, action: 'publish.publish', entityType: 'cycle_publication', entityId: publication.id, note: force ? `forced: ${reason}` : 'within tolerance' });
     return { publication, cycle: freshCycle };
   },
