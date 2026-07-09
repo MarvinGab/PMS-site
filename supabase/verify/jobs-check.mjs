@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { adminClient, SUPABASE_URL, SERVICE_KEY } from './_clients.mjs';
+import { adminClient, SUPABASE_URL, SERVICE_KEY, ANON_KEY } from './_clients.mjs';
 
 const admin = adminClient();
 const JOBS_URL = `${SUPABASE_URL}/functions/v1/pms-jobs`;
@@ -22,6 +22,11 @@ async function enqueueEmail(template = 'publish') {
 {
   const bad = await fetch(JOBS_URL, { method: 'POST', headers: { Authorization: 'Bearer not-the-key', 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'jobs.drain-emails' }) });
   check('worker rejects a non-service-role bearer', bad.status === 401);
+}
+
+{
+  const anon = await fetch(JOBS_URL, { method: 'POST', headers: { Authorization: `Bearer ${ANON_KEY}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'jobs.drain-emails' }) });
+  check('worker rejects a valid anon token (role check)', anon.status === 401);
 }
 
 // --- simulate-success: job → sent + one attempt logged ---
