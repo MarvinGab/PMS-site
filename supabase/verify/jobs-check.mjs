@@ -66,4 +66,37 @@ async function enqueueEmail(template = 'publish') {
   check('a job already in sending is not re-claimed by drain', after.status === 'sending');
 }
 
+// --- background: publish_notification expands to notifications (+ emails when toggle on) ---
+{
+  // Fresh cycle for acme with email mirror ON and EMP002 (Eve, linked user) as an active participant.
+  await admin.from('appraisal_cycles').update({ status: 'archived', archived_at: new Date().toISOString() }).eq('organization_id', org.id).neq('status', 'archived');
+  const { data: cyc } = await admin.from('appraisal_cycles').insert({ organization_id: org.id, name: 'Jobs Cycle', framework_id: 'kra', status: 'published' }).select().single();
+  await admin.from('cycle_config_snapshots').insert({ organization_id: org.id, cycle_id: cyc.id, snapshot: { notifications: { emailCommsEnabled: true } } });
+  const { data: eve } = await admin.from('employees').select('id, user_id').eq('organization_id', org.id).eq('employee_code', 'EMP002').single();
+  await admin.from('cycle_participants').insert({ organization_id: org.id, cycle_id: cyc.id, employee_id: eve.id });
+  const { data: bg } = await admin.from('background_jobs').insert({ organization_id: org.id, cycle_id: cyc.id, job_type: 'publish_notification', payload: { cycleId: cyc.id }, status: 'queued' }).select().single();
+
+  const run = await callJobs('jobs.run-background', {});
+  check('run-background processes the publish_notification', run.status === 200 && run.body.data.ranJob === bg.id);
+  const { data: after } = await admin.from('background_jobs').select('status, result, progress').eq('id', bg.id).single();
+  check('background job marked done with result', after.status === 'done' && after.result && after.result.notifications >= 1);
+  const { data: notes } = await admin.from('notifications').select('type').eq('cycle_id', cyc.id).eq('type', 'result_published');
+  check('a result_published notification was created', (notes ?? []).length >= 1);
+  const { data: mails } = await admin.from('email_jobs').select('template_key, status').eq('cycle_id', cyc.id).eq('template_key', 'publish');
+  check('a publish email_job was queued (toggle on)', (mails ?? []).length >= 1 && mails[0].status === 'queued');
+}
+
+// --- run-background with an empty queue returns ranJob null ---
+{
+  await admin.from('background_jobs').update({ status: 'cancelled' }).eq('organization_id', org.id).eq('status', 'queued');
+  const empty = await callJobs('jobs.run-background', {});
+  check('run-background is a no-op on an empty queue', empty.status === 200 && empty.body.data.ranJob === null);
+}
+
+// --- tick runs both stages ---
+{
+  const tick = await callJobs('jobs.tick', { transport: 'simulate-success' });
+  check('tick returns email + background summaries', tick.status === 200 && tick.body.data.emails && 'background' in tick.body.data);
+}
+
 console.log(`jobs-check: PASS (${n} assertions)`);

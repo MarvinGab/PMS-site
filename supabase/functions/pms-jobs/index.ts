@@ -1,5 +1,6 @@
 import { createClient, SupabaseClient } from 'npm:@supabase/supabase-js@2';
 import { emailHandlers } from './emails.ts';
+import { backgroundHandlers } from './background.ts';
 
 const CORS = { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Headers': 'authorization, content-type' };
 
@@ -27,7 +28,7 @@ function callerIsServiceRole(req: Request): boolean {
   }
 }
 
-const handlers: Record<string, JobsHandler> = { ...emailHandlers };
+const handlers: Record<string, JobsHandler> = { ...emailHandlers, ...backgroundHandlers };
 
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: CORS });
