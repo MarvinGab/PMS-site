@@ -120,15 +120,20 @@ export const backgroundHandlers: Record<string, JobsHandler> = {
       if (job.job_type === 'publish_notification') result = await runPublishNotification(ctx, job);
       else if (job.job_type === 'reminder_batch') result = await runReminderBatch(ctx, job);
       else throw Object.assign(new Error(`unknown job_type ${job.job_type}`), { code: 'BAD_REQUEST', status: 400 });
-      await ctx.admin.from('background_jobs').update({ status: 'done', finished_at: new Date().toISOString(), result }).eq('id', job.id);
+      // Error-check the terminal write: a silent failure here would strand the job in 'running'
+      // (claim only picks 'queued'), and — unlike publish_notification — a reminder re-run isn't idempotent.
+      const { error: dErr } = await ctx.admin.from('background_jobs').update({ status: 'done', finished_at: new Date().toISOString(), result }).eq('id', job.id);
+      if (dErr) console.error('mark background done failed', job.id, dErr);
       return { ranJob: job.id, jobType: job.job_type, result };
     } catch (e) {
       const rc = (job.retry_count ?? 0) + 1;
       if (rc < (job.max_retries ?? 3)) {
         const next = new Date(Date.now() + backoffMinutes(rc) * 60_000).toISOString();
-        await ctx.admin.from('background_jobs').update({ status: 'queued', retry_count: rc, scheduled_at: next, error: (e as Error).message }).eq('id', job.id);
+        const { error: qErr } = await ctx.admin.from('background_jobs').update({ status: 'queued', retry_count: rc, scheduled_at: next, error: (e as Error).message }).eq('id', job.id);
+        if (qErr) console.error('requeue background failed', job.id, qErr);
       } else {
-        await ctx.admin.from('background_jobs').update({ status: 'failed', retry_count: rc, finished_at: new Date().toISOString(), error: (e as Error).message }).eq('id', job.id);
+        const { error: fErr } = await ctx.admin.from('background_jobs').update({ status: 'failed', retry_count: rc, finished_at: new Date().toISOString(), error: (e as Error).message }).eq('id', job.id);
+        if (fErr) console.error('mark background failed failed', job.id, fErr);
       }
       return { ranJob: job.id, jobType: job.job_type, failed: true };
     }

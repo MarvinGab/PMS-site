@@ -1,1 +1,3 @@
+# MUST stay true: the service_role auth in index.ts trusts the JWT role claim ONLY because the
+# gateway verifies the signature first. Flipping this to false silently reopens a forge-a-role hole.
 verify_jwt = true
