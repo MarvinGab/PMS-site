@@ -599,6 +599,9 @@ let goodRun;
   const forced = await callAdmin(superT, 'publish.publish', { orgId: gamma.id, cycleId: pcycle.id, force: true, reason: 'Exec sign-off' });
   check('publish succeeds with force + reason', forced.status === 200 && forced.body.data.cycle.status === 'published');
 
+  const { data: pubJob } = await admin.from('background_jobs').select('job_type, status').eq('cycle_id', pcycle.id).eq('job_type', 'publish_notification');
+  check('publish enqueues a publish_notification background job', (pubJob ?? []).length === 1 && pubJob[0].status === 'queued');
+
   const again = await callAdmin(superT, 'publish.publish', { orgId: gamma.id, cycleId: pcycle.id, force: true, reason: 'x' });
   check('re-publish rejected while already published', again.status === 409 && again.body.error.code === 'ALREADY_PUBLISHED');
 
@@ -610,6 +613,17 @@ let goodRun;
 
   const revokeAgain = await callAdmin(superT, 'publish.revoke', { orgId: gamma.id, cycleId: pcycle.id, reason: 'x' });
   check('revoke with no live publication rejected', revokeAgain.status === 409 && revokeAgain.body.error.code === 'NOT_PUBLISHED');
+}
+
+// --- jobs.enqueue-reminders (HR only) ---
+{
+  const { data: rc } = await admin.from('appraisal_cycles').select('id').eq('organization_id', gamma.id).order('created_at', { ascending: false }).limit(1).single();
+  const denied = await callAdmin(empT, 'jobs.enqueue-reminders', { orgId: gamma.id, cycleId: rc.id, stage: 'self evaluation' });
+  check('employee cannot enqueue reminders', denied.status === 403);
+  const ok = await callAdmin(superT, 'jobs.enqueue-reminders', { orgId: gamma.id, cycleId: rc.id, stage: 'self evaluation' });
+  check('HR enqueues a reminder_batch job', ok.status === 200 && ok.body.data.jobId);
+  const { data: rj } = await admin.from('background_jobs').select('job_type').eq('id', ok.body.data.jobId).single();
+  check('reminder_batch job created', rj.job_type === 'reminder_batch');
 }
 
 console.log(`admin-check: PASS (${n} assertions)`);

@@ -321,4 +321,16 @@ assert.ok(org, 'seed org missing — run seed-foundation.mjs first');
   check('archived cycle insert succeeds alongside the working cycle', archivedErr === null);
 }
 
+// --- Plan 4 claim RPCs are backend-only (not callable by anon or a logged-in employee) ---
+{
+  const anon = anonClient();
+  const a1 = await anon.rpc('claim_email_jobs', { p_limit: 1 });
+  check('claim_email_jobs denied for anon', a1.error?.code === '42501');
+  const a2 = await anon.rpc('claim_background_job', {});
+  check('claim_background_job denied for anon', a2.error?.code === '42501');
+  const { client: empC } = await signIn(USERS.employee, PASSWORD);
+  const e1 = await empC.rpc('claim_email_jobs', { p_limit: 1 });
+  check('claim_email_jobs denied for authenticated employee', e1.error?.code === '42501');
+}
+
 console.log(`rls-check: PASS (${n} assertions)`);
