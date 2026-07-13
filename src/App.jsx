@@ -3,7 +3,9 @@ import { AppProvider, useApp } from './AppContext';
 import { readWizardStateSync, syncEmployeeCredentialsForOrg } from './backend/stateStore';
 import { logAuditEvent } from './backend/auditLog';
 import { SESSION_TIMEOUT_EVENT } from './backend/sessionTimeout';
+import { supabase } from './backend/supabaseClient';
 import LoginPage from './pages/LoginPage';
+import SetPasswordPage from './pages/SetPasswordPage';
 import DashboardPage from './pages/DashboardPage';
 import OrganizationsPage from './pages/OrganizationsPage';
 import SuperAdminCommsPage from './pages/SuperAdminCommsPage';
@@ -284,10 +286,24 @@ function Router() {
     return () => window.removeEventListener(SESSION_TIMEOUT_EVENT, show);
   }, []);
 
+  // Recovery links (invite / forgot-password) establish a Supabase recovery session and fire
+  // PASSWORD_RECOVERY; send the user to the set-password screen regardless of what route they
+  // landed on.
+  useEffect(() => {
+    if (!supabase) return;
+    const { data: sub } = supabase.auth.onAuthStateChange((event) => {
+      if (event === 'PASSWORD_RECOVERY') {
+        window.location.hash = '#set-password';
+      }
+    });
+    return () => sub?.subscription?.unsubscribe?.();
+  }, []);
+
   useEffect(() => {
     // The employee route owns its own session (EMP_SESSION_KEY) independent of the app-level role,
-    // so don't bounce refreshes on #employee to login based on the app-level role being empty.
-    if (authReady && !role && route !== 'login' && route !== 'employee') {
+    // and set-password is a public route reached via recovery link, so don't bounce refreshes on
+    // those routes to login based on the app-level role being empty.
+    if (authReady && !role && route !== 'login' && route !== 'employee' && route !== 'set-password') {
       window.location.hash = '#login';
       setRoute('login');
     }
@@ -316,6 +332,7 @@ function Router() {
 
   // Public routes (no auth needed)
   if (route === 'login') return withSessionModal(<LoginPage />);
+  if (route === 'set-password') return withSessionModal(<SetPasswordPage />);
   if (route === 'employee') return withSessionModal(<EmployeePage />);
   if (route === 'self-eval') return withSessionModal(<Suspense fallback={<BootScreen />}><SelfEvalPage /></Suspense>);
   if (route === 'manager-eval') return withSessionModal(<Suspense fallback={<BootScreen />}><ManagerEvalPage /></Suspense>);
