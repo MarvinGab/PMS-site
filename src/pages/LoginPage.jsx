@@ -2,9 +2,6 @@ import { useEffect, useState } from 'react';
 import zaroLogo from '../../images/final zaro logo.png';
 import '../admin.css';
 import { useApp } from '../AppContext';
-import {
-  SUPER_ADMIN_EMAIL, SUPER_ADMIN_PASS,
-} from '../AppContext';
 import { resolveLoginUser, changeEmployeePassword } from '../backend/authService';
 import { hydrateOrganizations, persistEmployeeSession } from '../backend/stateStore';
 import {
@@ -577,15 +574,15 @@ export default function LoginPage() {
         return;
       }
       // Backend unreachable — fall through to the local resolver.
-      user = await resolveLoginUser(identifier, password, {
-        email: SUPER_ADMIN_EMAIL,
-        password: SUPER_ADMIN_PASS,
-      }, loginTenant?.orgKey || '');
+      // Super-admin credentials now live only server-side (Supabase Auth) —
+      // this local-only fallback path no longer has a super-admin identity
+      // to match against; org/employee resolution below is unaffected.
+      user = await resolveLoginUser(identifier, password, null, loginTenant?.orgKey || '');
     } else {
-      user = await resolveLoginUser(identifier, password, {
-        email: SUPER_ADMIN_EMAIL,
-        password: SUPER_ADMIN_PASS,
-      }, loginTenant?.orgKey || '');
+      // Super-admin credentials now live only server-side (Supabase Auth) —
+      // this local-only fallback path no longer has a super-admin identity
+      // to match against; org/employee resolution below is unaffected.
+      user = await resolveLoginUser(identifier, password, null, loginTenant?.orgKey || '');
     }
     if (!user) {
       user = localMeetingLogin(identifier, password, loginTenant);

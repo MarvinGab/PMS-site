@@ -7,19 +7,14 @@ import {
   syncOrganizationsCollection,
   clearOrganizationState,
   migrateOrganizationState,
-  readAuthSessionSync,
-  persistAuthSession,
-  clearAuthSession,
 } from './backend/stateStore';
-import { revokeServerSession } from './backend/serverAuth';
+import { supabase } from './backend/supabaseClient';
+import { callPms } from './backend/pmsClient';
+import { deriveIdentity } from './backend/identity';
 
 export const SESSION_KEY        = 'zarohr_auth_session';
 export const APP_DATA_KEY       = 'zarohr_app_data_v1';
 export const EMP_CREDENTIALS_KEY = 'zarohr_emp_credentials';
-export const EMP_SESSION_KEY    = 'zarohr_emp_session';
-
-export const SUPER_ADMIN_EMAIL = String(import.meta.env.VITE_SUPER_ADMIN_EMAIL || '').toLowerCase().trim();
-export const SUPER_ADMIN_PASS  = String(import.meta.env.VITE_SUPER_ADMIN_PASSWORD || '');
 
 const LEGACY_SEED_ORG_KEYS = ['acme', 'nova', 'zenith'];
 const DEFAULT_ORGS = [];
@@ -50,37 +45,62 @@ function sanitizeInitialAppData(data) {
 
 export const AppContext = createContext(null);
 
-// Read auth session synchronously so first render already knows who's logged in
-function readSessionSync() {
-  try {
-    const s = readAuthSessionSync();
-    if (s?.isLoggedIn && s.role) return s;
-  } catch (_) {}
-  return null;
-}
-
 // Read persisted app data synchronously for first render
 function readAppDataSync() {
   return readStoredAppData();
 }
 
 export function AppProvider({ children }) {
-  // Read session and app data ONCE to avoid inconsistent state from repeated localStorage reads
-  const initialSession = readSessionSync();
+  // Read app data ONCE to avoid inconsistent state from repeated localStorage reads.
+  // Identity (role/org/employee) is NOT read synchronously anymore — it comes from
+  // the Supabase session + backend whoami (see the auth effect below).
   const rawInitialAppData = readAppDataSync();
   const initialAppData = sanitizeInitialAppData(rawInitialAppData);
 
-  const [role, setRole]       = useState(initialSession?.role || null);
-  const [orgKey, setOrgKey]   = useState(initialSession?.orgKey || null);
-  const [userName, setUserName] = useState(initialSession?.userName || '');
-  const [userEmail, setUserEmail] = useState(initialSession?.userEmail || '');
-  const [isCoAdmin, setIsCoAdmin] = useState(!!initialSession?.isCoAdmin);
-  const [isScopedHR, setIsScopedHR] = useState(!!initialSession?.isScopedHR);
-  const [hrTeamId, setHrTeamId] = useState(initialSession?.hrTeamId || null);
-  const [empCode, setEmpCode] = useState(initialSession?.empCode || null);
-  const [allowedModules, setAllowedModules] = useState(initialSession?.allowedModules || null);
-  const [serverSessionToken, setServerSessionToken] = useState(initialSession?.serverSessionToken || null);
-  const [authReady, setAuthReady] = useState(true);  // always ready since we read sync
+  const [authReady, setAuthReady] = useState(false);
+  const [userId, setUserId] = useState(null);
+  const [userEmail, setUserEmail] = useState('');
+  const [role, setRole] = useState(null);
+  const [orgId, setOrgId] = useState(null);
+  const [employeeId, setEmployeeId] = useState(null);
+  const [memberships, setMemberships] = useState([]);
+
+  const applyIdentity = useCallback((session) => {
+    setUserId(session?.user?.id || null);
+    setUserEmail(session?.user?.email || '');
+  }, []);
+
+  const refreshIdentity = useCallback(async () => {
+    try {
+      const who = await callPms('admin.whoami', {});
+      const id = deriveIdentity(who.memberships);
+      setRole(id.role); setOrgId(id.orgId); setEmployeeId(id.employeeId); setMemberships(id.memberships);
+    } catch {
+      setRole(null); setOrgId(null); setEmployeeId(null); setMemberships([]);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!supabase) { setAuthReady(true); return; }
+    let active = true;
+    supabase.auth.getSession().then(async ({ data }) => {
+      if (!active) return;
+      applyIdentity(data.session);
+      if (data.session) await refreshIdentity();
+      setAuthReady(true);
+    });
+    const { data: sub } = supabase.auth.onAuthStateChange(async (_event, session) => {
+      applyIdentity(session);
+      if (session) await refreshIdentity(); else { setRole(null); setOrgId(null); setEmployeeId(null); setMemberships([]); }
+    });
+    return () => { active = false; sub?.subscription?.unsubscribe?.(); };
+  }, [applyIdentity, refreshIdentity]);
+
+  const signOut = useCallback(async () => {
+    try { await supabase?.auth.signOut(); } finally {
+      setRole(null); setOrgId(null); setEmployeeId(null); setMemberships([]); setUserId(null); setUserEmail('');
+    }
+  }, []);
 
   const [orgs, setOrgs] = useState(() => {
     return Array.isArray(initialAppData?.organizationsData) ? initialAppData.organizationsData : DEFAULT_ORGS.map(o => ({ ...o }));
@@ -162,48 +182,6 @@ export function AppProvider({ children }) {
     });
   }, [dashboardFlags, pendingActions, feedData, orgs]);
 
-  function login(loginRole, data = {}) {
-    const normalizedEmail = String(data.userEmail || '').trim().toLowerCase();
-    setRole(loginRole);
-    setOrgKey(data.orgKey || null);
-    setUserName(data.userName || '');
-    setUserEmail(normalizedEmail);
-    setIsCoAdmin(!!data.isCoAdmin);
-    setIsScopedHR(!!data.isScopedHR);
-    setHrTeamId(data.hrTeamId || null);
-    setEmpCode(data.empCode || null);
-    setAllowedModules(data.allowedModules || null);
-    setServerSessionToken(data.serverSessionToken || null);
-    persistAuthSession({
-      isLoggedIn: true,
-      role: loginRole,
-      orgKey: data.orgKey || null,
-      userName: data.userName || '',
-      userEmail: normalizedEmail,
-      isCoAdmin: !!data.isCoAdmin,
-      isScopedHR: !!data.isScopedHR,
-      hrTeamId: data.hrTeamId || null,
-      empCode: data.empCode || null,
-      allowedModules: data.allowedModules || null,
-      serverSessionToken: data.serverSessionToken || null,
-    });
-  }
-
-  function logout() {
-    if (serverSessionToken) void revokeServerSession(serverSessionToken);
-    setRole(null);
-    setOrgKey(null);
-    setUserName('');
-    setUserEmail('');
-    setIsCoAdmin(false);
-    setIsScopedHR(false);
-    setHrTeamId(null);
-    setEmpCode(null);
-    setAllowedModules(null);
-    setServerSessionToken(null);
-    clearAuthSession();
-  }
-
   function updateOrgs(nextOrgs) {
     setOrgs(nextOrgs);
     void syncOrganizationsCollection(nextOrgs, orgs);
@@ -248,8 +226,11 @@ export function AppProvider({ children }) {
   }
 
   const value = {
-    role, orgKey, userName, userEmail, authReady, serverSessionToken,
-    isCoAdmin, isScopedHR, hrTeamId, empCode, allowedModules,
+    userId, role, orgId, employeeId, memberships, userEmail, authReady,
+    signOut, refreshIdentity,
+    // TODO(5b-5e): un-migrated screens still call `logout()` from context —
+    // alias it to the new Supabase signOut until each screen is cut over.
+    logout: signOut,
     orgs, setOrgs: updateOrgs,
     pendingActions, setPendingActions: updatePendingActions,
     feedData, setFeedData: updateFeed,
@@ -257,7 +238,7 @@ export function AppProvider({ children }) {
     applyAppData,
     clearOrganizationState,
     migrateOrganizationState,
-    login, logout, saveAppData, loadAppData,
+    saveAppData, loadAppData,
   };
 
   return <AppContext.Provider value={value}>{children}</AppContext.Provider>;
