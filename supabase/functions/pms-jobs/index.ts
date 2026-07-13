@@ -11,11 +11,14 @@ function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { ...CORS, 'Content-Type': 'application/json' } });
 }
 
-// The gateway (verify_jwt=true) validates the JWT signature, so the decoded role claim is
-// trustworthy. Only a service_role token (the cron / internal workers) may drive the queue —
-// a valid anon or authenticated-user token is rejected here even though the gateway lets it through.
+// Only the cron / internal worker may drive the queue. Supabase projects may expose either
+// the older JWT-shaped service_role key or the newer sb_secret_* key, so accept an exact
+// match against the runtime service key first and keep the JWT-role check for old projects.
 function callerIsServiceRole(req: Request): boolean {
   const bearer = (req.headers.get('Authorization') ?? '').replace(/^Bearer\s+/i, '');
+  const serviceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '';
+  if (serviceKey && bearer === serviceKey) return true;
+
   const parts = bearer.split('.');
   if (parts.length !== 3) return false;
   try {

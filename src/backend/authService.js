@@ -142,35 +142,60 @@ async function resolveHrUser(orgs, credentials, identifier, password) {
 async function resolveEmployeeUser(orgs, credentials, identifier, password, scopedOrgKey = '') {
   const code = normalizeCode(identifier);
   const normalized = normalizeLower(identifier);
-  let matchedKey = code;
 
-  let match = credentials?.[code] || credentials?.[normalized] || null;
-  if (credentials?.[normalized]) matchedKey = normalized;
-  if (!match) {
-    const entries = Object.entries(credentials || {});
-    const found = entries.find(([, value]) => normalizeLower(value?.email) === normalized);
-    if (found) {
-      matchedKey = found[0];
-      match = found[1];
-    }
-  }
-  if (!match && code) {
-    const entries = Object.entries(credentials || {});
-    const found = entries.find(([key, value]) => normalizeCode(value?.empCode || key) === code);
-    if (found) {
-      matchedKey = found[0];
-      match = found[1];
-    }
+  const candidates = new Map();
+  const addCandidate = (entryKey, value) => {
+    const key = String(entryKey || '').trim();
+    if (!key || !value || candidates.has(key)) return;
+    if (scopedOrgKey && value.orgKey && value.orgKey !== scopedOrgKey) return;
+    candidates.set(key, value);
+  };
+  addCandidate(code, credentials?.[code]);
+  addCandidate(normalized, credentials?.[normalized]);
+  Object.entries(credentials || {}).forEach(([key, value]) => {
+    if (normalizeCode(value?.empCode || key) === code) addCandidate(key, value);
+  });
+  Object.entries(credentials || {}).forEach(([key, value]) => {
+    if (normalizeLower(value?.email) === normalized) addCandidate(key, value);
+  });
+
+  let matchedKey = '';
+  let match = null;
+  for (const [candidateKey, candidate] of candidates.entries()) {
+    const verifyResult = await materializeCredentialRecord(credentials, candidateKey, candidate, password);
+    if (!verifyResult.ok) continue;
+    matchedKey = candidateKey;
+    match = verifyResult.record;
+    break;
   }
   if (!match) return null;
-  const verifyResult = await materializeCredentialRecord(credentials, matchedKey, match, password);
-  if (!verifyResult.ok) return null;
-  match = verifyResult.record;
-  if (scopedOrgKey && match.orgKey && match.orgKey !== scopedOrgKey) return null;
+
+  const findCurrentEmployee = (org) => {
+    const employees = org?.setup?.employeeUploadData?.employees
+      || org?.setup_payload?.employeeUploadData?.employees
+      || org?.config?.employeeUploadData?.employees
+      || [];
+    if (!Array.isArray(employees)) return null;
+    const credentialEmail = normalizeLower(match.email);
+    const credentialCode = normalizeCode(match.empCode || code);
+    if (credentialEmail) {
+      const byEmail = employees.find((employee) =>
+        normalizeLower(employee?.['Email ID'] || employee?.Email || employee?.email) === credentialEmail
+        && employee?._outsidePms !== true
+      );
+      if (byEmail) return byEmail;
+    }
+    if (credentialCode) {
+      return employees.find((employee) => normalizeCode(employee?.['Employee Code']) === credentialCode) || null;
+    }
+    return null;
+  };
 
   for (const org of orgs) {
+    const currentEmployee = findCurrentEmployee(org);
+    const currentCode = normalizeCode(currentEmployee?.['Employee Code'] || match.empCode || code);
     const member = (org.hrTeam || []).find(
-      (item) => item.isInPMS && normalizeCode(item.empCode) === normalizeCode(match.empCode || code)
+      (item) => item.isInPMS && normalizeCode(item.empCode) === currentCode
     );
     if (member) {
       return {
@@ -180,21 +205,25 @@ async function resolveEmployeeUser(orgs, credentials, identifier, password, scop
         isCoAdmin: member.type === 'co-admin',
         isScopedHR: member.type === 'scoped-hr',
         hrTeamId: member.id,
-        empCode: normalizeCode(match.empCode || code),
+        empCode: currentCode,
         allowedModules: member.allowedModules || null,
       };
     }
   }
 
+  const targetOrg = orgs.find((org) => org.key === (match.orgKey || scopedOrgKey)) || orgs[0] || null;
+  const currentEmployee = targetOrg ? findCurrentEmployee(targetOrg) : null;
+  const empCode = normalizeCode(currentEmployee?.['Employee Code'] || match.empCode || code);
+
   return {
     role: 'employee',
-    empCode: normalizeCode(match.empCode || code),
-    userName: match.name || '',
-    designation: match.designation || '',
-    managerCode: match.managerCode || '',
-    orgKey: match.orgKey || scopedOrgKey || '',
+    empCode,
+    userName: currentEmployee?.['Employee Name'] || match.name || '',
+    designation: currentEmployee?.Designation || currentEmployee?.Role || match.designation || '',
+    managerCode: currentEmployee?.['Reporting Manager Code'] || match.managerCode || '',
+    orgKey: targetOrg?.key || match.orgKey || scopedOrgKey || '',
     isTemp: !!match.isTemp,
-    email: match.email || '',
+    email: currentEmployee?.['Email ID'] || currentEmployee?.Email || currentEmployee?.email || match.email || '',
   };
 }
 

@@ -1,4 +1,5 @@
-// Ratings store — local-first, mirrors the workflow store pattern.
+// Ratings store. In browser-storage mode this remains local-first; in Supabase
+// mode reads/writes go through checked server actions and per-record tables.
 //
 // Shape per org:
 //   {
@@ -20,15 +21,21 @@
 
 import { shouldUseSupabase } from './config';
 import { supabase } from './supabaseClient';
+import { readAuthSessionSync, readEmployeeSessionSync } from './stateStore';
+import { isSessionTimeoutMessage, notifySessionTimeout } from './sessionTimeout';
 
 const KEY_PREFIX = 'zarohr_ratings_v1';
-const REMOTE_RECORD_KEY = 'ratings';
 const DEFAULT_RATINGS_STATE = { ratings: {}, auditLog: [], publishedAt: null };
-const remoteWriteQueues = new Map();
 export const SEED_MARKER = 'Auto-seeded for demo.';
 
 function key(orgKey) {
   return `${KEY_PREFIX}:${orgKey || 'default'}`;
+}
+
+function readServerSessionToken() {
+  const authSession = readAuthSessionSync();
+  const employeeSession = readEmployeeSessionSync();
+  return authSession?.serverSessionToken || employeeSession?.serverSessionToken || '';
 }
 
 function normCode(value) {
@@ -51,6 +58,17 @@ function timestampOf(value) {
 function mergeStage(remoteStage, localStage) {
   if (!remoteStage) return localStage || null;
   if (!localStage) return remoteStage || null;
+  const remoteSubmittedAt = Date.parse(remoteStage.submittedAt || '') || 0;
+  const localSubmittedAt = Date.parse(localStage.submittedAt || '') || 0;
+  const localCompletionAt = Date.parse(localStage.completionRequested?.at || '') || 0;
+  const localClearedAt = Date.parse(localStage.clearedAt || '') || 0;
+
+  if (remoteSubmittedAt && !localSubmittedAt) {
+    return Math.max(localCompletionAt, localClearedAt) > remoteSubmittedAt ? localStage : remoteStage;
+  }
+  if (localSubmittedAt && !remoteSubmittedAt) {
+    return localStage;
+  }
   return timestampOf(localStage) >= timestampOf(remoteStage) ? localStage : remoteStage;
 }
 
@@ -65,6 +83,39 @@ function mergeAuditLogs(remoteLogs = [], localLogs = []) {
     out.push(row);
   });
   return out.sort((a, b) => (Date.parse(a?.ts || 0) || 0) - (Date.parse(b?.ts || 0) || 0));
+}
+
+function publishStateOf(source = {}) {
+  const publishedAt = source?.publishedAt ? Date.parse(source.publishedAt) || 0 : 0;
+  const unpublishedAt = source?.unpublishedAt ? Date.parse(source.unpublishedAt) || 0 : 0;
+  return { source, publishedAt, unpublishedAt, latestAt: Math.max(publishedAt, unpublishedAt) };
+}
+
+function mergePublishState(remote = {}, local = {}) {
+  const remoteState = publishStateOf(remote);
+  const localState = publishStateOf(local);
+  const winner = localState.latestAt >= remoteState.latestAt ? localState : remoteState;
+  const revoked = winner.unpublishedAt > winner.publishedAt;
+  return {
+    publishedAt: revoked ? null : (winner.source?.publishedAt || null),
+    publishedBy: revoked ? '' : (winner.source?.publishedBy || ''),
+    publishReason: revoked ? '' : (winner.source?.publishReason || ''),
+    unpublishedAt: winner.source?.unpublishedAt || null,
+    unpublishedBy: winner.source?.unpublishedBy || '',
+  };
+}
+
+function normalizePublishState(data = DEFAULT_RATINGS_STATE) {
+  const state = publishStateOf(data);
+  if (state.unpublishedAt <= state.publishedAt) return data || DEFAULT_RATINGS_STATE;
+  return {
+    ...(data || DEFAULT_RATINGS_STATE),
+    publishedAt: null,
+    publishedBy: '',
+    publishReason: '',
+    unpublishedAt: data?.unpublishedAt || null,
+    unpublishedBy: data?.unpublishedBy || '',
+  };
 }
 
 function isSeededStage(stage) {
@@ -85,7 +136,7 @@ function sanitizeSeededRatingsState(data = DEFAULT_RATINGS_STATE, ts = new Date(
       return;
     }
     const nextStages = { ...stages };
-    ['self', 'manager', 'final'].forEach((stageName) => {
+    ['self', 'manager', 'hod', 'final'].forEach((stageName) => {
       if (isSeededStage(nextStages[stageName])) {
         nextStages[stageName] = seededTombstone(ts);
         changed = true;
@@ -120,22 +171,19 @@ function mergeRatingsState(remote = DEFAULT_RATINGS_STATE, local = DEFAULT_RATIN
       ...l,
       self: mergeStage(r.self, l.self),
       manager: mergeStage(r.manager, l.manager),
+      hod: mergeStage(r.hod, l.hod),
       final: mergeStage(r.final, l.final),
     };
   });
 
-  const remotePublished = remote?.publishedAt ? Date.parse(remote.publishedAt) || 0 : 0;
-  const localPublished = local?.publishedAt ? Date.parse(local.publishedAt) || 0 : 0;
-  const publishedFrom = localPublished >= remotePublished ? local : remote;
+  const publishState = mergePublishState(remote, local);
 
   return {
     ...remote,
     ...local,
     ratings,
     auditLog: mergeAuditLogs(remote?.auditLog || [], local?.auditLog || []),
-    publishedAt: publishedFrom?.publishedAt || null,
-    publishedBy: publishedFrom?.publishedBy || '',
-    publishReason: publishedFrom?.publishReason || '',
+    ...publishState,
   };
 }
 
@@ -152,7 +200,9 @@ function readJson(k, fallback) {
 function writeJson(k, value) {
   if (typeof window === 'undefined') return;
   try {
-    window.localStorage.setItem(k, JSON.stringify(value));
+    const nextRaw = JSON.stringify(value);
+    if (window.localStorage.getItem(k) === nextRaw) return;
+    window.localStorage.setItem(k, nextRaw);
     // Fire a hashchange-like event so listeners can refresh on cross-tab edits.
     window.dispatchEvent(new CustomEvent('zarohr-ratings-changed', { detail: { key: k } }));
   } catch {
@@ -160,10 +210,27 @@ function writeJson(k, value) {
   }
 }
 
+async function resolveOrganizationId(orgKey = '') {
+  if (!shouldUseSupabase || !supabase || !orgKey) return '';
+  try {
+    const { data, error } = await supabase
+      .from('organizations')
+      .select('id')
+      .eq('org_key', orgKey)
+      .maybeSingle();
+    if (error) throw error;
+    return data?.id || '';
+  } catch (error) {
+    console.warn('[ratings:org-id]', error);
+    return '';
+  }
+}
+
 export function readRatings(orgKey) {
   const raw = readJson(key(orgKey), DEFAULT_RATINGS_STATE);
-  const cleaned = sanitizeSeededRatingsState(raw);
-  if (cleaned.changed) writeJson(key(orgKey), cleaned.data);
+  const normalized = normalizePublishState(raw);
+  const cleaned = sanitizeSeededRatingsState(normalized);
+  if (cleaned.changed || normalized !== raw) writeJson(key(orgKey), cleaned.data);
   return cleaned.data;
 }
 
@@ -173,19 +240,20 @@ export function writeRatings(orgKey, data) {
   void persistRatings(orgKey, payload);
 }
 
+export async function writeRatingsAndPersist(orgKey, data) {
+  const payload = data || DEFAULT_RATINGS_STATE;
+  writeJson(key(orgKey), payload);
+  return persistRatings(orgKey, payload);
+}
+
 async function readRemoteRatings(orgKey = '') {
   if (!shouldUseSupabase || !supabase) return null;
   try {
-    const { data, error } = await supabase
-      .from('app_state')
-      .select('payload')
-      .eq('state_key', REMOTE_RECORD_KEY)
-      .eq('org_key', orgKey || '')
-      .maybeSingle();
-    if (error) throw error;
-    return data?.payload || null;
+    const server = await runRatingsAction('read-ratings', { orgKey });
+    if (server?.ok && server.ratings) return server.ratings;
+    return null;
   } catch (error) {
-    console.warn('[ratings:remote-read]', error);
+    console.warn('[ratings:server-read]', error);
     return null;
   }
 }
@@ -194,69 +262,70 @@ export async function hydrateRatings(orgKey = '') {
   const local = readRatings(orgKey);
   if (!shouldUseSupabase || !supabase) return local;
   const remote = await readRemoteRatings(orgKey);
-  if (!remote) {
-    if (Object.keys(local?.ratings || {}).length > 0) await persistRatings(orgKey, local);
-    return local;
-  }
+  if (!remote) return local;
   const mergedRaw = mergeRatingsState(remote, local);
   const { data: merged, changed: cleanedSeeded } = sanitizeSeededRatingsState(mergedRaw);
   writeJson(key(orgKey), merged);
-  if (cleanedSeeded || JSON.stringify(merged) !== JSON.stringify(remote)) await persistRatings(orgKey, merged);
+  if (cleanedSeeded) writeJson(key(orgKey), merged);
   return merged;
 }
 
 export function persistRatings(orgKey = '', payload = null) {
   if (!shouldUseSupabase || !supabase) return Promise.resolve(true);
-  const queueKey = orgKey || 'default';
-  const writePayload = payload || readRatings(orgKey);
-  const run = async () => {
-    try {
-      const remote = await readRemoteRatings(orgKey);
-      const mergedRaw = remote ? mergeRatingsState(remote, writePayload) : writePayload;
-      const { data: merged } = sanitizeSeededRatingsState(mergedRaw);
-      const { error } = await supabase
-        .from('app_state')
-        .upsert({
-          state_key: REMOTE_RECORD_KEY,
-          org_key: orgKey || '',
-          payload: merged,
-          updated_at: new Date().toISOString(),
-        }, { onConflict: 'state_key,org_key' });
-      if (error) throw error;
-      writeJson(key(orgKey), merged);
-      return true;
-    } catch (error) {
-      console.warn('[ratings:remote-write]', error);
-      return false;
-    }
-  };
-  const previous = remoteWriteQueues.get(queueKey) || Promise.resolve();
-  const queued = previous.catch(() => undefined).then(run);
-  remoteWriteQueues.set(queueKey, queued);
-  queued.finally(() => {
-    if (remoteWriteQueues.get(queueKey) === queued) remoteWriteQueues.delete(queueKey);
-  });
-  return queued;
+  void orgKey;
+  void payload;
+  /*
+   * Supabase-mode blob persistence is intentionally disabled. Ratings are now
+   * written by checked pms-actions calls into per-record tables:
+   * employee_ratings, rating_publications, and rating_acknowledgements.
+   */
+  return Promise.resolve(false);
 }
 
 export function subscribeToRatings(orgKey = '', onChange) {
   if (!shouldUseSupabase || !supabase || typeof onChange !== 'function') return () => {};
-  const orgFilter = orgKey || '';
-  const channel = supabase
-    .channel(`ratings:${orgFilter || 'global'}:${Math.random().toString(36).slice(2, 8)}`)
-    .on(
-      'postgres_changes',
-      { event: '*', schema: 'public', table: 'app_state', filter: `state_key=eq.${REMOTE_RECORD_KEY}` },
-      async (payload) => {
-        const row = (payload?.new && Object.keys(payload.new || {}).length > 0) ? payload.new : payload?.old;
-        if (!row || (row.org_key || '') !== orgFilter) return;
-        await hydrateRatings(orgKey);
-        onChange();
-      },
-    )
-    .subscribe();
+  const channels = [];
+  let disposed = false;
+  const refresh = async () => {
+    await hydrateRatings(orgKey);
+    onChange();
+  };
+
+  void resolveOrganizationId(orgKey).then((organizationId) => {
+    if (disposed || !organizationId) return;
+    const rowChannel = supabase
+      .channel(`employee_ratings:${organizationId}:${Math.random().toString(36).slice(2, 8)}`)
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'employee_ratings', filter: `organization_id=eq.${organizationId}` },
+        () => { void refresh(); },
+      )
+      .subscribe();
+    channels.push(rowChannel);
+    const publicationChannel = supabase
+      .channel(`rating_publications:${organizationId}:${Math.random().toString(36).slice(2, 8)}`)
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'rating_publications', filter: `organization_id=eq.${organizationId}` },
+        () => { void refresh(); },
+      )
+      .subscribe();
+    const acknowledgementChannel = supabase
+      .channel(`rating_acknowledgements:${organizationId}:${Math.random().toString(36).slice(2, 8)}`)
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'rating_acknowledgements', filter: `organization_id=eq.${organizationId}` },
+        () => { void refresh(); },
+      )
+      .subscribe();
+    channels.push(publicationChannel, acknowledgementChannel);
+  });
+
   return () => {
-    try { supabase.removeChannel(channel); } catch { /* ignore */ }
+    disposed = true;
+    channels.forEach((item) => {
+      try { supabase.removeChannel(item); } catch { /* ignore */ }
+    });
   };
 }
 
@@ -282,7 +351,247 @@ export function setEmployeeStage(orgKey, empCode, stage, value) {
   return next.ratings[empCode][stage];
 }
 
+export async function recordFinalAcceptance(orgKey, empCode, decision, reason = '', actor = '') {
+  const all = readRatings(orgKey);
+  const ts = new Date().toISOString();
+  const normalizedDecision = decision === 'rejected' ? 'rejected' : 'accepted';
+  const acceptance = {
+    decision: normalizedDecision,
+    reason: normalizedDecision === 'rejected' ? String(reason || '').trim() : '',
+    submittedAt: ts,
+    submittedBy: actor || empCode || '',
+    updatedAt: ts,
+  };
+  const next = {
+    ...all,
+    ratings: {
+      ...(all.ratings || {}),
+      [empCode]: {
+        ...(all.ratings?.[empCode] || {}),
+        acceptance,
+      },
+    },
+    auditLog: [
+      ...(all.auditLog || []),
+      { ts, action: `final-${normalizedDecision}`, actor: actor || empCode || '', empCode, reason: acceptance.reason },
+    ],
+  };
+
+  // Prefer the checked server path when available…
+  if (shouldUseSupabase && supabase) {
+    const result = await runRatingsAction('record-final-acceptance', { orgKey, empCode, decision, reason, actor });
+    if (result?.ok) {
+      if (result.ratings) writeJson(key(orgKey), result.ratings);
+      return { ok: true, acceptance: result.acceptance || acceptance };
+    }
+    return { ok: false, error: result?.error || 'Could not save your response. Please retry.', acceptance };
+  }
+  // Browser-storage mode only: keep the demo/local path working when Supabase
+  // is not configured.
+  writeJson(key(orgKey), next);
+  void persistRatings(orgKey, next);
+  return { ok: true, acceptance };
+}
+
+// HR resolves an employee's raised concern. Two paths:
+//   - 'explained': HR replies (typically by email) and closes the concern. The
+//     employee's decision stays 'rejected' but the concern is marked resolved.
+//   - 'recalibrated': HR changed the final rating (done separately via the
+//     calibration path); here we RE-OPEN the acceptance so the employee gets a
+//     fresh accept / raise-concern round on the new number.
+export async function resolveConcern(orgKey, empCode, { type, message = '' } = {}, actor = '') {
+  const all = readRatings(orgKey);
+  const ts = new Date().toISOString();
+  const prev = all.ratings?.[empCode]?.acceptance || {};
+  const resolution = { type: type === 'recalibrated' ? 'recalibrated' : 'explained', message: String(message || '').trim(), at: ts, by: actor || '' };
+  const acceptance = type === 'recalibrated'
+    ? {
+        // fresh round — employee must respond to the recalibrated rating
+        decision: '',
+        reason: '',
+        submittedAt: '',
+        submittedBy: '',
+        resolution,
+        round: (Number(prev.round) || 1) + 1,
+        updatedAt: ts,
+      }
+    : {
+        ...prev,
+        resolution,
+        updatedAt: ts,
+      };
+  const next = {
+    ...all,
+    ratings: {
+      ...(all.ratings || {}),
+      [empCode]: {
+        ...(all.ratings?.[empCode] || {}),
+        acceptance,
+      },
+    },
+    auditLog: [
+      ...(all.auditLog || []),
+      { ts, action: `concern-${resolution.type}`, actor: actor || '', empCode, reason: resolution.message },
+    ],
+  };
+
+  // Prefer the checked server path…
+  if (shouldUseSupabase && supabase) {
+    const result = await runRatingsAction('resolve-concern', { orgKey, empCode, type, message, actor });
+    if (result?.ok) {
+      if (result.ratings) writeJson(key(orgKey), result.ratings);
+      return { ok: true, acceptance: result.acceptance || acceptance };
+    }
+    return { ok: false, error: result?.error || 'Could not resolve concern.', acceptance };
+  }
+  // Browser-storage mode only: keep the demo/local path working when Supabase
+  // is not configured.
+  writeJson(key(orgKey), next);
+  void persistRatings(orgKey, next);
+  return { ok: true, acceptance };
+}
+
 export function submitEmployeeStage(orgKey, empCode, stage, value, actor) {
+  const { next, stamped } = buildSubmittedRatingsState(orgKey, empCode, stage, value, actor);
+  writeRatings(orgKey, next);
+  return stamped;
+}
+
+export async function submitEmployeeStageAndPersist(orgKey, empCode, stage, value, actor, options = {}) {
+  const { allowFallback = false, optimistic = true } = options || {};
+  const { next, stamped } = buildSubmittedRatingsState(orgKey, empCode, stage, value, actor);
+  if (shouldUseSupabase && supabase) {
+    if (optimistic && allowFallback) writeJson(key(orgKey), next);
+    const persistServer = async () => {
+      try {
+        const { data, error } = await supabase.functions.invoke('pms-actions', {
+          body: {
+            action: 'submit-rating',
+            serverSessionToken: readServerSessionToken(),
+            orgKey,
+            empCode,
+            stage,
+            payload: value,
+            actor,
+          },
+        });
+        if (error) throw error;
+	        if (!data?.ok) {
+	          if (isSessionTimeoutMessage(data?.error)) notifySessionTimeout(data?.error);
+	          throw new Error(data?.error || 'Could not submit rating.');
+	        }
+        const serverStamped = data.stage || stamped;
+        const serverNext = {
+          ...next,
+          ratings: {
+            ...(next.ratings || {}),
+            [empCode]: {
+              ...(next.ratings?.[empCode] || {}),
+              [stage]: serverStamped,
+            },
+          },
+        };
+        writeJson(key(orgKey), serverNext);
+        return { ok: true, stamped: serverStamped };
+      } catch (error) {
+        console.warn('[ratings:submit-action]', error);
+        let errorMessage = error?.message || 'Could not submit rating.';
+        try {
+          const body = error?.context?.clone ? await error.context.clone().json() : null;
+          errorMessage = body?.error || body?.message || errorMessage;
+        } catch {
+          // Keep the original client error when the function response is not JSON.
+        }
+	        if (!allowFallback) {
+	          if (isSessionTimeoutMessage(errorMessage)) notifySessionTimeout(errorMessage);
+	          return { ok: false, error: errorMessage, stamped };
+	        }
+        const fallbackOk = await writeRatingsAndPersist(orgKey, next);
+        if (fallbackOk) return { ok: true, stamped, fallback: true };
+        const failedAt = new Date().toISOString();
+        const current = readRatings(orgKey);
+        const failedStage = {
+          ...(current.ratings?.[empCode]?.[stage] || stamped),
+          syncFailedAt: failedAt,
+          syncError: errorMessage,
+          updatedAt: failedAt,
+        };
+        const failedNext = {
+          ...current,
+          ratings: {
+            ...(current.ratings || {}),
+            [empCode]: {
+              ...(current.ratings?.[empCode] || {}),
+              [stage]: failedStage,
+            },
+          },
+          auditLog: [
+            ...(current.auditLog || []),
+            { ts: failedAt, action: `submit-${stage}-sync-failed`, actor, empCode, reason: errorMessage },
+          ],
+        };
+	        writeJson(key(orgKey), failedNext);
+	        if (isSessionTimeoutMessage(errorMessage)) notifySessionTimeout(errorMessage);
+	        return { ok: false, error: errorMessage, stamped };
+	      }
+    };
+    if (!optimistic || !allowFallback) return persistServer();
+    void persistServer();
+    return { ok: true, stamped, pending: true };
+  }
+  const ok = await writeRatingsAndPersist(orgKey, next);
+  return { ok, stamped };
+}
+
+export async function clearEmployeeStageAndPersist(orgKey, empCode, stage, actor, options = {}) {
+  const { allowFallback = false, optimistic = true } = options || {};
+  const { next, cleared } = buildClearedRatingsState(orgKey, empCode, stage, actor);
+  if (shouldUseSupabase && supabase) {
+    if (optimistic && allowFallback) writeJson(key(orgKey), next);
+    const persistServer = async () => {
+      try {
+        const { data, error } = await supabase.functions.invoke('pms-actions', {
+          body: {
+            action: 'clear-rating',
+            serverSessionToken: readServerSessionToken(),
+            orgKey,
+            empCode,
+            stage,
+            actor,
+          },
+        });
+        if (error) throw error;
+        if (!data?.ok) throw new Error(data?.error || 'Could not clear rating.');
+        const serverCleared = data.stage || cleared;
+        const serverNext = {
+          ...next,
+          ratings: {
+            ...(next.ratings || {}),
+            [empCode]: {
+              ...(next.ratings?.[empCode] || {}),
+              [stage]: serverCleared,
+            },
+          },
+        };
+        writeJson(key(orgKey), serverNext);
+        return { ok: true, stage: serverCleared };
+      } catch (error) {
+        console.warn('[ratings:clear-action]', error);
+        const errorMessage = error?.message || 'Could not clear rating.';
+        if (!allowFallback) return { ok: false, error: errorMessage, stage: cleared };
+        const fallbackOk = await writeRatingsAndPersist(orgKey, next);
+        return fallbackOk ? { ok: true, stage: cleared, fallback: true } : { ok: false, error: errorMessage, stage: cleared };
+      }
+    };
+    if (!optimistic || !allowFallback) return persistServer();
+    void persistServer();
+    return { ok: true, stage: cleared, pending: true };
+  }
+  const ok = await writeRatingsAndPersist(orgKey, next);
+  return { ok, stage: cleared };
+}
+
+function buildSubmittedRatingsState(orgKey, empCode, stage, value, actor) {
   const all = readRatings(orgKey);
   const submittedAt = new Date().toISOString();
   const stamped = { ...value, submittedAt, updatedAt: submittedAt, submittedBy: actor || '' };
@@ -300,8 +609,49 @@ export function submitEmployeeStage(orgKey, empCode, stage, value, actor) {
       { ts: stamped.submittedAt, action: `submit-${stage}`, actor, empCode },
     ],
   };
-  writeRatings(orgKey, next);
-  return stamped;
+  return { next, stamped };
+}
+
+function buildClearedRatingsState(orgKey, empCode, stage, actor) {
+  const all = readRatings(orgKey);
+  const clearedAt = new Date().toISOString();
+  const currentStage = all.ratings?.[empCode]?.[stage] || {};
+  const cleared = {
+    ...currentStage,
+    submittedAt: null,
+    submittedBy: null,
+    calibratedScore: undefined,
+    calibrationNote: '',
+    calibratedBy: '',
+    calibratedAt: null,
+    updatedAt: clearedAt,
+    clearedAt,
+    clearedBy: actor || '',
+  };
+  const next = {
+    ...all,
+    ratings: {
+      ...(all.ratings || {}),
+      [empCode]: {
+        ...(all.ratings?.[empCode] || {}),
+        [stage]: cleared,
+      },
+    },
+    auditLog: [
+      ...(all.auditLog || []),
+      { ts: clearedAt, action: `clear-${stage}`, actor, empCode },
+    ],
+  };
+  return { next, cleared };
+}
+
+function withoutCalibrationFields(stage = {}) {
+  const next = { ...(stage || {}) };
+  delete next.calibratedScore;
+  delete next.calibrationNote;
+  delete next.calibratedBy;
+  delete next.calibratedAt;
+  return next;
 }
 
 // Manager asks the employee to complete blank fields: reopens the self-eval
@@ -377,6 +727,83 @@ export function recordCalibrationMove(orgKey, empCode, before, after, reason, ac
   writeRatings(orgKey, next);
 }
 
+export function recordHodCalibrationMove(orgKey, empCode, before, after, reason, actor) {
+  const all = readRatings(orgKey);
+  const ts = new Date().toISOString();
+  const next = {
+    ...all,
+    ratings: {
+      ...(all.ratings || {}),
+      [empCode]: {
+        ...(all.ratings?.[empCode] || {}),
+        hod: {
+          ...(all.ratings?.[empCode]?.hod || {}),
+          calibratedScore: after,
+          calibrationNote: reason,
+          calibratedBy: actor,
+          calibratedAt: ts,
+          updatedAt: ts,
+        },
+      },
+    },
+    auditLog: [
+      ...(all.auditLog || []),
+      { ts, action: 'hod-calibrate', actor, empCode, before, after, reason },
+    ],
+  };
+  writeRatings(orgKey, next);
+}
+
+export function resetCalibrationMove(orgKey, empCode, before, actor) {
+  const all = readRatings(orgKey);
+  const ts = new Date().toISOString();
+  const prevStage = all.ratings?.[empCode]?.final || {};
+  const restFinal = withoutCalibrationFields(prevStage);
+  const next = {
+    ...all,
+    ratings: {
+      ...(all.ratings || {}),
+      [empCode]: {
+        ...(all.ratings?.[empCode] || {}),
+        final: {
+          ...restFinal,
+          updatedAt: ts,
+        },
+      },
+    },
+    auditLog: [
+      ...(all.auditLog || []),
+      { ts, action: 'calibration-reset', actor, empCode, before, after: '', reason: 'Reset calibration' },
+    ],
+  };
+  writeRatings(orgKey, next);
+}
+
+export function resetHodCalibrationMove(orgKey, empCode, before, actor) {
+  const all = readRatings(orgKey);
+  const ts = new Date().toISOString();
+  const prevStage = all.ratings?.[empCode]?.hod || {};
+  const restHod = withoutCalibrationFields(prevStage);
+  const next = {
+    ...all,
+    ratings: {
+      ...(all.ratings || {}),
+      [empCode]: {
+        ...(all.ratings?.[empCode] || {}),
+        hod: {
+          ...restHod,
+          updatedAt: ts,
+        },
+      },
+    },
+    auditLog: [
+      ...(all.auditLog || []),
+      { ts, action: 'hod-calibration-reset', actor, empCode, before, after: '', reason: 'Reset HOD calibration' },
+    ],
+  };
+  writeRatings(orgKey, next);
+}
+
 export function publishCycle(orgKey, actor, reason = '') {
   const all = readRatings(orgKey);
   const ts = new Date().toISOString();
@@ -385,6 +812,8 @@ export function publishCycle(orgKey, actor, reason = '') {
     publishedAt: ts,
     publishedBy: actor || '',
     publishReason: reason || '',
+    unpublishedAt: null,
+    unpublishedBy: '',
     updatedAt: ts,
     auditLog: [...(all.auditLog || []), { ts, action: 'publish', actor, reason: reason || '' }],
   };
@@ -392,8 +821,95 @@ export function publishCycle(orgKey, actor, reason = '') {
   return ts;
 }
 
+export function revokePublishCycle(orgKey, actor, reason = 'Testing revoke publish') {
+  const all = readRatings(orgKey);
+  const ts = new Date().toISOString();
+  const next = {
+    ...all,
+    publishedAt: null,
+    publishedBy: '',
+    publishReason: '',
+    unpublishedAt: ts,
+    unpublishedBy: actor || '',
+    updatedAt: ts,
+    auditLog: [...(all.auditLog || []), { ts, action: 'revoke-publish', actor, reason: reason || '' }],
+  };
+  writeRatings(orgKey, next);
+  return ts;
+}
+
 export function isPublished(orgKey) {
-  return !!readRatings(orgKey).publishedAt;
+  const ratings = readRatings(orgKey);
+  const publishedAt = ratings?.publishedAt ? Date.parse(ratings.publishedAt) || 0 : 0;
+  const unpublishedAt = ratings?.unpublishedAt ? Date.parse(ratings.unpublishedAt) || 0 : 0;
+  return publishedAt > unpublishedAt;
+}
+
+// Never let a server call hang forever — if the edge function / network stalls
+// (Supabase incident, over-quota throttling, slow network), reject after `ms` so
+// callers fall back to a local write instead of freezing the UI.
+function withTimeout(promise, ms, label = 'request') {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`Timed out contacting the server (${label}).`)), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
+async function runRatingsAction(action, body = {}) {
+  if (!shouldUseSupabase || !supabase) return { ok: false, error: 'Supabase backend is not configured.' };
+  try {
+    const { data, error } = await withTimeout(supabase.functions.invoke('pms-actions', {
+      body: {
+        ...body,
+        action,
+        serverSessionToken: readServerSessionToken(),
+      },
+    }), 8000, `pms-actions:${action}`);
+    if (error) throw error;
+    if (!data?.ok) throw new Error(data?.error || 'Ratings action failed.');
+    return data;
+  } catch (error) {
+    let errorMessage = error?.message || 'Ratings action failed.';
+    let status = 0;
+    try {
+      status = Number(error?.context?.status) || 0;
+      const parsed = error?.context?.clone ? await error.context.clone().json() : null;
+      errorMessage = parsed?.error || parsed?.message || errorMessage;
+    } catch {
+      // Keep the original client error when response body is unavailable.
+    }
+    // A 401 always means the session is gone, even if the body text couldn't be
+    // read — always raise the sign-in prompt in that case.
+    if (status === 401 || isSessionTimeoutMessage(errorMessage)) {
+      notifySessionTimeout(status === 401 && !isSessionTimeoutMessage(errorMessage) ? 'Sign in again to continue.' : errorMessage);
+    }
+    return { ok: false, error: errorMessage };
+  }
+}
+
+export async function publishCycleAndPersist(orgKey, actor, reason = '') {
+  if (!shouldUseSupabase || !supabase) {
+    const ts = publishCycle(orgKey, actor, reason);
+    return { ok: true, publishedAt: ts };
+  }
+  const result = await runRatingsAction('publish-cycle', { orgKey, actor, reason });
+  if (!result?.ok) return result;
+  if (result.ratings) writeJson(key(orgKey), result.ratings);
+  else await hydrateRatings(orgKey);
+  return result;
+}
+
+export async function revokePublishCycleAndPersist(orgKey, actor, reason = 'Testing revoke publish') {
+  if (!shouldUseSupabase || !supabase) {
+    const ts = revokePublishCycle(orgKey, actor, reason);
+    return { ok: true, unpublishedAt: ts };
+  }
+  const result = await runRatingsAction('revoke-publish', { orgKey, actor, reason });
+  if (!result?.ok) return result;
+  if (result.ratings) writeJson(key(orgKey), result.ratings);
+  else await hydrateRatings(orgKey);
+  return result;
 }
 
 // Distribution computation — counts each employee's final (or manager) score

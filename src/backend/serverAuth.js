@@ -11,8 +11,33 @@ async function invokeAuthFunction(body) {
     if (error) throw error;
     return data || { ok: true };
   } catch (error) {
-    return { ok: false, error: error?.message || 'Failed to contact app auth backend.' };
+    const message = await describeAuthFunctionError(error);
+    return { ok: false, error: message || 'Failed to contact app auth backend.' };
   }
+}
+
+async function describeAuthFunctionError(error) {
+  const fallback = error?.message || '';
+  const response = error?.context;
+  if (!response || typeof response.text !== 'function') return fallback;
+
+  try {
+    const raw = await response.text();
+    let payload = null;
+    try {
+      payload = raw ? JSON.parse(raw) : null;
+    } catch {
+      payload = null;
+    }
+    const serverMessage = String(payload?.message || payload?.error || raw || '').trim();
+    if (response.status === 402 && /egress|quota|spend/i.test(serverMessage)) {
+      return 'Supabase has blocked this project because the egress quota/spend cap was reached. Restore the project in Supabase, then try again.';
+    }
+    if (serverMessage) return serverMessage;
+  } catch {
+    // Keep the original SDK error if the response body cannot be read.
+  }
+  return fallback;
 }
 
 export async function loginWithServerSession(identifier, password, organizationKey = '', rememberMe = false, workspace = '') {

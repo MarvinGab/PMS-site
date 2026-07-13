@@ -224,7 +224,7 @@ export function RatingWidget({ value, onChange, config, disabled, suggestedScore
 
   if (mode === 'numeric') {
     return (
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', minWidth: 0, maxWidth: '100%' }}>
         <input
           type="number" min={0} max={N} step={step} value={value ?? ''}
           disabled={disabled}
@@ -246,14 +246,14 @@ export function RatingWidget({ value, onChange, config, disabled, suggestedScore
 
   if (mode === 'slider') {
     return (
-      <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 260 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0, width: '100%', maxWidth: '100%', flexWrap: 'wrap' }}>
         <input
           type="range" min={0} max={N} step={step} value={value || 0}
           disabled={disabled}
           onChange={(e) => onChange(Number(e.target.value))}
-          style={{ flex: 1 }}
+          style={{ flex: '1 1 150px', minWidth: 120, maxWidth: '100%' }}
         />
-        <div style={{ width: 80, textAlign: 'right', fontSize: 13, fontWeight: 700 }}>
+        <div style={{ flex: '0 0 auto', minWidth: 58, textAlign: 'right', fontSize: 13, fontWeight: 700, whiteSpace: 'nowrap' }}>
           {value ? `${Number(value).toFixed(step === 1 ? 0 : 1)} / ${N}` : `— / ${N}`}
         </div>
         {suggestedScore !== null && suggestedScore !== undefined && (
@@ -382,11 +382,17 @@ function SuggestedChip({ value, onClick, disabled }) {
     <button
       type="button" onClick={onClick} disabled={disabled}
       style={{
-        padding: '4px 9px', borderRadius: 14, fontSize: 11, fontWeight: 700,
+        flex: '0 1 auto',
+        maxWidth: '100%',
+        minWidth: 0,
+        padding: '4px 8px', borderRadius: 14, fontSize: 11, fontWeight: 700,
         border: '1px dashed #2563EB', background: '#EFF6FF', color: '#1D4ED8',
         cursor: disabled ? 'not-allowed' : 'pointer', fontFamily: 'inherit',
+        whiteSpace: 'nowrap',
+        overflow: 'hidden',
+        textOverflow: 'ellipsis',
       }}>
-      Auto: {value} (use)
+      Auto {value}
     </button>
   );
 }

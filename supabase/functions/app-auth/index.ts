@@ -126,6 +126,42 @@ async function getOrganizations(client: SupabaseAdminClient) {
   return (data || []) as OrgRow[]
 }
 
+async function findCurrentEmployeeForCredential(
+  client: SupabaseAdminClient,
+  org: OrgRow,
+  credential: Record<string, unknown>,
+  fallbackCode = '',
+) {
+  const email = normalizeLower(credential.email)
+  const code = normalizeCode(credential.empCode || fallbackCode)
+  const columns = 'employee_code, employee_name, email, designation, manager_code'
+
+  if (email) {
+    const { data, error } = await client
+      .from('employees')
+      .select(columns)
+      .eq('organization_id', org.id)
+      .eq('email', email)
+      .eq('is_in_pms', true)
+      .limit(1)
+    if (error) throw error
+    if (data?.[0]) return data[0] as Record<string, unknown>
+  }
+
+  if (code) {
+    const { data, error } = await client
+      .from('employees')
+      .select(columns)
+      .eq('organization_id', org.id)
+      .eq('employee_code', code)
+      .limit(1)
+    if (error) throw error
+    if (data?.[0]) return data[0] as Record<string, unknown>
+  }
+
+  return null
+}
+
 async function resolveOrganizationKeyFromWorkspace(
   client: SupabaseAdminClient,
   organizationKey = '',
@@ -275,35 +311,46 @@ async function resolveServerLogin(client: SupabaseAdminClient, identifier: strin
     }
   }
 
-  let matchKey = normalizeCode(identifier)
-  let credential = credentials?.[matchKey] || credentials?.[normalized] || null
+  const codeIdentifier = normalizeCode(identifier)
+  const candidates = new Map<string, Record<string, unknown>>()
+  const addCandidate = (entryKey: string, value: Record<string, unknown> | null | undefined) => {
+    const key = String(entryKey || '').trim()
+    if (!key || !value || candidates.has(key)) return
+    if (scopedOrgKey && String(value.orgKey || '') && String(value.orgKey || '') !== scopedOrgKey) return
+    candidates.set(key, value)
+  }
+
+  addCandidate(codeIdentifier, credentials?.[codeIdentifier])
+  addCandidate(normalized, credentials?.[normalized])
+  for (const [key, value] of Object.entries(credentials || {})) {
+    if (normalizeCode(value?.empCode || key) === codeIdentifier) addCandidate(key, value)
+  }
+  for (const [key, value] of Object.entries(credentials || {})) {
+    if (normalizeLower(value?.email) === normalized) addCandidate(key, value)
+  }
+
+  let matchKey = ''
+  let credential: Record<string, unknown> | null = null
+  for (const [key, candidate] of candidates) {
+    const storedSecret = String(candidate?.passwordHash || candidate?.password || '')
+    if (storedSecret && await verifyPasswordValue(password, storedSecret)) {
+      matchKey = key
+      credential = candidate
+      break
+    }
+  }
+
   if (!credential) {
-    const found = Object.entries(credentials).find(([, value]) => normalizeLower(value?.email) === normalized)
-    if (found) {
-      matchKey = found[0]
-      credential = found[1]
-    }
-  }
-  if (!credential && matchKey) {
-    const found = Object.entries(credentials).find(([key, value]) =>
-      normalizeCode(value?.empCode || key) === matchKey
-    )
-    if (found) {
-      matchKey = found[0]
-      credential = found[1]
-    }
-  }
-  const storedSecret = String(credential?.passwordHash || credential?.password || '')
-  if (!storedSecret || !(await verifyPasswordValue(password, storedSecret))) {
     return null
   }
 
-  const empCode = normalizeCode(credential.empCode || matchKey)
   if (scopedOrgKey && String(credential.orgKey || '') && String(credential.orgKey || '') !== scopedOrgKey) {
     return null
   }
 
   for (const org of candidateOrgs) {
+    const currentEmployee = await findCurrentEmployeeForCredential(client, org, credential, matchKey)
+    const empCode = normalizeCode(currentEmployee?.employee_code || credential.empCode || matchKey)
     const hrMember = getHrTeam(org).find((member) => member.isInPMS && normalizeCode(member.empCode) === empCode)
     if (hrMember) {
       return {
@@ -319,15 +366,22 @@ async function resolveServerLogin(client: SupabaseAdminClient, identifier: strin
     }
   }
 
+  const targetOrg = candidateOrgs.find((org) => org.org_key === (String(credential.orgKey || scopedOrgKey || '').trim()))
+    || candidateOrgs[0]
+  const currentEmployee = targetOrg
+    ? await findCurrentEmployeeForCredential(client, targetOrg, credential, matchKey)
+    : null
+  const empCode = normalizeCode(currentEmployee?.employee_code || credential.empCode || matchKey)
+
   return {
     role: 'employee',
     empCode,
-    userName: String(credential.name || ''),
-    designation: String(credential.designation || ''),
-    managerCode: String(credential.managerCode || ''),
-    orgKey: String(credential.orgKey || scopedOrgKey || ''),
+    userName: String(currentEmployee?.employee_name || credential.name || ''),
+    designation: String(currentEmployee?.designation || credential.designation || ''),
+    managerCode: String(currentEmployee?.manager_code || credential.managerCode || ''),
+    orgKey: String(targetOrg?.org_key || credential.orgKey || scopedOrgKey || ''),
     isTemp: !!credential.isTemp,
-    email: String(credential.email || ''),
+    email: String(currentEmployee?.email || credential.email || ''),
   }
 }
 

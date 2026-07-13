@@ -53,6 +53,7 @@ const FINAL_RATING_DISPLAY_OPTIONS = [
   { id: 'code',          format: ({ code }) => String(code) },
   { id: 'code-label',    format: ({ code, l }) => `${code} - ${l}` },
   { id: 'label',         format: ({ l }) => String(l) },
+  { id: 'decimal',       format: ({ decimal }) => decimal.toFixed(2) },
   { id: 'decimal-code',  format: ({ code, decimal }) => `${decimal.toFixed(2)} - ${code}` },
   { id: 'decimal-label', format: ({ l, decimal }) => `${decimal.toFixed(2)} - ${l}` },
 ];
@@ -67,6 +68,39 @@ export function formatFinalRating(config = {}, decimal) {
   const opt = FINAL_RATING_DISPLAY_OPTIONS.find((o) => o.id === (config.finalRatingDisplay || 'code-label'))
     || FINAL_RATING_DISPLAY_OPTIONS[1];
   return rank ? opt.format({ code: rank.code, l: rank.l, decimal: d }) : d.toFixed(2);
+}
+
+export function formatScoreValue(score, options = {}) {
+  if (score === null || score === undefined || score === '') return '—';
+  const n = Number(score);
+  if (!Number.isFinite(n)) return String(score);
+  const precision = String(options?.scorePrecision || '').toLowerCase();
+  if (precision === 'integer') return String(Math.round(n));
+  return n.toFixed(2).replace(/\.?0+$/, '');
+}
+
+export function scoreInputModeSupportsDecimals(config = {}) {
+  const mode = String(config?.scoreInputMode || 'dropdown').toLowerCase();
+  return ['stars', 'star', 'number', 'numeric', 'slider', 'range'].includes(mode);
+}
+
+export function formatRatingChoice(config = {}, score) {
+  if (score === null || score === undefined || score === '') return '—';
+  if (!Number.isFinite(Number(score))) return String(score);
+  const scale = getScaleLevels(config);
+  const ranges = getMergedRankRanges(scale, config?.scaleRankRanges || {});
+  const rank = findRankForDecimal(Number(score), ranges, scale);
+  if (!rank) return formatScoreValue(score, config);
+  const display = String(config?.ratingChoiceDisplay || 'number-label');
+  if (display === 'number-only') return String(rank.code || rank.n);
+  if (display === 'label-only') return String(rank.l || rank.code || rank.n);
+  return `${rank.code || rank.n} - ${rank.l || ''}`;
+}
+
+export function formatConfiguredScore(config = {}, score) {
+  return scoreInputModeSupportsDecimals(config)
+    ? formatScoreValue(score, config)
+    : formatRatingChoice(config, score);
 }
 
 export function getScalePoints(config = {}) {
@@ -91,12 +125,42 @@ function normalizeTargetTypeName(value) {
   return String(value || '').trim().toLowerCase().replace(/[_\s-]+/g, ' ');
 }
 
+const TARGET_TYPE_ALIASES = {
+  number: 'tt_default_number',
+  percentage: 'tt_default_percentage',
+  percent: 'tt_default_percentage',
+  currency: 'tt_default_currency',
+  text: 'tt_default_text',
+  free_text: 'tt_default_text',
+  neg_number: 'tt_neg_number',
+  negative_number: 'tt_neg_number',
+  neg_currency: 'tt_neg_currency',
+  negative_currency: 'tt_neg_currency',
+  neg_percentage: 'tt_neg_percentage',
+  negative_percentage: 'tt_neg_percentage',
+  tt_default_number: 'number',
+  tt_default_percentage: 'percentage',
+  tt_default_currency: 'currency',
+  tt_default_text: 'text',
+  tt_neg_number: 'neg_number',
+  tt_neg_currency: 'neg_currency',
+  tt_neg_percentage: 'neg_percentage',
+};
+
+function targetTypeAliasIds(typeId) {
+  const raw = String(typeId || '').trim();
+  const key = raw.toLowerCase();
+  const alias = TARGET_TYPE_ALIASES[key];
+  return [raw, alias].filter(Boolean);
+}
+
 function getTargetTypeMeta(typeId, targetTypes = []) {
   const raw = String(typeId || '').trim();
   const normalized = normalizeTargetTypeName(raw);
-  return (targetTypes || []).find((type) => type.id === raw)
+  const ids = targetTypeAliasIds(raw);
+  return (targetTypes || []).find((type) => ids.includes(String(type.id || '').trim()))
     || (targetTypes || []).find((type) => normalizeTargetTypeName(type.name) === normalized)
-    || DEFAULT_TARGET_TYPES.find((type) => type.id === raw)
+    || DEFAULT_TARGET_TYPES.find((type) => ids.includes(type.id))
     || DEFAULT_TARGET_TYPES.find((type) => normalizeTargetTypeName(type.name) === normalized)
     || DEFAULT_TARGET_TYPES.find((type) => type.id === 'tt_default_text');
 }

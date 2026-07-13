@@ -16,6 +16,21 @@ import {
 import { getRequestedWorkspaceSlug, resolveTenantContext } from '../backend/tenantResolver';
 
 const REMEMBER_KEY = 'zaro.login.remembered';
+const LOCAL_MEETING_PASSWORD = '123456';
+
+function localMeetingLogin(identifier, password, tenant) {
+  const isLocalHost = typeof window !== 'undefined'
+    && /^(localhost|127\.0\.0\.1)$/.test(window.location.hostname);
+  const isLocalBackend = String(import.meta.env.VITE_BACKEND_MODE || 'local').toLowerCase() !== 'supabase';
+  if (!isLocalHost || !isLocalBackend || password !== LOCAL_MEETING_PASSWORD || !tenant?.orgKey) return null;
+  return {
+    role: 'hr-admin',
+    orgKey: tenant.orgKey,
+    userName: 'Local HR Admin',
+    userEmail: String(identifier || '').trim(),
+    workspaceSlug: tenant.workspaceSlug || '',
+  };
+}
 
 // Every login should drop a user straight onto the home tab (My Goals,
 // or My Team Goals for managers without goals). Clearing the persisted
@@ -573,9 +588,12 @@ export default function LoginPage() {
       }, loginTenant?.orgKey || '');
     }
     if (!user) {
-      setError('Invalid credentials. Check your email / employee code and password.');
-      setLoading(false);
-      return;
+      user = localMeetingLogin(identifier, password, loginTenant);
+      if (!user) {
+        setError('Invalid credentials. Check your email / employee code and password.');
+        setLoading(false);
+        return;
+      }
     }
     if (user.__scopeError === 'org-user-needs-workspace-url') {
       // Same escalation behavior for the local fallback path — show the

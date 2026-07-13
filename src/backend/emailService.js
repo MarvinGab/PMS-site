@@ -1,5 +1,5 @@
 import { shouldUseSupabase, supabaseEnv } from './config';
-import { readAuthSessionSync } from './stateStore';
+import { readAuthSessionSync, readEmployeeSessionSync } from './stateStore';
 import { tryRefreshSuperAdminSession } from './serverAuth';
 import {
   renderThemedEmailHtml,
@@ -59,6 +59,12 @@ function getOrgBrandedTheme(org, theme = {}) {
 
 const SESSION_EXPIRED_PATTERN = /session is missing or expired|session has expired/i;
 
+function readServerSessionToken() {
+  const authSession = readAuthSessionSync();
+  const employeeSession = readEmployeeSessionSync();
+  return authSession?.serverSessionToken || employeeSession?.serverSessionToken || null;
+}
+
 async function postSendEmail(body, sessionToken) {
   const response = await fetch(`${supabaseEnv.url}/functions/v1/send-email`, {
     method: 'POST',
@@ -89,7 +95,7 @@ async function invokeEmailFunction(body) {
   }
 
   try {
-    const initialToken = readAuthSessionSync()?.serverSessionToken || null;
+    const initialToken = readServerSessionToken();
     let res = await postSendEmail(body, initialToken);
 
     // If the server says the session is gone, try a silent re-auth (works

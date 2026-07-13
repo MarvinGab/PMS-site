@@ -1501,10 +1501,27 @@ export function parseGoalLibraryXlsx(file, config) {
 
         const headers = allRows[0].map(h => String(h || '').trim().toLowerCase());
         // skip banner/notice rows (they have no KRA data) and the example notice
-        const dataRows = allRows.slice(1).filter(r => {
+        const hasTemplateMarkers = allRows.some((row) => String(row?.[0] || '').trim().includes('YOUR DATA'));
+        let insideDataSection = !hasTemplateMarkers;
+        const dataRows = [];
+        allRows.slice(1).forEach((r) => {
           const first = String(r[0] || '').trim();
-          if (first.startsWith('▸') || first.startsWith('---') || first.toUpperCase().startsWith('NOTES')) return false;
-          return r.some(c => String(c || '').trim());
+          const upperFirst = first.toUpperCase();
+          const hasContent = r.some(c => String(c || '').trim());
+          if (!hasContent) return;
+          if (first.startsWith('▸') || first.startsWith('---')) {
+            insideDataSection = first.includes('YOUR DATA');
+            return;
+          }
+          if (upperFirst.startsWith('NOTES') || first.startsWith('•')) {
+            insideDataSection = false;
+            return;
+          }
+          if (!insideDataSection) return;
+          const code = String(r[headers.findIndex(h => normalizeEmployeeFieldKey(h) === 'employeecode')] || '').trim();
+          const name = String(r[headers.findIndex(h => normalizeEmployeeFieldKey(h) === 'employeename')] || '').trim();
+          if (!code && !name) return;
+          dataRows.push(r);
         });
 
         const isByAttr = headers[0] !== 'perspective';
@@ -1785,6 +1802,15 @@ function normalizeEmployeeFieldKey(value) {
   return String(value || '').trim().toLowerCase().replace(/[^a-z0-9]/g, '');
 }
 
+const DEFAULT_GRADE_LABELS = ['G1', 'G2', 'G3', 'G4', 'G5'];
+
+function getConfiguredGradeLabels(config = {}) {
+  const labels = (Array.isArray(config.gradeLabels) ? config.gradeLabels : [])
+    .map((item) => String(item?.name || item || '').trim())
+    .filter(Boolean);
+  return labels.length ? labels : DEFAULT_GRADE_LABELS;
+}
+
 function getEmployeeRowValue(employee, fieldName) {
   if (!employee || !fieldName) return '';
   const directValue = employee[fieldName];
@@ -1892,6 +1918,9 @@ export function employeeTemplateMeta(config) {
   const routingColumns = getEmployeeRoutingColumns(config);
   const hasL2        = (managerLevels || 1) >= 2;
   const needsEmail   = requireEmail !== false;
+  const gradeEnabled = config.gradeEnabled === true;
+  const hodEnabled   = config.hodEnabled === true;
+  const gradeLabels  = getConfiguredGradeLabels(config);
   const goalGroups   = config.goalGroups || [];
   const hasGoalGroups = goalGroups.length > 0;
   const groupNames   = goalGroups.map(g => String(g.name || '').trim()).filter(Boolean);
@@ -1927,9 +1956,10 @@ export function employeeTemplateMeta(config) {
     ...(needsEmail ? ['Email ID'] : []),
     ...(hasGoalGroups ? ['Group Name'] : []),
     ...routingColumns.map(column => column.label),
-    'Reporting Manager Code', 'Reporting Manager Name',
-    ...(needsEmail ? ['Reporting Manager Email'] : []),
-    ...(hasL2 ? ['L2 Manager Code', 'L2 Manager Name'] : []),
+    ...(gradeEnabled ? ['Grade'] : []),
+    'Reporting Manager Code',
+    ...(hasL2 ? ['L2 Manager Code'] : []),
+    ...(hodEnabled ? ['HOD Code'] : []),
   ];
   const colWidths = [
     16, 26,
@@ -1937,32 +1967,35 @@ export function employeeTemplateMeta(config) {
     ...(needsEmail ? [30] : []),
     ...(hasGoalGroups ? [22] : []),
     ...routingColumns.map(() => 18),
-    22, 26,
-    ...(needsEmail ? [32] : []),
-    ...(hasL2 ? [22, 26] : []),
+    ...(gradeEnabled ? [16] : []),
+    22,
+    ...(hasL2 ? [22] : []),
+    ...(hodEnabled ? [18] : []),
   ];
 
   const getRoutingExampleValues = (rowIndex) => routingColumns.map((column) => (
     column.values.length > 0 ? column.values[rowIndex % column.values.length] : `${column.label} Value ${rowIndex + 1}`
   ));
 
-  const ex = (code, name, role, email, groupName, routingValues, mgr, mgrName, mgrEmail, l2Code, l2Name) => [
+  const ex = (code, name, role, email, groupName, routingValues, grade, mgr, l2Code, hodCode) => [
     code, name,
     ...(includeRoleColumn ? [role] : []),
     ...(needsEmail ? [email] : []),
     ...(hasGoalGroups ? [groupName] : []),
     ...routingValues,
-    mgr, mgrName,
-    ...(needsEmail ? [mgrEmail] : []),
-    ...(hasL2 ? [l2Code, l2Name] : []),
+    ...(gradeEnabled ? [grade] : []),
+    mgr,
+    ...(hasL2 ? [l2Code] : []),
+    ...(hodEnabled ? [hodCode] : []),
   ];
   const blankRoutingValues = routingColumns.map(() => '');
+  const gradeEx = (idx) => gradeLabels[idx % Math.max(gradeLabels.length, 1)] || `G${idx + 1}`;
   const exampleRows = [
-    ex('EMP001','Priya Sharma',  'Senior Analyst',     'priya@company.com',  getExampleGroupName(0), getRoutingExampleValues(0), 'MGR001','Amit Shah',  'amit@company.com',  'DIR001','Ravi Verma'),
-    ex('EMP002','Rahul Mehta',   'Account Executive',  'rahul@company.com',  getExampleGroupName(1), getRoutingExampleValues(1), 'MGR002','Neha Patel', 'neha@company.com',  'DIR001','Ravi Verma'),
-    ex('EMP003','Sneha Iyer',    'Operations Lead',    'sneha@company.com',  getExampleGroupName(2), getRoutingExampleValues(2), 'MGR001','Amit Shah',  'amit@company.com',  'DIR002','Sonal Desai'),
+    ex('EMP001','Priya Sharma',  'Senior Analyst',     'priya@company.com',  getExampleGroupName(0), getRoutingExampleValues(0), gradeEx(0), 'MGR001', 'DIR001', 'HOD001'),
+    ex('EMP002','Rahul Mehta',   'Account Executive',  'rahul@company.com',  getExampleGroupName(1), getRoutingExampleValues(1), gradeEx(1), 'MGR002', 'DIR001', 'HOD001'),
+    ex('EMP003','Sneha Iyer',    'Operations Lead',    'sneha@company.com',  getExampleGroupName(2), getRoutingExampleValues(2), gradeEx(2), 'MGR001', 'DIR002', 'HOD002'),
     // Outside-PMS row: available for reporting-manager references without PMS goals.
-    ex('MGR001','Amit Shah',     'Sales Manager',      'amit@company.com',   'NONE',                  blankRoutingValues,         '',      '',           '',                   '',      ''),
+    ex('MGR001','Amit Shah',     'Sales Manager',      'amit@company.com',   'NONE',                  blankRoutingValues,         '',       '',      '', ''),
   ];
 
   const fmtType = empCodeFormat?.type || 'free';
@@ -1984,15 +2017,17 @@ export function employeeTemplateMeta(config) {
     [codeNote],
     ['• Employee Name must be a real person name. Use letters, spaces, dots, apostrophes, or hyphens only.'],
     ...(hasGoalGroups ? [['• Group Name is required on every row. Use one of the configured names from the Reference sheet, OR enter "NONE" if the person sits outside PMS but is still referenced as someone\'s reporting manager.']] : []),
+    ...(gradeEnabled ? [['• Grade is optional for PMS employees. Leave Grade blank when Group Name = "NONE"; filled values must match the Reference sheet.']] : []),
     ['• Reporting Manager Code is optional. If filled, that code must also appear as an Employee Code row in this file.'],
     ...(hasL2 ? [['• L2 Manager Code is the skip-level manager (manager of the direct manager).']] : []),
+    ...(hodEnabled ? [['• HOD Code is optional. If filled, that code must also appear as an Employee Code row in this file. Use Group Name = "NONE" for HOD accounts outside PMS.']] : []),
     ...(routingNote ? [[routingNote]] : []),
-    ...(requireEmail === false ? [['• Email ID is optional for this configuration.']] : []),
+    ...(requireEmail === false ? [['• Email ID is optional for this configuration. If filled, it must be unique per employee.']] : [['• Email ID must be unique per employee.']]),
     ['• Each upload replaces the current employee master file. Do not upload one group now and expect the others to remain unless they are included in a later full upload.'],
     ['• Delete the red example rows before uploading.'],
   ];
 
-  return { headers, colWidths, exampleRows, noteRows, routingColumns, hasL2, needsEmail, hasGoalGroups, groupNames };
+  return { headers, colWidths, exampleRows, noteRows, routingColumns, hasL2, needsEmail, hasGoalGroups, groupNames, gradeEnabled, hodEnabled, gradeLabels };
 }
 
 /* ── DOWNLOAD EMPLOYEE TEMPLATE ──────────────────────────────────────────── */
@@ -2048,14 +2083,15 @@ export async function downloadEmployeeTemplate(config) {
     ['Employee Code', 'Unique identifier for the employee. Must be consistent across all files — same code used every cycle.'],
     ['Employee Name', 'Full name of the employee (display only).'],
     ...(meta.needsEmail ? [['Email ID', 'Work email address. Used for login link and notifications. Must be unique per employee.']] : []),
-    ...(meta.hasGoalGroups ? [['Group Name', 'The goal group this employee belongs to. Must exactly match one of the configured group names listed in the "Valid Group Names" section below — OR enter "NONE" (case-insensitive) to mark this row as outside PMS. Outside-PMS rows belong in the roster only so they can be referenced as someone\'s reporting manager; they do not get a goal plan, library, or routing values.']] : []),
+    ...(meta.hasGoalGroups ? [['Group Name', 'The goal group this employee belongs to. Must exactly match one of the configured group names listed in the "Valid Group Names" section below — OR enter "NONE" (case-insensitive) to mark this row as outside PMS. Outside-PMS rows belong in the roster only so they can be referenced as someone\'s reporting manager; they do not get a goal plan, library, routing values, or grade.']] : []),
     ...meta.routingColumns.map(column => [column.label, `Used to identify the specific library slot within the employee's group. Must match one of the configured values listed in the "${column.label} Values" section below. Leave blank for Group Name = "NONE" rows.`]),
-    ['Reporting Manager Code', 'Optional. If filled, this code must also appear as an Employee Code row in this file. Use Group Name = "NONE" for managers outside PMS.'],
-    ['Reporting Manager Name', 'Full name of the reporting manager. Must match the Employee Name on the manager\'s own row.'],
-    ...(meta.needsEmail ? [['Reporting Manager Email', 'Work email of the reporting manager. Must match the Email ID on the manager\'s own row.']] : []),
+    ...(meta.gradeEnabled ? [['Grade', 'Optional for PMS employees. If filled, must match one configured grade. Leave blank when Group Name = "NONE". Grade is available as a filter in employee, HOD calibration, HR review, bell curve, and reports.']] : []),
+    ['Reporting Manager Code', 'Optional. If filled, this code must also appear as an Employee Code row in this file. The manager name and email are taken from that row. Use Group Name = "NONE" for managers outside PMS.'],
     ...(meta.hasL2 ? [
       ['L2 Manager Code', 'Employee Code of the skip-level manager (manager\'s manager). Optional. If filled, the L2 manager MUST also appear as their own Employee Code row in this file — outside-PMS L2s should be added with Group Name = "NONE".'],
-      ['L2 Manager Name', 'Full name of the L2 manager. Must match the Employee Name on the L2 manager\'s own row. Leave blank if L2 Manager Code is blank.'],
+    ] : []),
+    ...(meta.hodEnabled ? [
+      ['HOD Code', 'Optional. If filled, this code must also appear as an Employee Code row in this file. Use Group Name = "NONE" for HOD accounts outside PMS.'],
     ] : []),
   ];
   refSection('Column Guide', colGuide);
@@ -2068,6 +2104,10 @@ export async function downloadEmployeeTemplate(config) {
       ['NONE', 'Use this for roster entries that sit outside PMS but are still referenced as someone\'s reporting manager. These rows do not get a goal plan; routing values and Reporting Manager are optional. Case-insensitive.'],
       ...meta.groupNames.map(name => [name, `Use exactly this value in the "Group Name" column.`]),
     ]);
+  }
+
+  if (meta.gradeEnabled && meta.gradeLabels.length > 0) {
+    refSection('Valid Grades', meta.gradeLabels.map(name => [name, `Use exactly this value in the "Grade" column.`]));
   }
 
   // Valid attribute values (if goal library is segmented)
@@ -2131,12 +2171,17 @@ export function validateEmployeeData(employees, config) {
   const hasL2 = (managerLevels || 1) >= 2;
   const emailRequired = requireEmail !== false;
   const routingColumns = getEmployeeRoutingColumns(config);
+  const gradeEnabled = config.gradeEnabled === true;
+  const hodEnabled = config.hodEnabled === true;
+  const configuredGrades = getConfiguredGradeLabels(config);
+  const validGrades = new Set(configuredGrades.map((item) => item.toLowerCase()));
   const goalGroups = config.goalGroups || [];
   const hasGoalGroups = goalGroups.length > 0;
   const validGroupNames = new Set(goalGroups.map(g => String(g.name || '').trim().toLowerCase()).filter(Boolean));
   const validLibraryIds = new Set((config.goalLibraries || []).map(library => library.id));
 
   const seenCodes = new Map();
+  const seenEmails = new Map();
   const allCodes = new Set(
     employees.map(e => (e['Employee Code'] || '').trim().toLowerCase()).filter(Boolean)
   );
@@ -2167,6 +2212,8 @@ export function validateEmployeeData(employees, config) {
     const name = (emp['Employee Name'] || '').trim();
     const email = (emp['Email ID'] || '').trim();
     const nameValidation = validateEmployeeName(name);
+    const groupNameRaw = getEmployeeRowValue(emp, 'Group Name');
+    const isOutsidePms = groupNameRaw.trim().toUpperCase() === 'NONE';
 
     // Employee Code
     if (!code) {
@@ -2222,14 +2269,39 @@ export function validateEmployeeData(employees, config) {
     if (emailRequired && !(emp['Email ID'] || '').trim()) {
       errors.push({ row, code: code || '—', field: 'email', message: 'Email ID is missing' });
     }
+    if (email) {
+      const emailKey = email.toLowerCase();
+      const firstSeen = seenEmails.get(emailKey);
+      if (firstSeen && firstSeen.code.toLowerCase() !== code.toLowerCase()) {
+        errors.push({
+          row, code: code || '—', field: 'email',
+          message: `Email ID "${email}" is already used by Employee Code "${firstSeen.code}" on row ${firstSeen.row}. Email ID must be unique per employee.`,
+        });
+      } else if (!firstSeen) {
+        seenEmails.set(emailKey, { row, code: code || '—', name });
+      }
+    }
+
+    if (gradeEnabled) {
+      const grade = getEmployeeRowValue(emp, 'Grade');
+      if (isOutsidePms && grade) {
+        errors.push({
+          row, code: code || '—', field: 'grade',
+          message: `Grade must be blank when Group Name is "NONE". Outside-PMS roster rows do not participate in grade filters or bell curve reporting.`,
+        });
+      } else if (grade && validGrades.size > 0 && !validGrades.has(grade.toLowerCase())) {
+        errors.push({
+          row, code: code || '—', field: 'grade',
+          message: `Grade "${grade}" is not configured. Use one of: ${configuredGrades.join(', ')}.`,
+        });
+      }
+    }
 
     let matchedGroup = null;
     // "NONE" (case-insensitive) marks an outside-PMS employee — they live in
     // the roster (so they can show up as a reporting manager for others) but
     // don't get a goal plan, library, or routing. Manager is optional for
     // these rows.
-    const groupNameRaw = getEmployeeRowValue(emp, 'Group Name');
-    const isOutsidePms = groupNameRaw.trim().toUpperCase() === 'NONE';
     if (hasGoalGroups) {
       if (!groupNameRaw) {
         errors.push({ row, code: code || '—', field: 'group_name',
@@ -2323,20 +2395,12 @@ export function validateEmployeeData(employees, config) {
     if (l1Code && allCodes.has(l1Code.toLowerCase())) {
       const l1Key = l1Code.toLowerCase();
       const l1Name = getEmployeeRowValue(emp, 'Reporting Manager Name');
-      const l1Email = getEmployeeRowValue(emp, 'Reporting Manager Email');
       const empRecord = codeToEmployee.get(l1Key);
       if (empRecord && l1Name && empRecord.normalizedName && normalizeEmployeeNameForCompare(l1Name) !== empRecord.normalizedName) {
         errors.push({
           row, code: code || '—', field: 'l1_manager',
           category: 'manager_name_mismatch',
           message: `Reporting Manager Name "${l1Name}" doesn't match Employee Name "${empRecord.name}" for code "${l1Code}" (row ${empRecord.row}).`,
-        });
-      }
-      if (empRecord && l1Email && empRecord.normalizedEmail && l1Email.toLowerCase() !== empRecord.normalizedEmail) {
-        errors.push({
-          row, code: code || '—', field: 'l1_manager',
-          category: 'manager_email_mismatch',
-          message: `Reporting Manager Email "${l1Email}" doesn't match Email ID "${empRecord.email}" for code "${l1Code}" (row ${empRecord.row}).`,
         });
       }
     }
@@ -2354,7 +2418,6 @@ export function validateEmployeeData(employees, config) {
       if (l2Code && allCodes.has(l2Code.toLowerCase())) {
         const l2Key = l2Code.toLowerCase();
         const l2Name = getEmployeeRowValue(emp, 'L2 Manager Name');
-        const l2Email = getEmployeeRowValue(emp, 'L2 Manager Email');
         const empRecord = codeToEmployee.get(l2Key);
         if (empRecord && l2Name && empRecord.normalizedName && normalizeEmployeeNameForCompare(l2Name) !== empRecord.normalizedName) {
           errors.push({
@@ -2363,21 +2426,27 @@ export function validateEmployeeData(employees, config) {
             message: `L2 Manager Name "${l2Name}" doesn't match Employee Name "${empRecord.name}" for code "${l2Code}" (row ${empRecord.row}).`,
           });
         }
-        if (empRecord && l2Email && empRecord.normalizedEmail && l2Email.toLowerCase() !== empRecord.normalizedEmail) {
-          errors.push({
-            row, code: code || '—', field: 'l2_manager',
-            category: 'manager_email_mismatch',
-            message: `L2 Manager Email "${l2Email}" doesn't match Email ID "${empRecord.email}" for code "${l2Code}" (row ${empRecord.row}).`,
-          });
-        }
+      }
+    }
+
+    // HOD is optional. If supplied, it behaves like manager mapping: the HOD
+    // must have a roster row so credentials/invites can be created from it.
+    if (hodEnabled) {
+      const hodCode = getEmployeeRowValue(emp, 'HOD Code');
+      if (hodCode && !allCodes.has(hodCode.toLowerCase())) {
+        errors.push({
+          row, code: code || '—', field: 'hod',
+          category: 'hod_not_in_roster',
+          message: `HOD Code "${hodCode}" isn't in this roster. Add them as an employee first (Group Name = "NONE" if outside PMS).`,
+        });
       }
     }
   });
 
-  // Rule C: Managers referenced only as RM (not present as Employee Code) must
-  // carry a consistent Name + Email across every row they appear in.
+  // Rule C: Manager references should carry a consistent display name across
+  // repeated rows. Email is resolved from the referenced employee row.
   const mgrOnlyByCode = new Map();
-  const recordMgrReference = (label, codeField, nameField, emailField) => {
+  const recordMgrReference = (label, codeField, nameField) => {
     employees.forEach((emp, idx) => {
       const row = idx + 2;
       const rmCode = getEmployeeRowValue(emp, codeField);
@@ -2385,23 +2454,18 @@ export function validateEmployeeData(employees, config) {
       const rmKey = rmCode.toLowerCase();
       if (allCodes.has(rmKey)) return; // covered by Rule B
       const rmName = getEmployeeRowValue(emp, nameField);
-      const rmEmail = getEmployeeRowValue(emp, emailField);
       const normalizedName = rmName ? normalizeEmployeeNameForCompare(rmName) : '';
-      const normalizedEmail = rmEmail ? rmEmail.toLowerCase() : '';
       const existing = mgrOnlyByCode.get(rmKey);
       if (!existing) {
         mgrOnlyByCode.set(rmKey, {
           firstRow: row,
           name: rmName,
           normalizedName,
-          email: rmEmail,
-          normalizedEmail,
           field: label,
         });
         return;
       }
       const nameClash = rmName && existing.normalizedName && normalizedName !== existing.normalizedName;
-      const emailClash = rmEmail && existing.normalizedEmail && normalizedEmail !== existing.normalizedEmail;
       if (nameClash) {
         errors.push({
           row, code: rmCode, field: label,
@@ -2409,18 +2473,11 @@ export function validateEmployeeData(employees, config) {
           message: `${nameField} "${rmName}" doesn't match row ${existing.firstRow} which has "${existing.name}" for code "${rmCode}".`,
         });
       }
-      if (emailClash) {
-        errors.push({
-          row, code: rmCode, field: label,
-          category: 'manager_email_mismatch',
-          message: `${emailField} "${rmEmail}" doesn't match row ${existing.firstRow} which has "${existing.email}" for code "${rmCode}".`,
-        });
-      }
     });
   };
-  recordMgrReference('l1_manager', 'Reporting Manager Code', 'Reporting Manager Name', 'Reporting Manager Email');
+  recordMgrReference('l1_manager', 'Reporting Manager Code', 'Reporting Manager Name');
   if (hasL2) {
-    recordMgrReference('l2_manager', 'L2 Manager Code', 'L2 Manager Name', 'L2 Manager Email');
+    recordMgrReference('l2_manager', 'L2 Manager Code', 'L2 Manager Name');
   }
 
   // Code anomaly and similar-name checks

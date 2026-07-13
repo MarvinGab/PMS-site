@@ -17,12 +17,16 @@ import {
   hydrateOrganizations,
   readOrgBrandCacheSync,
   subscribeToScopedState,
+  submitGoalsAction,
+  approveGoalsAction,
+  sendBackGoalsAction,
 } from '../backend/stateStore';
 import { sendCustomBroadcast } from '../backend/emailService';
 import { getCurrentSubPhase, SUB_PHASE } from '../backend/cyclePhase';
-import { hydrateRatings, readRatings, submitEmployeeStage, setEmployeeStage, subscribeToRatings } from '../backend/ratingsStore';
+import { hydrateRatings, isPublished, readRatings, submitEmployeeStageAndPersist, setEmployeeStage, subscribeToRatings } from '../backend/ratingsStore';
 import SelfEvalPage from './SelfEvalPage';
-import ManagerEvalPage from './ManagerEvalPage';
+import ManagerEvalPage, { PublishedManagerRatingView, HeroScoreTiles } from './ManagerEvalPage';
+import HRReviewPage from './HRReviewPage';
 
 const EMP_SESSION_KEY = 'zarohr_emp_session';
 const WIZARD_STATE_KEY = 'zarohr_pms_wizard_state_v1';
@@ -296,7 +300,19 @@ function mergeUploadedTargetsIntoGoals(currentGoals = [], configuredGoals = []) 
 
     const nextGoal = { ...goal };
     if (!sanitizeText(nextGoal.target) && sanitizeText(configuredGoal.target)) nextGoal.target = configuredGoal.target;
-    if ((!nextGoal.targetType || nextGoal.targetType === 'none') && configuredGoal.targetType) nextGoal.targetType = configuredGoal.targetType;
+    const configuredGoalType = String(configuredGoal.targetType || '').trim();
+    const currentGoalType = String(nextGoal.targetType || '').trim();
+    if (
+      configuredGoalType
+      && configuredGoalType !== 'none'
+      && (
+        !currentGoalType
+        || currentGoalType === 'none'
+        || (currentGoalType === 'text' && configuredGoalType !== 'text')
+      )
+    ) {
+      nextGoal.targetType = configuredGoalType;
+    }
 
     const configuredKpis = Array.isArray(configuredGoal.kpis) ? configuredGoal.kpis : [];
     if (Array.isArray(nextGoal.kpis) && nextGoal.kpis.length > 0 && configuredKpis.length > 0) {
@@ -311,7 +327,19 @@ function mergeUploadedTargetsIntoGoals(currentGoals = [], configuredGoals = []) 
         if (!configuredKpi) return kpi;
         const nextKpi = { ...kpi };
         if (!sanitizeText(nextKpi.target) && sanitizeText(configuredKpi.target)) nextKpi.target = configuredKpi.target;
-        if ((!nextKpi.targetType || nextKpi.targetType === 'none') && configuredKpi.targetType) nextKpi.targetType = configuredKpi.targetType;
+        const configuredKpiType = String(configuredKpi.targetType || '').trim();
+        const currentKpiType = String(nextKpi.targetType || '').trim();
+        if (
+          configuredKpiType
+          && configuredKpiType !== 'none'
+          && (
+            !currentKpiType
+            || currentKpiType === 'none'
+            || (currentKpiType === 'text' && configuredKpiType !== 'text')
+          )
+        ) {
+          nextKpi.targetType = configuredKpiType;
+        }
         return nextKpi;
       });
     }
@@ -823,6 +851,41 @@ function canonicalTargetTypeId(type = {}) {
   return rawId || name.replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '') || 'text';
 }
 
+const TARGET_TYPE_ID_ALIASES = {
+  number: 'tt_default_number',
+  percentage: 'tt_default_percentage',
+  percent: 'tt_default_percentage',
+  currency: 'tt_default_currency',
+  text: 'tt_default_text',
+  free_text: 'tt_default_text',
+  neg_number: 'tt_neg_number',
+  negative_number: 'tt_neg_number',
+  neg_currency: 'tt_neg_currency',
+  negative_currency: 'tt_neg_currency',
+  neg_percentage: 'tt_neg_percentage',
+  negative_percentage: 'tt_neg_percentage',
+  tt_default_number: 'number',
+  tt_default_percentage: 'percentage',
+  tt_default_currency: 'currency',
+  tt_default_text: 'text',
+  tt_neg_number: 'neg_number',
+  tt_neg_currency: 'neg_currency',
+  tt_neg_percentage: 'neg_percentage',
+};
+
+function targetTypeAliasIds(typeId) {
+  const raw = String(typeId || '').trim();
+  const alias = TARGET_TYPE_ID_ALIASES[raw.toLowerCase()];
+  return [raw, alias].filter(Boolean);
+}
+
+function findTargetTypeMeta(typeId, targetTypeOptions = []) {
+  const ids = targetTypeAliasIds(typeId);
+  return targetTypeOptions.find((type) => ids.includes(String(type.id || '').trim()))
+    || TARGET_TYPES.find((type) => ids.includes(String(type.id || '').trim()))
+    || TARGET_TYPES.find((type) => type.id === 'text');
+}
+
 function buildTargetTypeOptions(config = {}) {
   const baseById = new Map(TARGET_TYPES.map((type) => [type.id, type]));
   const configured = Array.isArray(config?.targetTypes) ? config.targetTypes : [];
@@ -864,7 +927,7 @@ function buildTargetTypeOptions(config = {}) {
 function getTargetCapIssues(targetValue, targetTypeId, targetTypes = [], label = 'Target') {
   const value = sanitizeText(targetValue);
   if (!value || targetTypeId === 'none') return [];
-  const targetType = targetTypes.find((type) => type.id === targetTypeId);
+  const targetType = findTargetTypeMeta(targetTypeId, targetTypes);
   if (!targetType?.isNumeric || (!targetType.hasMin && !targetType.hasMax)) return [];
   const numericValue = Number(String(value).replace(/,/g, ''));
   const unit = sanitizeText(targetType.unit || '');
@@ -890,7 +953,7 @@ function TargetField({ value, onValueChange, type, onTypeChange, targetTypes }) 
   const btnRef = useRef(null);
   const popRef = useRef(null);
   const options = targetTypes?.length ? targetTypes : TARGET_TYPES;
-  const current = options.find((t) => t.id === type) || TARGET_TYPES.find((t) => t.id === type) || options[0] || TARGET_TYPES[0];
+  const current = findTargetTypeMeta(type, options) || options[0] || TARGET_TYPES[0];
 
   const POP_W = 220;
   const POP_H = 320;
@@ -1280,7 +1343,11 @@ function isGoalStructurallyValid(goal, config = null) {
   return true;
 }
 
-function getGoalPlanValidation(goals, config, accessMode, limits, perspectives) {
+function normalizeCompetencyName(value) {
+  return sanitizeText(value).replace(/\s+/g, ' ');
+}
+
+function getGoalPlanValidation(goals, config, accessMode, limits, perspectives, competencyList = []) {
   const errors = [];
   const allGoals = goals || [];
   const isEditableStructure = config?.goalCreationMode === 'employee-self' || accessMode === 'edit-freely';
@@ -1319,6 +1386,17 @@ function getGoalPlanValidation(goals, config, accessMode, limits, perspectives) 
     if (Math.abs(total - 100) > 0.01) {
       errors.push(`Goal weights must sum to 100%. Current total is ${total.toFixed(1)}%.`);
     }
+  }
+
+  if (config?.competenciesEnabled !== false && config?.employeeCanEditCompetencies === true) {
+    const max = Math.max(1, Number(config.maxCompetencies) || 1);
+    const list = (Array.isArray(competencyList) ? competencyList : [])
+      .map(normalizeCompetencyName)
+      .filter(Boolean);
+    const unique = new Set(list.map((item) => item.toLowerCase()));
+    if (list.length === 0) errors.push('Add at least one competency before submitting.');
+    if (list.length > max) errors.push(`You can add at most ${max} competencies.`);
+    if (unique.size !== list.length) errors.push('Remove duplicate competencies before submitting.');
   }
 
   return {
@@ -1411,6 +1489,7 @@ function extractKrasFromLibrary(library) {
         name: kpi.name || '',
         weight: kpi.suggestedWeight || kpi.weight || '',
         target: kpi.target || '',
+        targetType: kpi.targetType || (kpi.target ? 'text' : 'none'),
         source: 'library',
       })),
     }))
@@ -2149,6 +2228,12 @@ export default function EmployeePage() {
     const employees = config?.employeeUploadData?.employees || [];
     return employees.some((e) => String(e['Reporting Manager Code'] || '').trim().toUpperCase() === code);
   }, [config, session]);
+  const hodReports = useMemo(() => {
+    if (!session?.empCode) return [];
+    const code = String(session.empCode).trim().toUpperCase();
+    const employees = config?.employeeUploadData?.employees || [];
+    return employees.filter((e) => String(e['HOD Code'] || '').trim().toUpperCase() === code);
+  }, [config, session]);
   const orgBrand = useMemo(() => {
     const org = (appData?.organizationsData || []).find((item) => item.key === (session?.orgKey || ''));
     const cachedBrand = readOrgBrandCacheSync(session?.orgKey);
@@ -2208,6 +2293,24 @@ export default function EmployeePage() {
     });
     return count;
   }, [config, session, ratingsTick]);
+  const hodReviewStats = useMemo(() => {
+    const ratings = (session?.orgKey ? readRatings(session.orgKey) : { ratings: {} }).ratings || {};
+    let managerDone = 0;
+    let hodDone = 0;
+    hodReports.forEach((employeeRow) => {
+      const code = normalizeCode(employeeRow?.['Employee Code']);
+      const stages = ratings[code] || {};
+      if (stages?.manager?.submittedAt) managerDone += 1;
+      if (stages?.hod?.calibratedScore !== undefined) hodDone += 1;
+    });
+    return {
+      total: hodReports.length,
+      managerDone,
+      hodDone,
+      waiting: Math.max(0, hodReports.length - managerDone),
+      pct: hodReports.length ? Math.round((managerDone / hodReports.length) * 100) : 0,
+    };
+  }, [session?.orgKey, hodReports, ratingsTick]);
 
   useEffect(() => {
     if (!session?.orgKey) return undefined;
@@ -2233,6 +2336,9 @@ export default function EmployeePage() {
     const roster = config?.employeeUploadData?.employees || [];
     const rmExists = rmCode && roster.some((e) => normalizeCode(e['Employee Code']) === normalizeCode(rmCode));
     const canSetGoalsNow = !!emp && !!rmCode && !!rmExists;
+    const ownCode = normalizeCode(session?.empCode);
+    const hasDirectReportsNow = roster.some((e) => normalizeCode(e['Reporting Manager Code']) === ownCode);
+    const hasHodReportsNow = roster.some((e) => normalizeCode(e['HOD Code']) === ownCode);
     // If config hasn't been pulled from Supabase yet (typical on a fresh
     // login - localStorage is cold), we can't actually determine whether
     // this user has goal-setting access. Default to 'goals' optimistically
@@ -2245,16 +2351,32 @@ export default function EmployeePage() {
       const stored = localStorage.getItem(activeSectionKey);
       if (stored) {
         const next = stored === 'dashboard' ? 'goals' : stored;
-        if (next === 'goals' && hasRosterConfig && !canSetGoalsNow) return 'team';
+        if (next === 'goals' && hasRosterConfig && !canSetGoalsNow) {
+          if (hasDirectReportsNow) return 'team';
+          if (hasHodReportsNow) return 'hod-calibration';
+          return 'messages';
+        }
+        if (next === 'team' && hasRosterConfig && !hasDirectReportsNow) {
+          if (canSetGoalsNow) return 'goals';
+          if (hasHodReportsNow) return 'hod-calibration';
+          return 'messages';
+        }
         return next;
       }
     } catch (_) {}
     // First visit: optimistically default to 'goals'. The effect below
     // corrects to 'team' / 'messages' if the user truly can't set goals.
     if (!hasRosterConfig) return 'goals';
-    return canSetGoalsNow ? 'goals' : 'team';
+    if (canSetGoalsNow) return 'goals';
+    if (hasDirectReportsNow) return 'team';
+    if (hasHodReportsNow) return 'hod-calibration';
+    return 'messages';
   });
+  // Once the user manually picks a tab, stop auto-landing them on the
+  // phase-default for the rest of the session.
+  const userPickedSectionRef = useRef(false);
   const setActiveSection = (next) => {
+    userPickedSectionRef.current = true;
     setActiveSectionInner(next);
     try { localStorage.setItem(activeSectionKey, next); } catch { /* ignore */ }
   };
@@ -2262,7 +2384,9 @@ export default function EmployeePage() {
   const [selfAchievements, setSelfAchievements] = useState({});
   const [selfEvalSubmitted, setSelfEvalSubmitted] = useState(false);
   const [selfEvalSubmitError, setSelfEvalSubmitError] = useState('');
+  const [selfEvalSubmitting, setSelfEvalSubmitting] = useState(false);
   const [goalSubmitError, setGoalSubmitError] = useState('');
+  const [competencyDraft, setCompetencyDraft] = useState('');
   const [managerNotes, setManagerNotes] = useState({});
   // Transient per-goal review picks, keyed by employeeCode → { [goalId]: { status, note } }.
   // Only the "pending" (not yet approved) goals appear here; committed on reviewSubmission.
@@ -2463,9 +2587,7 @@ export default function EmployeePage() {
 
   const accessMode = useMemo(() => getGoalAccessMode(effectiveConfig), [effectiveConfig]);
   const targetTypeOptions = useMemo(() => buildTargetTypeOptions(effectiveConfig), [effectiveConfig]);
-  const getTargetTypeMeta = (typeId) => targetTypeOptions.find((type) => type.id === typeId)
-    || TARGET_TYPES.find((type) => type.id === typeId)
-    || TARGET_TYPES.find((type) => type.id === 'text');
+  const getTargetTypeMeta = (typeId) => findTargetTypeMeta(typeId, targetTypeOptions);
   const formatGoalTargetValue = (value, typeId) => {
     const meta = getTargetTypeMeta(typeId);
     const unit = String(meta?.unit || '').trim();
@@ -2765,10 +2887,17 @@ export default function EmployeePage() {
   const allMyGoals = mySubmission?.goals || [];
   const myGoals = getActiveGoals(allMyGoals);
   const deletedGoals = allMyGoals.filter((g) => g.deletedAt && !isDeletedGoalExpired(g));
+  const employeeCompetencies = (Array.isArray(mySubmission?.employeeCompetencies) ? mySubmission.employeeCompetencies : [])
+    .map(normalizeCompetencyName)
+    .filter(Boolean);
+  const canEmployeeEditCompetencies = effectiveConfig?.competenciesEnabled !== false && effectiveConfig?.employeeCanEditCompetencies === true;
+  const maxEmployeeCompetencies = Math.max(1, Number(effectiveConfig?.maxCompetencies) || 1);
+  void ratingsTick;
+  const scorePublished = !!session?.orgKey && isPublished(session.orgKey) && !isExternalManager;
   const goalMetrics = getGoalPlanMetrics(myGoals, effectiveConfig, accessMode);
   const myStatusMeta = getSubmissionStatusMeta(mySubmission);
   const limits = getGoalLimits(config, employee, employeeGroup);
-  const myValidation = getGoalPlanValidation(myGoals, effectiveConfig, accessMode, limits, activePerspectives);
+  const myValidation = getGoalPlanValidation(myGoals, effectiveConfig, accessMode, limits, activePerspectives, employeeCompetencies);
   // Per-goal issue map for inline red badges on cards. Shares getGoalIssues() with submit-level
   // validation so card state and submit state are always consistent.
   const goalIssuesById = useMemo(() => {
@@ -2838,13 +2967,22 @@ export default function EmployeePage() {
   useEffect(() => {
     if (!configHydrated) return;
     if (activeSection === 'goals' && !canSetOwnGoals) {
-      setActiveSection(directReports.length > 0 ? 'team' : 'messages');
+      setActiveSection(directReports.length > 0 ? 'team' : (hodReports.length > 0 ? 'hod-calibration' : 'messages'));
     }
     if (activeSection === 'team' && directReports.length === 0 && canSetOwnGoals) {
       setActiveSection('goals');
     }
+    if (activeSection === 'team' && directReports.length === 0 && !canSetOwnGoals) {
+      setActiveSection(hodReports.length > 0 ? 'hod-calibration' : 'messages');
+    }
+    if (activeSection === 'score' && !scorePublished) {
+      setActiveSection(canSetOwnGoals ? 'goals' : (directReports.length > 0 ? 'team' : 'messages'));
+    }
+    if (activeSection === 'hod-calibration' && hodReports.length === 0) {
+      setActiveSection(canSetOwnGoals ? 'goals' : (directReports.length > 0 ? 'team' : 'messages'));
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeSection, canSetOwnGoals, configHydrated, directReports.length]);
+  }, [activeSection, canSetOwnGoals, configHydrated, directReports.length, hodReports.length, scorePublished]);
 
   // When the phase shifts into evaluation for this employee, auto-migrate
   // them to the new tab — but only once per role transition so they can
@@ -2864,6 +3002,23 @@ export default function EmployeePage() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [configHydrated, myInSelfEvalPhase, myInManagerEvalPhase]);
+
+  // Phase-based landing tab: once results are published, open on Score; during
+  // the self-evaluation phase, open on My Goal Evaluation. Applies on a fresh
+  // open and keeps syncing until the user manually picks a tab, after which we
+  // leave them wherever they navigated.
+  useEffect(() => {
+    if (userPickedSectionRef.current) return;
+    if (!configHydrated) return;
+    let target = null;
+    if (scorePublished) target = 'score';
+    else if (myInSelfEvalPhase) target = 'self-eval';
+    if (target && activeSection !== target) {
+      setActiveSectionInner(target);
+      try { localStorage.setItem(activeSectionKey, target); } catch { /* ignore */ }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [configHydrated, scorePublished, myInSelfEvalPhase, activeSection]);
   const canEditGoalPlan = canSetOwnGoals && currentPhase === 'goal-setting' && mySubmission && !['pending-manager', 'approved'].includes(mySubmission.status);
   const canAddKra = canEditGoalPlan && (
     effectiveConfig?.goalCreationMode === 'employee-self' ||
@@ -2947,6 +3102,39 @@ export default function EmployeePage() {
         },
       };
     });
+  }
+
+  function updateEmployeeCompetencies(nextList) {
+    if (!canEmployeeEditCompetencies) return;
+    const clean = [];
+    const seen = new Set();
+    (Array.isArray(nextList) ? nextList : []).forEach((item) => {
+      const name = normalizeCompetencyName(item);
+      const key = name.toLowerCase();
+      if (!name || seen.has(key)) return;
+      seen.add(key);
+      clean.push(name);
+    });
+    updateMySubmission((record) => {
+      record.employeeCompetencies = clean.slice(0, maxEmployeeCompetencies);
+      return record;
+    });
+  }
+
+  function addEmployeeCompetency() {
+    if (!canEmployeeEditCompetencies) return;
+    const name = normalizeCompetencyName(competencyDraft);
+    if (!name) return;
+    const exists = employeeCompetencies.some((item) => item.toLowerCase() === name.toLowerCase());
+    if (exists || employeeCompetencies.length >= maxEmployeeCompetencies) return;
+    updateEmployeeCompetencies([...employeeCompetencies, name]);
+    setCompetencyDraft('');
+  }
+
+  function removeEmployeeCompetency(name) {
+    if (!canEmployeeEditCompetencies) return;
+    const key = String(name || '').trim().toLowerCase();
+    updateEmployeeCompetencies(employeeCompetencies.filter((item) => item.toLowerCase() !== key));
   }
 
   function markLocalWorkflowMutation() {
@@ -3339,56 +3527,49 @@ export default function EmployeePage() {
     });
   }
 
-  function submitGoals() {
+  function applyServerWorkflow(nextWorkflow) {
+    if (!nextWorkflow) return;
+    const raw = workflowRaw(nextWorkflow);
+    workflowDirtyRef.current = false;
+    pendingSaveRawRef.current = null;
+    syncedWorkflowRawRef.current = raw;
+    latestWorkflowRawRef.current = raw;
+    latestWorkflowRef.current = nextWorkflow;
+    markLocalWorkflowMutation();
+    setWorkflow(nextWorkflow);
+    setSaveStatus('saved');
+    setLastSavedAt(Date.now());
+  }
+
+  async function submitGoals() {
     if (!myValidation.canSubmit) {
       setGoalSubmitError(myValidation.errors[0] || 'Complete your goals before submitting.');
       return;
     }
 
     setGoalSubmitError('');
-    const submittedAt = new Date().toISOString();
-    // Read the prior submit count from the current workflow so the
-    // resubmit-vs-first-submit distinction is available BOTH inside the
-    // updateMySubmission callback AND in the notification block below.
-    // (Previously nextSubmitCount was only scoped to the callback, so
-    // referencing it outside threw a ReferenceError and the manager
-    // notification never fired.)
-    const priorSubmitCount = Number(workflow?.submissions?.[employeeCodeKey]?.submitCount || 0);
-    const nextSubmitCount = priorSubmitCount + 1;
-    const isResubmit = nextSubmitCount > 1;
-    updateMySubmission((record) => {
-      const noManager = !record.managerCode;
-      // Reset previously-rejected goals back to pending review. Approved ones stay locked.
-      const resetGoals = (record.goals || []).map((goal) => {
-        if (goal.reviewStatus === 'rejected') {
-          const { reviewStatus: _s, reviewNote: _n, reviewedAt: _t, ...rest } = goal;
-          return rest;
-        }
-        return goal;
-      });
-      return {
-        ...record,
-        goals: resetGoals,
-        status: noManager ? 'approved' : 'pending-manager',
-        submittedAt,
-        submitCount: nextSubmitCount,
-        approvedAt: noManager ? submittedAt : record.approvedAt,
-        managerDecisionAt: noManager ? submittedAt : null,
-        managerNote: noManager ? 'No manager assigned. Goals marked approved automatically.' : '',
-      };
+    setSaveStatus('saving');
+    const currentRecord = workflow?.submissions?.[employeeCodeKey] || {
+      employeeCode: session.empCode,
+      employeeName,
+      managerCode,
+      status: 'draft',
+      goals: myGoals,
+      createdAt: new Date().toISOString(),
+    };
+    const result = await submitGoalsAction(session.orgKey, session.empCode, {
+      ...currentRecord,
+      employeeCode: session.empCode,
+      employeeName,
+      managerCode,
+      goals: myGoals,
     });
-    if (managerCode) {
-      addNotification(createNotification({
-        type: isResubmit ? 'goal-resubmitted' : 'goal-submitted',
-        recipientCode: managerCode,
-        senderCode: session.empCode,
-        submissionCode: session.empCode,
-        title: isResubmit ? `${employeeName} resubmitted goals` : `${employeeName} submitted goals`,
-        message: isResubmit
-          ? `${employeeName} updated their plan after your earlier feedback and sent it back for approval.`
-          : `${employeeName} sent a goal plan for your approval.`,
-      }));
+    if (!result?.ok) {
+      setSaveStatus('failed');
+      setGoalSubmitError(result?.error || 'Could not submit goals. Sign in again and retry.');
+      return;
     }
+    applyServerWorkflow(result.workflow);
   }
 
   // mode: 'approve-all' | 'reject-all' | 'commit'
@@ -3396,7 +3577,7 @@ export default function EmployeePage() {
   //  - 'reject-all' : every not-yet-approved goal becomes rejected (plan note used as blanket note).
   //  - 'commit'     : applies per-goal picks; unmarked pending goals default to approved.
   // Goals already carrying reviewStatus === 'approved' from a prior round stay approved (locked).
-  function reviewSubmission(employeeCode, mode = 'commit') {
+  async function reviewSubmission(employeeCode, mode = 'commit') {
     const planNote = sanitizeText(managerNotes[employeeCode] || '');
     const picks = goalReviewPicks[employeeCode] || {};
     const targetKey = normalizeCode(employeeCode);
@@ -3444,52 +3625,18 @@ export default function EmployeePage() {
 
     const activeUpdatedGoals = getReviewableGoals(updatedGoals);
     const anyRejected = activeUpdatedGoals.some((g) => g.reviewStatus === 'rejected');
-    const submissionStatus = anyRejected ? 'sent-back' : 'approved';
-    const rejectedCount = activeUpdatedGoals.filter((g) => g.reviewStatus === 'rejected').length;
-    const approvedCount = activeUpdatedGoals.length - rejectedCount;
-
-    workflowDirtyRef.current = true;
-    markLocalWorkflowMutation();
-    setWorkflow((prev) => ({
-      ...prev,
-      submissions: {
-        ...(prev?.submissions || {}),
-        [targetKey]: {
-          ...(prev?.submissions?.[targetKey] || current),
-          goals: updatedGoals,
-          status: submissionStatus,
-          managerDecisionAt: decidedAt,
-          approvedAt: submissionStatus === 'approved' ? decidedAt : (prev?.submissions?.[targetKey]?.approvedAt || current.approvedAt),
-          managerApprovedBy: session.empCode,
-          managerNote: planNote,
-        },
-      },
-    }));
+    setSaveStatus('saving');
+    const result = anyRejected
+      ? await sendBackGoalsAction(session.orgKey, targetKey, updatedGoals, planNote)
+      : await approveGoalsAction(session.orgKey, targetKey, updatedGoals, planNote);
+    if (!result?.ok) {
+      setSaveStatus('failed');
+      window.alert(result?.error || 'Could not submit goal review. Sign in again and retry.');
+      return;
+    }
+    applyServerWorkflow(result.workflow);
     setManagerNotes((prevNotes) => ({ ...prevNotes, [employeeCode]: '' }));
     setGoalReviewPicks((prevPicks) => { const next = { ...prevPicks }; delete next[employeeCode]; return next; });
-
-    let notifType, notifTitle, notifMessage;
-    if (rejectedCount === 0) {
-      notifType = 'goal-approved';
-      notifTitle = 'Goals approved';
-      notifMessage = `${employeeName} approved your goal plan.${planNote ? ` Note: ${planNote}` : ''}`;
-    } else if (approvedCount === 0) {
-      notifType = 'goal-rejected';
-      notifTitle = 'Goals need updates';
-      notifMessage = `${employeeName} requested changes on all goals.${planNote ? ` Note: ${planNote}` : ''}`;
-    } else {
-      notifType = 'goal-rejected';
-      notifTitle = 'Goals reviewed';
-      notifMessage = `${employeeName} approved ${approvedCount} goal${approvedCount === 1 ? '' : 's'} and sent back ${rejectedCount} for updates.`;
-    }
-    addNotification(createNotification({
-      type: notifType,
-      recipientCode: employeeCode,
-      senderCode: session.empCode,
-      submissionCode: employeeCode,
-      title: notifTitle,
-      message: notifMessage,
-    }));
   }
 
   function getReminderState(reportCode) {
@@ -3932,7 +4079,8 @@ export default function EmployeePage() {
     );
   }
 
-  function submitSelfEvaluation() {
+  async function submitSelfEvaluation() {
+    if (selfEvalSubmitting) return;
     if (selfEvalMissingItems.length > 0) {
       setSelfEvalSubmitError(`${selfEvalMissingItems[0]}${selfEvalMissingItems.length > 1 ? ` +${selfEvalMissingItems.length - 1} more required item${selfEvalMissingItems.length - 1 === 1 ? '' : 's'}.` : ''}`);
       const itemScores = {};
@@ -3960,11 +4108,17 @@ export default function EmployeePage() {
     targetAchievementItems.forEach((item) => {
       achievementPayload[item.id] = selfAchievements[item.key];
     });
-    submitEmployeeStage(session.orgKey, session.empCode, 'self', {
+    setSelfEvalSubmitting(true);
+    const result = await submitEmployeeStageAndPersist(session.orgKey, session.empCode, 'self', {
       itemScores,
       achievements: achievementPayload,
       overallComment: '',
     }, session.empCode);
+    setSelfEvalSubmitting(false);
+    if (!result?.ok) {
+      setSelfEvalSubmitError(result?.error || 'Self-evaluation could not sync. Please retry before asking your manager to review.');
+      return;
+    }
     updateMySubmission((record) => ({
       ...record,
       selfEvaluation: {
@@ -3997,6 +4151,7 @@ export default function EmployeePage() {
     : [
         { id: 'goals', label: 'My Goals' },
         ...(currentPhase === 'self-evaluation' ? [{ id: 'scale', label: 'Rating Scale' }] : []),
+        ...(hodReports.length > 0 ? [{ id: 'hod-calibration', label: `My Team Calibration (${hodReports.length})` }] : []),
         ...(directReports.length > 0 ? [{ id: 'send-mail', label: 'Send Mail' }] : []),
         { id: 'messages', label: unreadMsgCount > 0 ? `Messages (${unreadMsgCount})` : 'Messages' },
         { id: 'notifications', label: `Notifications (${notifications.length})` },
@@ -4217,6 +4372,94 @@ export default function EmployeePage() {
             onReturnGoal={returnGoalToLibrary}
             displayMode={config?.goalLibraryDisplay || 'rotating'}
           />
+        )}
+
+        {canEmployeeEditCompetencies && (
+          <div style={{
+            marginBottom: 16,
+            borderRadius: 14,
+            border: `1.5px solid ${employeeCompetencies.length === 0 && canEditGoalPlan ? '#FCA5A5' : '#A5F3FC'}`,
+            background: '#F0FDFF',
+            padding: 14,
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap', marginBottom: 10 }}>
+              <div>
+                <div style={{ fontSize: 14.5, fontWeight: 900, color: '#0F172A' }}>My competencies</div>
+                <div style={{ fontSize: 12, fontWeight: 700, color: employeeCompetencies.length >= maxEmployeeCompetencies ? '#B45309' : '#0E7490', marginTop: 2 }}>
+                  {employeeCompetencies.length} / {maxEmployeeCompetencies} selected
+                </div>
+              </div>
+              {canEditGoalPlan && (
+                <div style={{ display: 'flex', gap: 8, alignItems: 'center', minWidth: 280, flex: '0 1 440px' }}>
+                  <input
+                    value={competencyDraft}
+                    onChange={(e) => setCompetencyDraft(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        e.preventDefault();
+                        addEmployeeCompetency();
+                      }
+                    }}
+                    placeholder={employeeCompetencies.length >= maxEmployeeCompetencies ? 'Limit reached' : 'Add competency'}
+                    disabled={employeeCompetencies.length >= maxEmployeeCompetencies}
+                    style={{
+                      flex: 1,
+                      minWidth: 0,
+                      padding: '9px 11px',
+                      borderRadius: 10,
+                      border: '1px solid #BAE6FD',
+                      background: employeeCompetencies.length >= maxEmployeeCompetencies ? '#F8FAFC' : '#fff',
+                      color: '#0F172A',
+                      fontSize: 13,
+                      fontFamily: 'inherit',
+                      outline: 'none',
+                    }}
+                  />
+                  <button
+                    type="button"
+                    onClick={addEmployeeCompetency}
+                    disabled={!normalizeCompetencyName(competencyDraft) || employeeCompetencies.length >= maxEmployeeCompetencies}
+                    style={{
+                      padding: '9px 13px',
+                      borderRadius: 10,
+                      border: 'none',
+                      background: (!normalizeCompetencyName(competencyDraft) || employeeCompetencies.length >= maxEmployeeCompetencies) ? '#CBD5E1' : '#0891B2',
+                      color: '#fff',
+                      fontSize: 12.5,
+                      fontWeight: 850,
+                      cursor: (!normalizeCompetencyName(competencyDraft) || employeeCompetencies.length >= maxEmployeeCompetencies) ? 'not-allowed' : 'pointer',
+                      fontFamily: 'inherit',
+                    }}
+                  >
+                    Add
+                  </button>
+                </div>
+              )}
+            </div>
+            {employeeCompetencies.length > 0 ? (
+              <div style={{ display: 'flex', gap: 7, flexWrap: 'wrap' }}>
+                {employeeCompetencies.map((name) => (
+                  <span key={name} style={{ display: 'inline-flex', alignItems: 'center', gap: 7, padding: '5px 9px', borderRadius: 999, background: '#FFFFFF', border: '1px solid #A5F3FC', color: '#155E75', fontSize: 12.5, fontWeight: 800 }}>
+                    {name}
+                    {canEditGoalPlan && (
+                      <button
+                        type="button"
+                        onClick={() => removeEmployeeCompetency(name)}
+                        aria-label={`Remove ${name}`}
+                        style={{ border: 0, background: 'transparent', color: '#64748B', cursor: 'pointer', fontSize: 14, lineHeight: 1, padding: 0, fontFamily: 'inherit' }}
+                      >
+                        ×
+                      </button>
+                    )}
+                  </span>
+                ))}
+              </div>
+            ) : (
+              <div style={{ fontSize: 12.5, fontWeight: 700, color: '#B91C1C' }}>
+                Add at least one competency before submitting your goal plan.
+              </div>
+            )}
+          </div>
         )}
 
         {/* 3. My Goals (bottom) */}
@@ -4995,7 +5238,7 @@ export default function EmployeePage() {
                 let label;
                 let bg;
                 if (status === 'approved') { label = '✓ Approved'; bg = '#16A34A'; }
-                else if (status === 'pending-manager') { label = submitCount > 1 ? '✓ Re-submitted' : '✓ Submitted'; bg = '#16A34A'; }
+                else if (status === 'pending-manager') { label = submitCount > 1 ? '✓ Re-submitted' : '✓ Submitted'; bg = '#94A3B8'; }
                 else if (status === 'sent-back') { label = 'Resubmit Goals'; bg = canEditGoalPlan && myValidation.canSubmit ? '#16A34A' : '#CBD5E1'; }
                 else { label = 'Submit Goals for Approval'; bg = canEditGoalPlan && myValidation.canSubmit ? '#16A34A' : '#CBD5E1'; }
                 const enabled = !isLocked && canEditGoalPlan && myValidation.canSubmit;
@@ -5014,7 +5257,7 @@ export default function EmployeePage() {
                       fontWeight: 700,
                       cursor: enabled ? 'pointer' : 'not-allowed',
                       fontFamily: 'inherit',
-                      opacity: isLocked ? 0.92 : 1,
+                      opacity: status === 'pending-manager' ? 0.82 : (isLocked ? 0.92 : 1),
                     }}
                   >
                     {label}
@@ -6070,9 +6313,7 @@ export default function EmployeePage() {
     const reviewTracksKpiWeights = reviewEffectiveConfig?.kpiRatingMode !== 'free-text';
     const reviewShowsKpiTarget = reviewEffectiveConfig?.targetsEnabled !== false && reviewEffectiveConfig?.targetLevel !== 'KRA';
     const reviewShowsKraTarget = reviewEffectiveConfig?.targetsEnabled !== false && reviewEffectiveConfig?.targetLevel === 'KRA';
-    const getReviewTargetTypeMeta = (typeId) => targetTypeOptions.find((type) => type.id === typeId)
-      || TARGET_TYPES.find((type) => type.id === typeId)
-      || TARGET_TYPES.find((type) => type.id === 'text');
+    const getReviewTargetTypeMeta = (typeId) => findTargetTypeMeta(typeId, targetTypeOptions);
     const formatReviewTargetValue = (value, typeId) => {
       const meta = getReviewTargetTypeMeta(typeId);
       const unit = String(meta?.unit || '').trim();
@@ -6544,9 +6785,7 @@ export default function EmployeePage() {
       return <EmptyState title="No goals available" subtitle="There are no approved goals to evaluate for this phase." />;
     }
 
-    const getTargetTypeMeta = (typeId) => targetTypeOptions.find((type) => type.id === typeId)
-      || TARGET_TYPES.find((type) => type.id === typeId)
-      || TARGET_TYPES.find((type) => type.id === 'text');
+    const getTargetTypeMeta = (typeId) => findTargetTypeMeta(typeId, targetTypeOptions);
     const formatTargetValue = (value, typeId) => {
       const meta = getTargetTypeMeta(typeId);
       const unit = String(meta?.unit || '').trim();
@@ -6695,8 +6934,8 @@ export default function EmployeePage() {
             <button
               type="button"
               onClick={submitSelfEvaluation}
-              disabled={selfEvalPct < 100}
-              style={{ padding: '10px 28px', background: selfEvalPct === 100 ? '#16A34A' : '#CBD5E1', color: '#fff', border: 'none', borderRadius: 9, fontSize: 14, fontWeight: 700, cursor: selfEvalPct === 100 ? 'pointer' : 'not-allowed', fontFamily: 'inherit' }}
+              disabled={selfEvalPct < 100 || selfEvalSubmitting}
+              style={{ padding: '10px 28px', background: selfEvalPct === 100 ? '#16A34A' : '#CBD5E1', color: '#fff', border: 'none', borderRadius: 9, fontSize: 14, fontWeight: 700, cursor: selfEvalPct === 100 && !selfEvalSubmitting ? 'pointer' : 'not-allowed', fontFamily: 'inherit' }}
             >
               {selfEvalPct === 100 ? '✓ Submit Self-Evaluation' : `Complete ratings and achievements (${selfEvalPct}%)`}
             </button>
@@ -6758,6 +6997,22 @@ export default function EmployeePage() {
     );
   }
 
+  function renderScore() {
+    if (!scorePublished) {
+      return <EmptyState title="Score not published" subtitle="Your final score will appear here after HR publishes the cycle." />;
+    }
+    return (
+      <div>
+        <PublishedManagerRatingView
+          config={config}
+          report={employee}
+          orgKey={session.orgKey}
+          hideScoreStrip
+        />
+      </div>
+    );
+  }
+
   // ── Hero ─────────────────────────────────────────────────────────────────────
   // Always rendered at the top of the page. Left zone is constant (greeting + role line).
   // Right zone swaps its content based on which tab is active.
@@ -6799,7 +7054,9 @@ export default function EmployeePage() {
     };
 
     let rightPanel = null;
-    if (section === 'goals' && canSetOwnGoals) {
+    if (section === 'score' && scorePublished) {
+      rightPanel = <HeroScoreTiles orgKey={session?.orgKey} empCode={employee?.['Employee Code']} config={config} />;
+    } else if (section === 'goals' && canSetOwnGoals) {
       if (currentPhase === 'self-evaluation') {
         const pct = selfEvalPct;
         const tone = '#FFFFFF';
@@ -6853,6 +7110,23 @@ export default function EmployeePage() {
           </div>
           <div style={{ height: 5, background: 'rgba(255,255,255,0.24)', borderRadius: 999, overflow: 'hidden', boxShadow: 'inset 0 1px 3px rgba(15,23,42,0.22)' }}>
             <div style={{ height: '100%', width: `${teamPct}%`, background: accentFill, borderRadius: 999, transition: 'width .25s ease' }} />
+          </div>
+        </div>
+      );
+    } else if (section === 'hod-calibration' && hodReports.length > 0) {
+      rightPanel = (
+        <div style={panelBoxStyle}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'center', marginBottom: 6 }}>
+            <div style={{ minWidth: 0 }}>
+              <div style={{ fontSize: 13, fontWeight: 800, color: '#fff' }}>HOD review scope</div>
+              <div style={{ fontSize: 11.5, color: 'rgba(255,255,255,0.78)', marginTop: 2 }}>
+                <span style={{ fontWeight: 800 }}>{hodReviewStats.total}</span> mapped · <span style={{ color: '#86EFAC', fontWeight: 800 }}>{hodReviewStats.managerDone}</span> manager-complete · <span style={{ color: '#DDD6FE', fontWeight: 800 }}>{hodReviewStats.hodDone}</span> calibrated
+              </div>
+            </div>
+            <div style={{ fontSize: 20, fontWeight: 800, lineHeight: 1, color: '#FFFFFF', textShadow: '0 2px 14px rgba(15,23,42,0.22)' }}>{hodReviewStats.pct}%</div>
+          </div>
+          <div style={{ height: 5, background: 'rgba(255,255,255,0.24)', borderRadius: 999, overflow: 'hidden', boxShadow: 'inset 0 1px 3px rgba(15,23,42,0.22)' }}>
+            <div style={{ height: '100%', width: `${hodReviewStats.pct}%`, background: accentFill, borderRadius: 999, transition: 'width .25s ease' }} />
           </div>
         </div>
       );
@@ -6926,13 +7200,15 @@ export default function EmployeePage() {
             <span style={{ fontSize: 16 }}>👋</span>
           </div>
           <div style={{ fontSize: 12.5, marginTop: 4, color: 'rgba(255,255,255,0.92)' }}>
-            {!canSetOwnGoals
-              ? (directReports.length > 0
-                ? `You manage ${directReports.length} team member${directReports.length !== 1 ? 's' : ''} on this cycle.`
-                : 'Welcome to your dashboard.')
-              : (myGoals.length > 0
-                ? `You have ${myGoals.length} active goal${myGoals.length !== 1 ? 's' : ''} this cycle.`
-                : 'Start setting your goals for this cycle.')}
+            {activeSection === 'hod-calibration' && hodReports.length > 0
+              ? `You have ${hodReports.length} employee${hodReports.length !== 1 ? 's' : ''} in your HOD review scope.`
+              : !canSetOwnGoals
+                ? (directReports.length > 0
+                  ? `You manage ${directReports.length} team member${directReports.length !== 1 ? 's' : ''} on this cycle.`
+                  : 'Welcome to your dashboard.')
+                : (myGoals.length > 0
+                  ? `You have ${myGoals.length} active goal${myGoals.length !== 1 ? 's' : ''} this cycle.`
+                  : 'Start setting your goals for this cycle.')}
             {canSetOwnGoals && totalGoalsWithIssues > 0 && <span style={{ marginLeft: 8, fontWeight: 700, background: 'rgba(220,38,38,0.92)', padding: '2px 9px', borderRadius: 999, fontSize: 11 }}>{totalGoalsWithIssues} need attention</span>}
           </div>
           {!isExternalManager && (
@@ -6950,6 +7226,12 @@ export default function EmployeePage() {
 
   // ── Top-level tabs (replace the old sidebar nav) ─────────────────────────────
   const tabs = [];
+  if (scorePublished) {
+    tabs.push({
+      id: 'score',
+      label: 'Score',
+    });
+  }
   if (!isExternalManager && canSetOwnGoals) {
     tabs.push({
       id: 'goals',
@@ -6992,6 +7274,13 @@ export default function EmployeePage() {
 	      id: 'send-mail',
 	      label: 'Reminders',
 	    });
+  }
+  if (hodReports.length > 0) {
+    tabs.push({
+      id: 'hod-calibration',
+      label: 'HOD Review',
+      count: hodReports.length,
+    });
   }
   tabs.push({
     id: 'messages',
@@ -7383,11 +7672,15 @@ export default function EmployeePage() {
           {activeSection === 'messages' && renderMessages()}
           {activeSection === 'notifications' && renderNotifications()}
           {activeSection === 'profile' && renderProfile()}
+          {activeSection === 'score' && renderScore()}
           {activeSection === 'self-eval' && (
             <SelfEvalPage embedded overrideEmpCode={session?.empCode || ''} overrideOrgKey={session?.orgKey || ''} />
           )}
           {activeSection === 'manager-eval' && (
             <ManagerEvalPage embedded overrideMgrCode={session?.empCode || ''} overrideOrgKey={session?.orgKey || ''} />
+          )}
+          {activeSection === 'hod-calibration' && (
+            <HRReviewPage embedded hodMode hodCode={session?.empCode || ''} overrideOrgKey={session?.orgKey || ''} actorName={employeeName} />
           )}
           </div>
         </div>

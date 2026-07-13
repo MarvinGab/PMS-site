@@ -3,24 +3,12 @@ import { readEmployeeSessionSync, readWorkflowSync, persistWorkflow } from '../b
 import { useApp } from '../AppContext';
 import { usePMSData, SUB_PHASE } from '../hooks/usePMSData';
 import { RatingWidget } from '../components/RatingWidget';
-import { getEmployeeStage, setEmployeeStage, submitEmployeeStage, readRatings, sendBackForCompletion } from '../backend/ratingsStore';
+import { getEmployeeStage, setEmployeeStage, submitEmployeeStageAndPersist, sendBackForCompletion, recordFinalAcceptance } from '../backend/ratingsStore';
 import { resolveCompetenciesForEmployee } from '../backend/competencyResolver';
-import { computeGoalAutoRatings, computeSelfScoreBreakdown, formatFinalRating, getScaleLevels } from '../backend/scoring';
+import { computeGoalAutoRatings, computeSelfScoreBreakdown, formatConfiguredScore, formatFinalRating, getMergedRankRanges, findRankForDecimal, getScaleLevels } from '../backend/scoring';
 
 const FIELD_LABEL = { fontSize: 10.5, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '.04em' };
 const COMP_ACCENT = '#0E7490';
-
-// Format a stored score the same way the configured rating display shows it.
-function formatChoiceLabel(config, score) {
-  if (score === null || score === undefined || score === '') return '—';
-  const scale = getScaleLevels(config);
-  const lvl = scale.find((l) => String(l.n) === String(Number(score)));
-  if (!lvl) return String(score);
-  const disp = config?.ratingChoiceDisplay || 'number-label';
-  if (disp === 'number-only') return String(lvl.code || lvl.n);
-  if (disp === 'label-only') return String(lvl.l || lvl.code || lvl.n);
-  return `${lvl.code || lvl.n} - ${lvl.l || ''}`;
-}
 
 const BORDER = '#E2E8F0';
 const SOFT_BG = '#F8FAFC';
@@ -28,7 +16,11 @@ const FALLBACK_GOAL_COLORS = ['#2563EB', '#EC4899', '#EAB308', '#7C3AED', '#F973
 // Shared column layout: [name | target | employee | manager]. The goal header
 // and the KPI rows both use this so the score boxes line up over the
 // achievement boxes in one column.
-const SCORE_GRID = 'minmax(0, 1fr) minmax(110px, 0.14fr) minmax(150px, 0.18fr) minmax(220px, 0.24fr)';
+const SCORE_GRID = 'minmax(180px, 1fr) minmax(82px, .32fr) minmax(132px, .48fr) minmax(170px, .62fr)';
+// Manager column hidden from the employee: [name/self | target | achievement].
+// Matches the self-eval page grid exactly (SelfEvalPage) so Target/Achievement
+// line up and spread to the right identically.
+const SCORE_GRID_NO_MANAGER = '1fr minmax(110px, 150px) minmax(180px, 240px)';
 
 function normalizeCode(v) {
   return String(v || '').trim().toUpperCase();
@@ -70,6 +62,32 @@ const DEFAULT_TARGET_TYPES = [
 function normalizeTargetTypeName(value) {
   return String(value || '').trim().toLowerCase().replace(/[_\s-]+/g, ' ');
 }
+const TARGET_TYPE_ALIASES = {
+  number: 'tt_default_number',
+  percentage: 'tt_default_percentage',
+  percent: 'tt_default_percentage',
+  currency: 'tt_default_currency',
+  text: 'tt_default_text',
+  free_text: 'tt_default_text',
+  neg_number: 'tt_neg_number',
+  negative_number: 'tt_neg_number',
+  neg_currency: 'tt_neg_currency',
+  negative_currency: 'tt_neg_currency',
+  neg_percentage: 'tt_neg_percentage',
+  negative_percentage: 'tt_neg_percentage',
+  tt_default_number: 'number',
+  tt_default_percentage: 'percentage',
+  tt_default_currency: 'currency',
+  tt_default_text: 'text',
+  tt_neg_number: 'neg_number',
+  tt_neg_currency: 'neg_currency',
+  tt_neg_percentage: 'neg_percentage',
+};
+function targetTypeAliasIds(typeId) {
+  const raw = String(typeId || '').trim();
+  const alias = TARGET_TYPE_ALIASES[raw.toLowerCase()];
+  return [raw, alias].filter(Boolean);
+}
 function getMergedTargetTypes(config = {}) {
   const stored = Array.isArray(config?.targetTypes) ? config.targetTypes : [];
   const storedById = new Map(stored.map((type) => [type.id, type]));
@@ -80,9 +98,10 @@ function getMergedTargetTypes(config = {}) {
 function getTargetTypeMeta(typeId, targetTypes = []) {
   const raw = String(typeId || '').trim();
   const normalized = normalizeTargetTypeName(raw);
-  return (targetTypes || []).find((type) => type.id === raw)
+  const ids = targetTypeAliasIds(raw);
+  return (targetTypes || []).find((type) => ids.includes(String(type.id || '').trim()))
     || (targetTypes || []).find((type) => normalizeTargetTypeName(type.name) === normalized)
-    || DEFAULT_TARGET_TYPES.find((type) => type.id === raw)
+    || DEFAULT_TARGET_TYPES.find((type) => ids.includes(type.id))
     || DEFAULT_TARGET_TYPES.find((type) => normalizeTargetTypeName(type.name) === normalized)
     || DEFAULT_TARGET_TYPES.find((type) => type.id === 'tt_default_text');
 }
@@ -106,6 +125,11 @@ function getEmployeeGoals(orgKey, empCode) {
   return submission?.goals || [];
 }
 
+function getEmployeeSubmission(orgKey, empCode) {
+  const wf = readWorkflowSync(orgKey);
+  return wf.submissions?.[normalizeCode(empCode)] || null;
+}
+
 function getOverrideManagerCode() {
   const hash = window.location.hash || '';
   const qIdx = hash.indexOf('?');
@@ -127,16 +151,6 @@ export default function ManagerEvalPage({ embedded = false, overrideMgrCode = ''
   const { ready, config, employees, subPhase, activeSubPhases = [] } = usePMSData(orgKey);
   const manager = findEmployee(employees, actingMgrCode);
   const reports = useMemo(() => getReports(employees, actingMgrCode), [employees, actingMgrCode]);
-  // Manager-eval is "active" only when at least one direct report has
-  // submitted their self-evaluation — that's the gating signal in the real
-  // chain (goals approved → self-eval → manager-eval).
-  const anyReportReady = useMemo(() => {
-    const ratings = (orgKey ? readRatings(orgKey) : { ratings: {} }).ratings || {};
-    return reports.some((r) => {
-      const code = String(r['Employee Code'] || '').trim().toUpperCase();
-      return !!ratings[code]?.self?.submittedAt;
-    });
-  }, [reports, orgKey]);
   const [expandedCode, setExpandedCode] = useState('');
   const [mgrFilter, setMgrFilter] = useState('all');
   const [mgrSearch, setMgrSearch] = useState('');
@@ -153,11 +167,9 @@ export default function ManagerEvalPage({ embedded = false, overrideMgrCode = ''
   if (!empSession?.empCode && !isHRAdmin) return <ShellMessage title="Sign in required" message="Open this page from the employee sign-in flow." />;
   if (!ready) return <ShellMessage title="Loading…" message="Reading cycle data." />;
   if (!manager) return <ShellMessage title="Manager not found" message={`No employee with code "${actingMgrCode || '—'}" exists for this org.${isHRAdmin && !overrideCode ? ' HR admins: append #manager-eval?as=MGR_CODE to act as a specific manager.' : ''}`} />;
-  // Phase is "active" for this manager when:
-  //  - calendar / legacy phase is in manager-evaluation, OR
-  //  - any of their direct reports has goals approved (per-employee signal).
+  // Phase is active only when the calendar / legacy phase is in manager evaluation.
   const managerWindowActive = activeSubPhases.includes(SUB_PHASE.MANAGER_EVALUATION) || subPhase === SUB_PHASE.MANAGER_EVALUATION;
-  const phaseActive = managerWindowActive || anyReportReady;
+  const phaseActive = managerWindowActive;
   const previewMode = !phaseActive && (isHRAdmin || !!overrideCode);
   if (!phaseActive && !previewMode) {
     return <ShellMessage title="Manager evaluation is not open" message={`Current cycle phase: ${subPhase}. Manager evaluation is only editable during the manager-evaluation window in the cycle calendar.`} />;
@@ -178,7 +190,7 @@ export default function ManagerEvalPage({ embedded = false, overrideMgrCode = ''
     const grp = getEmployeeGroup(config, reportRow);
     const atKpi = grp?.kpiRatingMode !== 'free-text';
     const items = atKpi ? gs.flatMap((k) => k.kpis || []) : gs;
-    const comps = resolveCompetenciesForEmployee(config, reportRow).competencies;
+    const comps = resolveCompetenciesForEmployee(config, reportRow, getEmployeeSubmission(orgKey, code)).competencies;
     const self = getEmployeeStage(orgKey, code, 'self') || {};
     const total = items.length + comps.length;
     if (!total) return 0;
@@ -277,8 +289,17 @@ export default function ManagerEvalPage({ embedded = false, overrideMgrCode = ''
                 </div>
                 {expanded && (
                   <div onClick={(e) => e.stopPropagation()} style={{ marginTop: 12, borderTop: `1px solid ${BORDER}`, paddingTop: 12 }}>
-                    <ReportEditor key={code} report={report} orgKey={orgKey} config={config} actor={actor} previewMode={previewMode} subPhase={subPhase}
-                      onCompletionRequested={() => { setExpandedCode(''); setTick((t) => t + 1); }} />
+                    <ReportEditor
+                      key={code}
+                      report={report}
+                      orgKey={orgKey}
+                      config={config}
+                      actor={actor}
+                      previewMode={previewMode}
+                      subPhase={subPhase}
+                      onCompletionRequested={() => { setExpandedCode(''); setTick((t) => t + 1); }}
+                      onRated={() => { setExpandedCode(''); setTick((t) => t + 1); }}
+                    />
                   </div>
                 )}
               </div>
@@ -381,14 +402,53 @@ function CommentBox({ value, onChange, disabled, placeholder }) {
   );
 }
 
-function ScorePair({ config, selfScore, value, onChange, disabled, accent = '#2563EB', invalid = false, suggestedScore = null }) {
+function ScoreValueBox({ label, value, config, accent = '#0F172A', faded = false, hidden = false }) {
+  const blank = value === null || value === undefined || value === '';
   return (
-    <div style={{ display: 'grid', gridTemplateColumns: 'minmax(170px, 1fr) minmax(220px, 1.2fr)', gap: 14, alignItems: 'start', width: '100%' }}>
-      <EmployeePick value={formatChoiceLabel(config, selfScore)} />
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 6, alignItems: 'flex-start' }}>
-        <span style={{ ...FIELD_LABEL, color: invalid ? '#E11D48' : accent }}>Manager score</span>
-        <RatingWidget value={value} onChange={onChange} config={config} disabled={disabled} suggestedScore={suggestedScore} />
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 6, alignItems: 'flex-start', minWidth: 0, width: '100%' }}>
+      <span style={{ ...FIELD_LABEL, color: hidden || faded || blank ? '#94A3B8' : accent }}>{label}</span>
+      <span style={{
+        display: 'block',
+        maxWidth: '100%',
+        padding: '8px 12px',
+        borderRadius: 8,
+        border: '1px solid #E2E8F0',
+        background: '#F8FAFC',
+        fontSize: 13,
+        fontWeight: hidden ? 600 : 800,
+        color: hidden ? '#94A3B8' : (blank ? '#CBD5E1' : '#0F172A'),
+        fontStyle: hidden ? 'italic' : 'normal',
+        whiteSpace: 'nowrap',
+        overflow: 'hidden',
+        textOverflow: 'ellipsis',
+        boxSizing: 'border-box',
+      }}>
+        {hidden ? 'Hidden' : (blank ? '—' : formatConfiguredScore(config, value))}
+      </span>
+    </div>
+  );
+}
+
+function ScorePair({ config, selfScore, value, onChange, disabled, accent = '#2563EB', invalid = false, suggestedScore = null, readOnlyDisplay = false, hideManager = false }) {
+  if (hideManager) {
+    // Manager rating hidden from the employee ("Never"): show only their own.
+    return (
+      <div style={{ width: '100%', minWidth: 0 }}>
+        <EmployeePick value={formatConfiguredScore(config, selfScore)} />
       </div>
+    );
+  }
+  return (
+    <div style={{ display: 'grid', gridTemplateColumns: 'minmax(82px, .7fr) minmax(160px, 1.3fr)', gap: 12, alignItems: 'start', width: '100%', minWidth: 0 }}>
+      <EmployeePick value={formatConfiguredScore(config, selfScore)} />
+      {readOnlyDisplay ? (
+        <ScoreValueBox label="Manager score" value={value} config={config} accent={accent} />
+      ) : (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6, alignItems: 'stretch', minWidth: 0 }}>
+          <span style={{ ...FIELD_LABEL, color: invalid ? '#E11D48' : accent }}>Manager score</span>
+          <RatingWidget value={value} onChange={onChange} config={config} disabled={disabled} suggestedScore={suggestedScore} />
+        </div>
+      )}
     </div>
   );
 }
@@ -404,32 +464,117 @@ function TargetBox({ value, targetType, targetTypes }) {
 
 // Achievement is a fact — the manager can correct a wrong value. Employee's
 // original stays visible ("Employee said: X"), and a "Corrected" flag shows when changed.
-function AchievementCorrect({ value, employeeValue, onChange, disabled, targetType, targetTypes }) {
+function AchievementCorrect({ value, employeeValue, onChange, disabled, targetType, targetTypes, readOnlyDisplay = false, hideManager = false }) {
   const meta = getTargetTypeMeta(targetType, targetTypes);
   const unit = String(meta?.unit || '').trim();
   const inputType = normalizeTargetTypeName(meta?.name) === 'date' ? 'date' : 'text';
   const empHas = employeeValue !== undefined && employeeValue !== null && String(employeeValue).trim() !== '';
+  const managerHas = value !== undefined && value !== null && String(value).trim() !== '';
   const corrected = String(value ?? '').trim() !== String(employeeValue ?? '').trim();
   return (
     <>
       <div style={{ fontSize: 13.5, fontWeight: 800, color: empHas ? '#0F172A' : '#CBD5E1', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
         {empHas ? formatTargetValue(employeeValue, targetType, targetTypes) : 'Left blank'}
       </div>
+      {hideManager ? null : (
       <div style={{ minWidth: 0 }}>
-      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, width: '100%', boxSizing: 'border-box', minHeight: 42, padding: '7px 10px', borderRadius: 8, border: `1px solid ${corrected ? '#DDD6FE' : '#E2E8F0'}`, background: corrected ? '#FBFAFF' : '#fff' }}>
-        {unit && meta?.unitPosition === 'prefix' ? <span style={{ color: '#94A3B8', fontWeight: 800, fontSize: 13 }}>{unit}</span> : null}
-        <input type={inputType} inputMode={meta?.isNumeric ? 'decimal' : undefined} value={value ?? ''} disabled={disabled}
-          onChange={(e) => onChange(e.target.value)} placeholder={empHas ? 'Same as employee' : 'Enter achieved'}
-          style={{ width: '100%', minWidth: 0, border: 'none', outline: 'none', padding: 0, fontSize: 13.5, fontWeight: 700, color: '#0F172A', background: 'transparent', fontFamily: 'inherit' }} />
-        {unit && meta?.unitPosition !== 'prefix' ? <span style={{ color: '#94A3B8', fontWeight: 800, fontSize: 13 }}>{unit}</span> : null}
-      </span>
-      {corrected && <div style={{ marginTop: 3, fontSize: 10.5, color: '#7C3AED', fontWeight: 750 }}>Corrected</div>}
+      {readOnlyDisplay ? (
+        <div style={{ fontSize: 13.5, fontWeight: 800, color: managerHas ? '#0F172A' : '#CBD5E1', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', minHeight: 42, display: 'flex', alignItems: 'center' }}>
+          {managerHas ? formatTargetValue(value, targetType, targetTypes) : 'Left blank'}
+        </div>
+      ) : (
+        <>
+          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, width: '100%', boxSizing: 'border-box', minHeight: 42, padding: '7px 10px', borderRadius: 8, border: `1px solid ${corrected ? '#DDD6FE' : '#E2E8F0'}`, background: corrected ? '#FBFAFF' : '#fff' }}>
+            {unit && meta?.unitPosition === 'prefix' ? <span style={{ color: '#94A3B8', fontWeight: 800, fontSize: 13 }}>{unit}</span> : null}
+            <input type={inputType} inputMode={meta?.isNumeric ? 'decimal' : undefined} value={value ?? ''} disabled={disabled}
+              onChange={(e) => onChange(e.target.value)} placeholder={empHas ? 'Same as employee' : 'Enter achieved'}
+              style={{ width: '100%', minWidth: 0, border: 'none', outline: 'none', padding: 0, fontSize: 13.5, fontWeight: 700, color: '#0F172A', background: 'transparent', fontFamily: 'inherit' }} />
+            {unit && meta?.unitPosition !== 'prefix' ? <span style={{ color: '#94A3B8', fontWeight: 800, fontSize: 13 }}>{unit}</span> : null}
+          </span>
+          {corrected && <div style={{ marginTop: 3, fontSize: 10.5, color: '#7C3AED', fontWeight: 750 }}>Corrected</div>}
+        </>
+      )}
       </div>
+      )}
     </>
   );
 }
 
-function ReportEditor({ report, orgKey, config, actor, previewMode, subPhase, onCompletionRequested }) {
+export function PublishedManagerRatingView({ report, orgKey, config, hideScoreStrip = false }) {
+  return (
+    <ReportEditor
+      report={report}
+      orgKey={orgKey}
+      config={config}
+      actor=""
+      previewMode={false}
+      subPhase=""
+      publishedReadOnly
+      hideScoreStrip={hideScoreStrip}
+    />
+  );
+}
+
+// Self / manager / final summary for a published employee — shared by the score
+// strip and the hero tiles so they never drift.
+export function getPublishedScoreSummary(orgKey, empCode) {
+  const selfStage = getEmployeeStage(orgKey, empCode, 'self') || {};
+  const mgrStage = getEmployeeStage(orgKey, empCode, 'manager') || {};
+  const hodStage = getEmployeeStage(orgKey, empCode, 'hod') || {};
+  const finalStage = getEmployeeStage(orgKey, empCode, 'final') || {};
+  const hasHr = finalStage?.calibratedScore !== undefined && Number.isFinite(Number(finalStage.calibratedScore)) && Number(finalStage.calibratedScore) >= 1;
+  const hasHod = hodStage?.calibratedScore !== undefined && Number.isFinite(Number(hodStage.calibratedScore)) && Number(hodStage.calibratedScore) >= 1;
+  return {
+    self: selfStage.overallScore,
+    manager: mgrStage.overallScore,
+    final: hasHr ? finalStage.calibratedScore : (hasHod ? hodStage.calibratedScore : mgrStage.overallScore),
+    finalSource: hasHr ? 'HR' : (hasHod ? 'HOD' : ''),
+  };
+}
+
+function fmtScoreNum(v) {
+  if (v === null || v === undefined || v === '') return '—';
+  const n = Number(v);
+  if (!Number.isFinite(n)) return String(v);
+  return Number.isInteger(n) ? String(n) : n.toFixed(2);
+}
+
+// Frosted-glass score tiles meant to sit on top of the employee hero gradient.
+export function HeroScoreTiles({ orgKey, empCode, config }) {
+  const s = getPublishedScoreSummary(orgKey, empCode);
+  // Honor the wizard "Visibility to employee" settings: hide the manager /
+  // final tile when the org set that rating to "Never".
+  const managerHidden = config?.managerRatingVisibleFrom === 'never';
+  const finalHidden = config?.finalRatingVisibleFrom === 'never';
+  const tiles = [
+    { key: 'self', label: 'Self score', value: s.self },
+    ...(managerHidden ? [] : [{ key: 'manager', label: 'Manager score', value: s.manager }]),
+    ...(finalHidden ? [] : [{ key: 'final', label: 'Final score', value: s.final, sub: s.finalSource ? `Calibrated by ${s.finalSource}` : '' }]),
+  ];
+  const tileStyle = {
+    flex: '1 1 140px', minWidth: 128,
+    background: 'rgba(255,255,255,0.16)', border: '1px solid rgba(255,255,255,0.30)',
+    backdropFilter: 'blur(10px)', WebkitBackdropFilter: 'blur(10px)',
+    borderRadius: 12, padding: '9px 13px',
+    boxShadow: '0 6px 18px rgba(15,23,42,0.10)',
+  };
+  return (
+    <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', flex: '2 1 400px', justifyContent: 'flex-end' }}>
+      {tiles.map((t) => (
+        <div key={t.key} style={tileStyle}>
+          <div style={{ fontSize: 9.5, fontWeight: 800, letterSpacing: '.06em', textTransform: 'uppercase', color: 'rgba(255,255,255,0.78)' }}>{t.label}</div>
+          <div style={{ display: 'flex', alignItems: 'baseline', gap: 6, marginTop: 3 }}>
+            <span style={{ fontSize: 20, fontWeight: 950, color: '#fff' }}>{fmtScoreNum(t.value)}</span>
+            <span style={{ fontSize: 11, fontWeight: 700, color: 'rgba(255,255,255,0.9)' }}>{rankLabelForScore(config, t.value) || ''}</span>
+          </div>
+          {t.sub && <div style={{ fontSize: 10, fontWeight: 700, color: 'rgba(255,255,255,0.82)', marginTop: 2 }}>{t.sub}</div>}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function ReportEditor({ report, orgKey, config, actor, previewMode, subPhase, onCompletionRequested, onRated, publishedReadOnly = false, hideScoreStrip = false }) {
   const empCode = report['Employee Code'];
   const goals = useMemo(() => getEmployeeGoals(orgKey, empCode), [orgKey, empCode]);
   const group = getEmployeeGroup(config, report);
@@ -445,19 +590,27 @@ function ReportEditor({ report, orgKey, config, actor, previewMode, subPhase, on
   const targetsEnabled = config?.targetsEnabled !== false;
   const targetAtKra = targetsEnabled && targetLevel === 'KRA';
   const targetAtKpi = targetsEnabled && targetLevel !== 'KRA';
+  // "Visibility to employee": when the org set the manager rating to "Never",
+  // the employee's published view shows only their own ratings — no manager
+  // score / achievement columns anywhere.
+  const hideManager = publishedReadOnly && config?.managerRatingVisibleFrom === 'never';
   const autoOn = config.autoRating !== false;
   const managerCanOverrideAuto = config.managerOverrideAuto !== false;
   const bands = config.autoRatingBands || [];
-  const resolved = useMemo(() => resolveCompetenciesForEmployee(config, report), [config, report]);
+  const workflowSubmission = useMemo(() => getEmployeeSubmission(orgKey, empCode), [orgKey, empCode]);
+  const resolved = useMemo(() => resolveCompetenciesForEmployee(config, report, workflowSubmission), [config, report, workflowSubmission]);
   const competencies = resolved.competencies;
   const targetTypes = useMemo(() => getMergedTargetTypes(config), [config]);
   const selfStage = getEmployeeStage(orgKey, empCode, 'self') || {};
   const mgrStage = getEmployeeStage(orgKey, empCode, 'manager') || {};
+  const hodStage = getEmployeeStage(orgKey, empCode, 'hod') || {};
+  const finalStage = getEmployeeStage(orgKey, empCode, 'final') || {};
+  const acceptanceStage = getEmployeeStage(orgKey, empCode, 'acceptance') || {};
   const [scores, setScores] = useState(mgrStage.itemScores || {});
   const [comments, setComments] = useState(mgrStage.itemComments || {});
   const [compScores, setCompScores] = useState(mgrStage.competencyScores || {});
   const [overallComment, setOverallComment] = useState(mgrStage.overallComment || '');
-  const [overallOpen, setOverallOpen] = useState(!!(mgrStage.overallComment || ''));
+  const [overallOpen, setOverallOpen] = useState(true);
   const [summaryOpen, setSummaryOpen] = useState(false);
   const [msg, setMsg] = useState('');
   // Manager-correctable achievement, pre-filled from the employee's entry.
@@ -467,7 +620,16 @@ function ReportEditor({ report, orgKey, config, actor, previewMode, subPhase, on
   const [requestNote, setRequestNote] = useState('');
   const [submitErrors, setSubmitErrors] = useState([]);
   const [errorsOpen, setErrorsOpen] = useState(false);
-  const saved = !!mgrStage.submittedAt;
+  const [submitting, setSubmitting] = useState(false);
+  const [acceptanceDecision, setAcceptanceDecision] = useState(acceptanceStage.decision || '');
+  const [acceptanceReason, setAcceptanceReason] = useState(acceptanceStage.reason || '');
+  const [acceptanceSubmittedAt, setAcceptanceSubmittedAt] = useState(acceptanceStage.submittedAt || '');
+  const [acceptanceError, setAcceptanceError] = useState('');
+  // Last committed (submitted) choice — a pending pick reverts to this on click-away.
+  const [committedAcceptance, setCommittedAcceptance] = useState({ decision: acceptanceStage.decision || '', reason: acceptanceStage.reason || '' });
+  const acceptanceSaveRef = useRef(false);
+  const acceptanceSaving = acceptanceSaveRef.current;
+  const saved = publishedReadOnly || !!mgrStage.submittedAt;
 
   const commentMode = config.managerCommentMode || 'overall';
   // KPIs the employee left blank (with a target) — enables "Request completion".
@@ -518,6 +680,66 @@ function ReportEditor({ report, orgKey, config, actor, previewMode, subPhase, on
     competenciesSelfRated: config.competenciesEnabled !== false,
     resolved,
   });
+  const hasHrCalibration = finalStage?.calibratedScore !== undefined && Number.isFinite(Number(finalStage.calibratedScore)) && Number(finalStage.calibratedScore) >= 1;
+  const hasHodCalibration = hodStage?.calibratedScore !== undefined && Number.isFinite(Number(hodStage.calibratedScore)) && Number(hodStage.calibratedScore) >= 1;
+  const publishedSummary = {
+    self: selfStage.overallScore,
+    manager: mgrStage.overallScore,
+    final: hasHrCalibration ? finalStage.calibratedScore : (hasHodCalibration ? hodStage.calibratedScore : mgrStage.overallScore),
+    finalSource: hasHrCalibration ? 'HR' : (hasHodCalibration ? 'HOD' : ''),
+  };
+  const finalAcceptanceText = (() => {
+    const v = publishedSummary.final;
+    if (v === null || v === undefined || v === '') return '';
+    const label = rankLabelForScore(config, v);
+    const num = Number.isFinite(Number(v)) ? (Number.isInteger(Number(v)) ? String(Number(v)) : Number(v).toFixed(2)) : String(v);
+    return label ? `${num} · ${label}` : num;
+  })();
+  const onSubmitAcceptance = async () => {
+    if (acceptanceSaveRef.current) return; // guard against double-submit
+    if (!acceptanceDecision) {
+      setAcceptanceError('Choose accept, or raise a concern.');
+      return;
+    }
+    const reason = acceptanceReason.trim();
+    if (acceptanceDecision === 'rejected' && !reason) {
+      setAcceptanceError('Please describe your concern.');
+      return;
+    }
+    const previous = {
+      decision: committedAcceptance.decision,
+      reason: committedAcceptance.reason || '',
+      submittedAt: acceptanceSubmittedAt || '',
+    };
+    const optimisticSubmittedAt = new Date().toISOString();
+    setAcceptanceError('');
+    setAcceptanceSubmittedAt(optimisticSubmittedAt);
+    setCommittedAcceptance({ decision: acceptanceDecision, reason });
+    acceptanceSaveRef.current = true;
+    try {
+      const result = await recordFinalAcceptance(orgKey, empCode, acceptanceDecision, reason, actor || empCode);
+      if (!result?.ok) {
+        setAcceptanceDecision(previous.decision);
+        setAcceptanceReason(previous.reason);
+        setAcceptanceSubmittedAt(previous.submittedAt);
+        setCommittedAcceptance({ decision: previous.decision, reason: previous.reason });
+        setAcceptanceError(result?.error || 'Could not save your response. Please retry.');
+        return;
+      }
+      setAcceptanceDecision(result.acceptance.decision);
+      setAcceptanceReason(result.acceptance.reason || '');
+      setAcceptanceSubmittedAt(result.acceptance.submittedAt || '');
+      setCommittedAcceptance({ decision: result.acceptance.decision, reason: result.acceptance.reason || '' });
+    } catch (error) {
+      setAcceptanceDecision(previous.decision);
+      setAcceptanceReason(previous.reason);
+      setAcceptanceSubmittedAt(previous.submittedAt);
+      setCommittedAcceptance({ decision: previous.decision, reason: previous.reason });
+      setAcceptanceError(error?.message || 'Could not save your response. Please retry.');
+    } finally {
+      acceptanceSaveRef.current = false;
+    }
+  };
 
   const buildPayload = () => ({
     itemScores: scores,
@@ -608,7 +830,8 @@ function ReportEditor({ report, orgKey, config, actor, previewMode, subPhase, on
   const hasHardErrors = submitErrors.some((e) => e.severity === 'hard');
 
   const onSave = () => { setEmployeeStage(orgKey, empCode, 'manager', buildPayload()); setMsg('Draft saved.'); };
-  const onSubmit = () => {
+  const onSubmit = async () => {
+    if (submitting) return;
     // Require every goal + competency to be scored before submitting.
     const errors = validateManagerEvaluation();
     if (errors.length > 0 || !breakdown.complete) {
@@ -617,14 +840,18 @@ function ReportEditor({ report, orgKey, config, actor, previewMode, subPhase, on
       return;
     }
     setSubmitErrors([]);
-    submitEmployeeStage(orgKey, empCode, 'manager', buildPayload(), actor);
-    setMsg('Submitted.');
+    setMsg('');
+    setSubmitting(true);
+    const result = await submitEmployeeStageAndPersist(orgKey, empCode, 'manager', buildPayload(), actor);
+    setSubmitting(false);
+    setMsg(result?.ok ? (result.pending ? 'Rating submitted. Sync continues in the background.' : 'Rating submitted.') : (result?.error || 'Could not sync manager rating. Please retry.'));
+    if (result?.ok) onRated?.();
   };
 
   const actionButtons = (
     <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-      <button type="button" onClick={onSave} disabled={saved} style={btnStyle('ghost', saved)}>Save draft</button>
-      <button type="button" onClick={onSubmit} disabled={saved} style={btnStyle('primary', saved)}>Submit rating</button>
+      <button type="button" onClick={onSave} disabled={saved || submitting} style={btnStyle('ghost', saved || submitting)}>Save draft</button>
+      <button type="button" onClick={onSubmit} disabled={saved || submitting} style={btnStyle('primary', saved || submitting)}>Submit rating</button>
       {blankCount > 0 && !saved && !requestOpen && (
         <button type="button" onClick={() => setRequestOpen(true)}
           style={{ padding: '8px 14px', borderRadius: 8, fontSize: 13, fontWeight: 750, border: '1.5px solid #DDD6FE', background: '#F5F3FF', color: '#6D28D9', cursor: 'pointer', fontFamily: 'inherit' }}>
@@ -697,14 +924,37 @@ function ReportEditor({ report, orgKey, config, actor, previewMode, subPhase, on
         </NoticeCard>
       )}
 
-      <div style={{ display: 'flex', justifyContent: 'space-between', gap: 14, alignItems: 'center', flexWrap: 'wrap', padding: '10px 14px', marginBottom: 12, background: '#fff', border: `1.5px solid ${BORDER}`, borderRadius: 12 }}>
-        <div style={{ minWidth: 0 }}>
-          <div style={{ fontSize: 15, fontWeight: 850, color: '#0F172A' }}>{report['Employee Name'] || empCode}</div>
-          <div style={{ fontSize: 12, color: '#64748B', marginTop: 2 }}>
-            {ratedCount} of {totalToRate} rated{blankCount > 0 ? ` · ${blankCount} blank achievement${blankCount === 1 ? '' : 's'}` : ''}
-          </div>
-        </div>
-      </div>
+      {publishedReadOnly && (
+        <>
+          {!hideScoreStrip && <PublishedScoreStrip config={config} summary={publishedSummary} hideManager={hideManager} />}
+          {config?.finalEmployeeAcceptanceEnabled === true && (
+            <FinalAcceptanceRow
+              name={String(report['Employee Name'] || '').trim().split(/\s+/)[0]}
+              finalText={finalAcceptanceText}
+              finalSource={publishedSummary.finalSource}
+              committed={committedAcceptance.decision}
+              decision={acceptanceDecision}
+              reason={acceptanceReason}
+              resolution={acceptanceStage.resolution || null}
+              error={acceptanceError}
+              saving={acceptanceSaving}
+              submittedAt={acceptanceSubmittedAt}
+              onDecision={(next) => {
+                setAcceptanceDecision(next);
+                if (next === 'accepted') setAcceptanceReason('');
+                setAcceptanceError('');
+              }}
+              onReason={setAcceptanceReason}
+              onSubmit={onSubmitAcceptance}
+              onCancel={() => {
+                setAcceptanceDecision(committedAcceptance.decision);
+                setAcceptanceReason(committedAcceptance.reason);
+                setAcceptanceError('');
+              }}
+            />
+          )}
+        </>
+      )}
 
       {/* GOALS */}
       {goals.length === 0 && (
@@ -716,8 +966,8 @@ function ReportEditor({ report, orgKey, config, actor, previewMode, subPhase, on
         return (
           <div key={kra.id} style={{ background: '#fff', border: `1px solid ${goalColor}33`, borderLeft: `4px solid ${goalColor}`, borderRadius: 12, marginBottom: 12, overflow: 'hidden' }}>
             {/* Goal header */}
-            <div style={{ padding: '10px 16px', borderBottom: `1px solid ${BORDER}`, background: `${goalColor}0D`, display: 'grid', gridTemplateColumns: !rateAtKpi ? SCORE_GRID : '1fr', columnGap: 18, rowGap: 10, alignItems: 'center' }}>
-              <div style={{ minWidth: 0, gridColumn: !rateAtKpi ? '1 / 3' : 'auto' }}>
+            <div style={{ padding: '10px 16px', borderBottom: `1px solid ${BORDER}`, background: `${goalColor}0D`, display: 'grid', gridTemplateColumns: !rateAtKpi ? (hideManager ? SCORE_GRID_NO_MANAGER : SCORE_GRID) : '1fr', columnGap: hideManager ? 20 : 18, rowGap: 10, alignItems: 'center' }}>
+              <div style={{ minWidth: 0, gridColumn: !rateAtKpi ? (hideManager ? '1' : '1 / 3') : 'auto' }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                   <span style={{ fontSize: 10.5, fontWeight: 800, color: goalColor, textTransform: 'uppercase', letterSpacing: '.06em' }}>{kra.perspName && kra.perspName !== 'All KRAs' ? kra.perspName : `Goal ${idx + 1}`}</span>
                   <span style={{ padding: '2px 9px', borderRadius: 999, background: '#fff', color: goalColor, fontSize: 11, fontWeight: 800, border: `1px solid ${goalColor}33` }}>{kra.weight || 0}%</span>
@@ -726,22 +976,27 @@ function ReportEditor({ report, orgKey, config, actor, previewMode, subPhase, on
               </div>
               {!rateAtKpi && (
                 <>
-                  <EmployeePick value={formatChoiceLabel(config, selfStage.itemScores?.[kra.id])} />
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 6, alignItems: 'flex-start' }}>
-                    <span style={{ ...FIELD_LABEL, color: invalidKeys.has(`score:${kra.id}`) ? '#E11D48' : goalColor }}>Manager score</span>
-                    <RatingWidget value={scores[kra.id] ?? null} onChange={(v) => setScore(kra.id, v)} config={config} disabled={scoreLockedByAuto(kra.id)} suggestedScore={autoOn ? autoScores[kra.id] : null} />
-                  </div>
+	                  {hideManager && <span />}
+	                  <EmployeePick value={formatConfiguredScore(config, selfStage.itemScores?.[kra.id])} />
+	                  {hideManager ? null : publishedReadOnly ? (
+	                    <ScoreValueBox label="Manager score" value={scores[kra.id] ?? null} config={config} accent={goalColor} />
+	                  ) : (
+	                    <div style={{ display: 'flex', flexDirection: 'column', gap: 6, alignItems: 'flex-start' }}>
+	                      <span style={{ ...FIELD_LABEL, color: invalidKeys.has(`score:${kra.id}`) ? '#E11D48' : goalColor }}>Manager score</span>
+	                      <RatingWidget value={scores[kra.id] ?? null} onChange={(v) => setScore(kra.id, v)} config={config} disabled={scoreLockedByAuto(kra.id)} suggestedScore={autoOn ? autoScores[kra.id] : null} />
+	                    </div>
+	                  )}
                 </>
               )}
               {targetAtKra && kra.target && (
-                <div style={{ gridColumn: '1 / -1', display: 'grid', gridTemplateColumns: SCORE_GRID, columnGap: 18, alignItems: 'center', marginTop: 4 }}>
+                <div style={{ gridColumn: '1 / -1', display: 'grid', gridTemplateColumns: hideManager ? SCORE_GRID_NO_MANAGER : SCORE_GRID, columnGap: 18, alignItems: 'center', marginTop: 4 }}>
                   <span />
                   <span style={{ ...FIELD_LABEL, color: '#94A3B8' }}>Target</span>
-                  <span style={{ ...FIELD_LABEL, color: '#94A3B8' }}>Employee achievement</span>
-                  <span style={{ ...FIELD_LABEL, color: goalColor }}>Manager achievement</span>
+                  <span style={{ ...FIELD_LABEL, color: '#94A3B8' }}>{hideManager ? 'Achievement' : 'Employee achievement'}</span>
+                  {!hideManager && <span style={{ ...FIELD_LABEL, color: goalColor }}>Manager achievement</span>}
                   <span />
                   <TargetBox value={kra.target} targetType={kra.targetType} targetTypes={targetTypes} />
-                  <AchievementCorrect value={achievements[kra.id]} employeeValue={empAchievements[kra.id]} onChange={(v) => setAchievements((p) => ({ ...p, [kra.id]: v }))} disabled={saved} targetType={kra.targetType} targetTypes={targetTypes} />
+	                  <AchievementCorrect value={achievements[kra.id]} employeeValue={empAchievements[kra.id]} onChange={(v) => setAchievements((p) => ({ ...p, [kra.id]: v }))} disabled={saved} targetType={kra.targetType} targetTypes={targetTypes} readOnlyDisplay={publishedReadOnly} hideManager={hideManager} />
                 </div>
               )}
             </div>
@@ -749,29 +1004,29 @@ function ReportEditor({ report, orgKey, config, actor, previewMode, subPhase, on
             {/* KPIs */}
             <div style={{ padding: '8px 16px 10px' }}>
               {hasKpis && (
-                <div style={{ display: 'grid', gridTemplateColumns: targetAtKpi ? SCORE_GRID : 'minmax(0, 1fr)', columnGap: 18, padding: '0 0 7px', alignItems: 'end' }}>
+                <div style={{ display: 'grid', gridTemplateColumns: targetAtKpi ? (hideManager ? SCORE_GRID_NO_MANAGER : SCORE_GRID) : 'minmax(0, 1fr)', columnGap: 18, padding: '0 0 7px', alignItems: 'end' }}>
                   <span style={{ fontSize: 10, fontWeight: 850, color: '#94A3B8', textTransform: 'uppercase', letterSpacing: '.04em' }}>Key Performance Indicators</span>
                   {targetAtKpi && <span style={{ ...FIELD_LABEL, color: '#94A3B8' }}>Target</span>}
-                  {targetAtKpi && <span style={{ ...FIELD_LABEL, color: '#94A3B8' }}>Employee achievement</span>}
-                  {targetAtKpi && <span style={{ ...FIELD_LABEL, color: goalColor }}>Manager achievement</span>}
+                  {targetAtKpi && <span style={{ ...FIELD_LABEL, color: '#94A3B8' }}>{hideManager ? 'Achievement' : 'Employee achievement'}</span>}
+                  {targetAtKpi && !hideManager && <span style={{ ...FIELD_LABEL, color: goalColor }}>Manager achievement</span>}
                 </div>
               )}
               {hasKpis ? kra.kpis.map((kpi, kIdx) => (
                 <div key={kpi.id} style={{ padding: '10px 0', borderTop: '1px solid #F1F5F9' }}>
-                  <div style={{ display: 'grid', gridTemplateColumns: targetAtKpi ? SCORE_GRID : 'minmax(0, 1fr)', columnGap: 18, alignItems: 'center' }}>
+                  <div style={{ display: 'grid', gridTemplateColumns: targetAtKpi ? (hideManager ? SCORE_GRID_NO_MANAGER : SCORE_GRID) : 'minmax(0, 1fr)', columnGap: 18, alignItems: 'center' }}>
                     <div style={{ display: 'flex', gap: 9, alignItems: 'center', minWidth: 0 }}>
                       <span style={{ color: goalColor, fontWeight: 800, fontSize: 13 }}>•</span>
                       <span style={{ fontSize: 13.5, fontWeight: 700, color: '#0F172A' }}>{kpi.name}</span>
                     </div>
                     {targetAtKpi && <TargetBox value={kpi.target} targetType={kpi.targetType} targetTypes={targetTypes} />}
                     {targetAtKpi && (kpi.target
-                      ? <AchievementCorrect value={achievements[kpi.id]} employeeValue={empAchievements[kpi.id]} onChange={(v) => setAchievements((p) => ({ ...p, [kpi.id]: v }))} disabled={saved} targetType={kpi.targetType} targetTypes={targetTypes} />
+	                      ? <AchievementCorrect value={achievements[kpi.id]} employeeValue={empAchievements[kpi.id]} onChange={(v) => setAchievements((p) => ({ ...p, [kpi.id]: v }))} disabled={saved} targetType={kpi.targetType} targetTypes={targetTypes} readOnlyDisplay={publishedReadOnly} hideManager={hideManager} />
                       : <span style={{ fontSize: 12, color: '#CBD5E1', paddingTop: 6 }}>—</span>)}
                   </div>
                   {rateAtKpi && (
                     <div style={{ marginTop: 8, paddingTop: 8, borderTop: '1px dashed #F1F5F9', display: 'flex', justifyContent: 'flex-end' }}>
                       <div style={{ width: 'min(520px, 100%)' }}>
-                      <ScorePair config={config} selfScore={selfStage.itemScores?.[kpi.id]} value={scores[kpi.id] ?? null} onChange={(v) => setScore(kpi.id, v)} disabled={scoreLockedByAuto(kpi.id)} accent={goalColor} invalid={invalidKeys.has(`score:${kpi.id}`)} suggestedScore={autoOn ? autoScores[kpi.id] : null} />
+	                      <ScorePair config={config} selfScore={selfStage.itemScores?.[kpi.id]} value={scores[kpi.id] ?? null} onChange={(v) => setScore(kpi.id, v)} disabled={scoreLockedByAuto(kpi.id)} accent={goalColor} invalid={invalidKeys.has(`score:${kpi.id}`)} suggestedScore={autoOn ? autoScores[kpi.id] : null} readOnlyDisplay={publishedReadOnly} hideManager={hideManager} />
                       </div>
                     </div>
                   )}
@@ -795,38 +1050,52 @@ function ReportEditor({ report, orgKey, config, actor, previewMode, subPhase, on
             {competencies.map((name) => (
               <div key={name} style={{ display: 'grid', gridTemplateColumns: 'minmax(220px, 1fr) minmax(410px, 520px)', gap: 18, alignItems: 'center', padding: '12px 0', borderTop: '1px solid #F1F5F9' }}>
                 <div style={{ fontSize: 13.5, fontWeight: 700, color: '#0F172A' }}>{name}</div>
-                <ScorePair config={config} selfScore={selfStage.competencyScores?.[name]} value={compScores[name] ?? null} onChange={(v) => setCompetencyScore(name, v)} disabled={saved} accent={COMP_ACCENT} invalid={invalidKeys.has(`competency:${name}`)} />
+                <ScorePair config={config} selfScore={selfStage.competencyScores?.[name]} value={compScores[name] ?? null} onChange={(v) => setCompetencyScore(name, v)} disabled={saved} accent={COMP_ACCENT} invalid={invalidKeys.has(`competency:${name}`)} readOnlyDisplay={publishedReadOnly} />
               </div>
             ))}
           </div>
         </div>
       )}
 
-      {/* MANAGER FINAL SCORE SUMMARY */}
-      <ManagerScoreSummary open={summaryOpen} onToggle={() => setSummaryOpen((o) => !o)} config={config} breakdown={breakdown} />
+      {/* MANAGER FINAL SCORE SUMMARY — hidden from the employee when the manager
+          rating is set to "Never". */}
+      {!hideManager && <ManagerScoreSummary open={summaryOpen} onToggle={() => setSummaryOpen((o) => !o)} config={config} breakdown={breakdown} />}
 
-      {/* OVERALL COMMENT (collapsible, like employee page) */}
-      <button type="button" onClick={() => setOverallOpen((o) => !o)}
-        style={{ display: 'block', width: '100%', textAlign: 'left', cursor: 'pointer', background: 'transparent', border: 'none', marginTop: 16, marginBottom: 10, padding: '0 4px', fontFamily: 'inherit' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-          <span style={{ fontSize: 15, fontWeight: 800, color: '#0F172A' }}>Overall comment</span>
-          <span style={{ display: 'inline-flex', alignItems: 'center', padding: '3px 10px', borderRadius: 999, background: '#EFF6FF', color: '#2563EB', fontSize: 12, fontWeight: 700 }}>{overallOpen ? 'Hide ▲' : (overallComment ? 'Edit ▼' : 'Add ▼')}</span>
-        </div>
-      </button>
-      {overallOpen && (
-        <textarea value={overallComment} onChange={(e) => setOverallComment(e.target.value)} disabled={saved} rows={3}
-          placeholder={`Your overall summary of ${report['Employee Name'] || empCode}'s performance this cycle…`}
-          style={{ width: '100%', padding: 10, borderRadius: 8, border: `1px solid ${BORDER}`, fontFamily: 'inherit', fontSize: 13, resize: 'vertical', boxSizing: 'border-box' }} />
+      {!publishedReadOnly && (
+        <>
+          <div
+            style={{ display: 'block', width: '100%', textAlign: 'left', background: 'transparent', border: 'none', marginTop: 16, marginBottom: 10, padding: '0 4px', fontFamily: 'inherit' }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
+              <span style={{ fontSize: 15, fontWeight: 800, color: '#0F172A' }}>Overall comment</span>
+              <button type="button" onClick={() => setOverallOpen((o) => !o)}
+                style={{ display: 'inline-flex', alignItems: 'center', padding: '3px 10px', borderRadius: 999, background: '#EFF6FF', color: '#2563EB', fontSize: 12, fontWeight: 700, border: 0, cursor: 'pointer', fontFamily: 'inherit' }}>
+                {overallOpen ? 'Hide ▲' : (overallComment ? 'Edit ▼' : 'Add ▼')}
+              </button>
+            </div>
+          </div>
+          {overallOpen && (
+            <textarea value={overallComment} onChange={(e) => setOverallComment(e.target.value)} disabled={saved} rows={3}
+              placeholder={`Your overall summary of ${report['Employee Name'] || empCode}'s performance this cycle…`}
+              style={{ width: '100%', padding: 12, borderRadius: 12, border: `1px solid ${BORDER}`, fontFamily: 'inherit', fontSize: 13, resize: 'vertical', boxSizing: 'border-box', background: '#fff' }} />
+          )}
+        </>
       )}
 
-      {/* SUBMIT */}
-      <div style={{ marginTop: 18, padding: '14px 18px', background: '#fff', border: `1px solid ${submitErrors.length ? '#FBC4CB' : BORDER}`, borderRadius: 12, position: 'sticky', bottom: 12, boxShadow: '0 -8px 24px rgba(15,23,42,0.04)', zIndex: 5 }}>
-        {errorPanel}
-        {requestCompletionPanel}
-        <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
-          {actionButtons}
+      {publishedReadOnly && !hideScoreStrip && (
+        <>
+          <PublishedScoreStrip config={config} summary={publishedSummary} hideManager={hideManager} />
+        </>
+      )}
+
+      {!publishedReadOnly && (
+        <div style={{ marginTop: 18, padding: '14px 18px', background: '#fff', border: `1px solid ${submitErrors.length ? '#FBC4CB' : BORDER}`, borderRadius: 12, position: 'sticky', bottom: 12, boxShadow: '0 -8px 24px rgba(15,23,42,0.04)', zIndex: 5 }}>
+          {errorPanel}
+          {requestCompletionPanel}
+          <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
+            {actionButtons}
+          </div>
         </div>
-      </div>
+      )}
     </div>
   );
 }
@@ -836,6 +1105,184 @@ function mFmt(v, points) {
   const r = Math.round(v * 100) / 100;
   const txt = (r % 1 === 0) ? String(r) : r.toFixed(2);
   return points ? `${txt} / ${points}` : txt;
+}
+
+function rankLabelForScore(config, score) {
+  if (score === null || score === undefined || score === '' || !Number.isFinite(Number(score))) return '';
+  const scale = getScaleLevels(config);
+  const ranges = getMergedRankRanges(scale, config?.scaleRankRanges || {});
+  const rank = findRankForDecimal(Number(score), ranges, scale);
+  return String(rank?.l || rank?.code || rank?.n || '').trim();
+}
+
+function PublishedScoreBox({ label, value, rank, config, tone = '#2563EB', sub = '' }) {
+  const hasValue = value !== null && value !== undefined && value !== '' && Number.isFinite(Number(value));
+  return (
+    <div style={{
+      minWidth: 0,
+      padding: '10px 12px',
+      borderRadius: 10,
+      border: `1px solid ${hasValue ? `${tone}30` : '#E2E8F0'}`,
+      background: hasValue ? `${tone}0A` : '#F8FAFC',
+    }}>
+      <div style={{ fontSize: 10.5, fontWeight: 900, color: '#64748B', textTransform: 'uppercase', letterSpacing: '.05em', marginBottom: 5 }}>{label}</div>
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 7, minWidth: 0 }}>
+        <span style={{ fontSize: 18, lineHeight: 1, fontWeight: 950, color: hasValue ? tone : '#CBD5E1' }}>{hasValue ? formatConfiguredScore(config, value) : '—'}</span>
+        <span style={{ fontSize: 12.5, fontWeight: 800, color: hasValue ? '#0F172A' : '#CBD5E1', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{hasValue ? (rank || 'Unranked') : 'Not available'}</span>
+      </div>
+      {sub && <div style={{ marginTop: 5, fontSize: 10.5, fontWeight: 850, color: tone }}>{sub}</div>}
+    </div>
+  );
+}
+
+function PublishedScoreStrip({ config, summary, hideManager = false }) {
+  const selfRank = rankLabelForScore(config, summary?.self);
+  const managerRank = rankLabelForScore(config, summary?.manager);
+  const finalRank = rankLabelForScore(config, summary?.final);
+  const finalSub = summary?.finalSource ? `Calibrated by ${summary.finalSource}` : '';
+  const finalHidden = config?.finalRatingVisibleFrom === 'never';
+  return (
+    <div style={{
+      display: 'grid',
+      gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))',
+      gap: 10,
+      margin: '0 0 12px',
+    }}>
+      <PublishedScoreBox label="Self score" value={summary?.self} rank={selfRank} config={config} tone="#0891B2" />
+      {!hideManager && <PublishedScoreBox label="Manager score" value={summary?.manager} rank={managerRank} config={config} tone="#7C3AED" />}
+      {!finalHidden && <PublishedScoreBox label="Final score" value={summary?.final} rank={finalRank} config={config} tone="#16A34A" sub={finalSub} />}
+    </div>
+  );
+}
+
+function FinalAcceptanceRow({ name, finalText, finalSource, committed, decision, reason, resolution, error, saving, submittedAt, onDecision, onReason, onSubmit, onCancel }) {
+  const accepted = decision === 'accepted';
+  const rejected = decision === 'rejected';
+  const isPending = decision && decision !== committed;   // picked, not yet saved
+  const isCommitted = decision && decision === committed;  // saved response
+  const canSubmit = accepted || (rejected && String(reason || '').trim().length > 0);
+  const first = String(name || '').trim();
+  const explained = resolution?.type === 'explained';
+  const recalibrated = resolution?.type === 'recalibrated';
+  const cardRef = useRef(null);
+  // A pending pick is not committed until Submit — clicking anywhere outside the
+  // card reverts it to the last saved choice.
+  useEffect(() => {
+    if (!isPending || saving) return undefined;
+    const onDown = (e) => { if (cardRef.current && !cardRef.current.contains(e.target)) onCancel?.(); };
+    document.addEventListener('mousedown', onDown);
+    return () => document.removeEventListener('mousedown', onDown);
+  }, [isPending, saving, onCancel]);
+
+  // Concern closed by HR's written explanation — read-only.
+  if (rejected && explained) {
+    return (
+      <div style={{ margin: '0 0 12px', padding: 14, borderRadius: 14, border: '1px solid #BFDBFE', background: 'linear-gradient(135deg, #EFF6FF 0%, #FFFFFF 100%)', boxShadow: '0 10px 24px rgba(15,23,42,.05)' }}>
+        <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
+          <div>
+            <div style={{ fontSize: 13.5, fontWeight: 950, color: '#1E3A8A' }}>Final rating concern resolved</div>
+            <div style={{ fontSize: 12.5, color: '#1E40AF', marginTop: 4, lineHeight: 1.5 }}>
+              HR has followed up on your concern via email. Please check your inbox for their response.
+            </div>
+          </div>
+          <span style={{ padding: '5px 10px', borderRadius: 999, background: '#DBEAFE', color: '#1D4ED8', fontSize: 11.5, fontWeight: 900 }}>Resolved</span>
+        </div>
+        {reason && <div style={{ fontSize: 11.5, color: '#475569', marginTop: 8, fontStyle: 'italic' }}>Your concern: “{reason}”</div>}
+      </div>
+    );
+  }
+
+  const chipBtn = (active, activeBg, activeBorder, ring, color, label) => ({
+    padding: '9px 20px', borderRadius: 999,
+    border: `1.5px solid ${active ? activeBorder : '#E5E9F0'}`,
+    background: active ? activeBg : '#F8FAFC',
+    color, fontSize: 13, fontWeight: 800, cursor: 'pointer', fontFamily: 'inherit',
+    boxShadow: active ? `0 0 0 3px ${ring}` : 'none',
+    transition: 'all 160ms ease', whiteSpace: 'nowrap',
+  });
+
+  return (
+    <div ref={cardRef} style={{
+      position: 'relative', overflow: 'hidden',
+      margin: '0 0 14px', borderRadius: 16,
+      border: `1px solid ${error ? '#FCA5A5' : '#DDE3EE'}`,
+      background: 'linear-gradient(135deg, #F4F7FC 0%, #EAF0F9 100%)',
+      boxShadow: '0 8px 22px rgba(30,41,59,.06)',
+      padding: '16px 20px',
+    }}>
+      <style>{`@keyframes acceptShimmer{0%{transform:translateX(-160%) skewX(-18deg)}55%,100%{transform:translateX(360%) skewX(-18deg)}}`}</style>
+      <div aria-hidden style={{
+        position: 'absolute', top: 0, bottom: 0, left: 0, width: '32%',
+        background: 'linear-gradient(100deg, transparent 0%, rgba(255,255,255,0.55) 42%, rgba(250,204,21,0.32) 55%, transparent 100%)',
+        animation: 'acceptShimmer 3.6s ease-in-out infinite', pointerEvents: 'none', zIndex: 0,
+      }} />
+      {recalibrated && !decision && (
+        <div style={{ marginBottom: 12, padding: '8px 12px', borderRadius: 10, background: '#F5F3FF', border: '1px solid #DDD6FE', fontSize: 12, fontWeight: 800, color: '#5B21B6' }}>
+          HR recalibrated your rating upon your request. Please review it below.
+        </div>
+      )}
+      <div style={{ position: 'relative', zIndex: 1, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 18, flexWrap: 'wrap' }}>
+        <div style={{ minWidth: 0 }}>
+          <div style={{ fontSize: 14.5, fontWeight: 850, color: '#0F172A', letterSpacing: '-0.01em' }}>
+            {first ? `${first}, this is your final rating` : 'This is your final rating'}
+          </div>
+          {finalText && (
+            <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginTop: 4, flexWrap: 'wrap' }}>
+              <span style={{ fontSize: 19, fontWeight: 950, color: '#15803D' }}>{finalText}</span>
+              {finalSource && <span style={{ fontSize: 11, fontWeight: 800, color: '#64748B' }}>· Calibrated by {finalSource}</span>}
+            </div>
+          )}
+          {!isCommitted && (
+            <div style={{ fontSize: 12, marginTop: 4, color: '#64748B' }}>Please review and let us know.</div>
+          )}
+        </div>
+        <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+          {isCommitted ? (
+            <div style={{ display: 'inline-flex', alignItems: 'center', gap: 9, maxWidth: 380, textAlign: 'right' }}>
+              <span style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: 24, height: 24, borderRadius: 999, background: accepted ? '#DCFCE7' : '#FFE4E6', color: accepted ? '#15803D' : '#BE123C', fontSize: 13, fontWeight: 900, flexShrink: 0 }}>✓</span>
+              <span style={{ fontSize: 12.5, fontWeight: 800, color: accepted ? '#15803D' : '#BE123C', lineHeight: 1.4 }}>
+                {accepted
+                  ? `All set${first ? `, ${first}` : ''}. You've accepted your final rating.`
+                  : 'Concern submitted. HR will review and get back to you.'}
+              </span>
+            </div>
+          ) : (
+            <>
+              <button type="button" disabled={saving} onClick={() => { if (saving) return; (accepted ? onCancel?.() : onDecision('accepted')); }}
+                style={chipBtn(accepted, '#DCFCE7', '#22C55E', 'rgba(34,197,94,0.15)', '#15803D')}>
+                {accepted ? '✓ Accept' : 'Accept'}</button>
+              <button type="button" disabled={saving} onClick={() => { if (saving) return; (rejected ? onCancel?.() : onDecision('rejected')); }}
+                style={chipBtn(rejected, '#FFE4E6', '#F43F5E', 'rgba(244,63,94,0.15)', '#BE123C')}>
+                Raise a concern</button>
+              {isPending && (
+                <button type="button" onClick={onSubmit} disabled={saving || !canSubmit}
+                  style={{
+                    padding: '9px 24px', borderRadius: 999, border: 'none',
+                    background: (saving || !canSubmit) ? '#CBD5E1' : '#3B82F6', color: '#fff',
+                    fontSize: 13, fontWeight: 800, cursor: (saving || !canSubmit) ? 'not-allowed' : 'pointer', fontFamily: 'inherit',
+                    boxShadow: (saving || !canSubmit) ? 'none' : '0 6px 16px rgba(59,130,246,0.28)',
+                    transition: 'all 160ms ease', whiteSpace: 'nowrap',
+                  }}>
+                  {saving ? 'Saving…' : 'Submit'}
+                </button>
+              )}
+            </>
+          )}
+        </div>
+      </div>
+      {rejected && !isCommitted && (
+        <textarea
+          value={reason}
+          onChange={(e) => onReason(e.target.value)}
+          rows={2}
+          autoFocus
+          placeholder="What's your concern? (required)"
+          style={{ width: '100%', marginTop: 12, padding: 11, borderRadius: 10, border: `1px solid ${error ? '#FCA5A5' : '#E2E8F0'}`, background: '#fff', fontFamily: 'inherit', fontSize: 12.5, resize: 'vertical', boxSizing: 'border-box', minHeight: 56 }}
+        />
+      )}
+      {error && <div style={{ fontSize: 11.5, fontWeight: 800, color: '#DC2626', marginTop: 8 }}>{error}</div>}
+    </div>
+  );
 }
 
 function ManagerScoreSummary({ open, onToggle, config, breakdown }) {

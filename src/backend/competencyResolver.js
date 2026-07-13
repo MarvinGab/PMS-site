@@ -4,10 +4,37 @@
 //
 // Resolution order (group_role scope): role > group > org.
 
-export function resolveCompetenciesForEmployee(config = {}, employee = {}) {
+function cleanCompetencyList(list = []) {
+  const seen = new Set();
+  const out = [];
+  (Array.isArray(list) ? list : []).forEach((item) => {
+    const name = String(item || '').trim();
+    const key = name.toLowerCase();
+    if (!name || seen.has(key)) return;
+    seen.add(key);
+    out.push(name);
+  });
+  return out;
+}
+
+export function resolveCompetenciesForEmployee(config = {}, employee = {}, submission = null) {
   const enabled = config.competenciesEnabled !== false;
   if (!enabled) {
     return { competencies: [], scope: 'org', source: 'none', sourceLabel: 'Competencies disabled', groupName: '', roleName: '' };
+  }
+  if (config.employeeCanEditCompetencies === true) {
+    const max = Math.max(1, Number(config.maxCompetencies) || 1);
+    const employeeList = cleanCompetencyList(submission?.employeeCompetencies).slice(0, max);
+    return {
+      competencies: employeeList,
+      scope: 'employee',
+      source: 'employee',
+      sourceLabel: 'Employee-selected competencies',
+      groupName: String(employee?.['Group Name'] || '').trim(),
+      roleName: String(employee?.['Role'] || employee?.['Designation'] || '').trim(),
+      kraShare: 100 - Math.max(0, Math.min(100, Number(config.competencyWeight ?? 20))),
+      compShare: Math.max(0, Math.min(100, Number(config.competencyWeight ?? 20))),
+    };
   }
   const scope = config.competencyScope === 'group' || config.competencyScope === 'group_role'
     ? config.competencyScope

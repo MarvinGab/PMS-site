@@ -24,14 +24,16 @@ import {
   saveOrganizationRecord,
   rotateEmployeeOtpsForSend,
   clearPendingEmployeeOtps,
+  reopenGoalsAction,
 } from '../backend/stateStore';
 import { resetUserPasswordByAdmin } from '../backend/authService';
 import { sendCustomBroadcast } from '../backend/emailService';
-import { hydrateRatings, readRatings, subscribeToRatings, writeRatings } from '../backend/ratingsStore';
+import { clearEmployeeStageAndPersist, hydrateRatings, isPublished, readRatings, subscribeToRatings, submitEmployeeStageAndPersist, writeRatings } from '../backend/ratingsStore';
 import { shouldUseSupabase } from '../backend/config';
 import { supabase } from '../backend/supabaseClient';
 import { hashPasswordValue } from '../backend/passwordCrypto';
 import { resetEmployeePmsOnServer } from '../backend/serverAuth';
+import { resolveEmployeeStageState } from '../backend/stageResolver';
 import { logAuditEvent } from '../backend/auditLog';
 import { uploadBrandAsset, uploadEmailLogoAsset, ensureDefaultZaroLogoUrl } from '../backend/brandAssetStorage';
 import {
@@ -287,6 +289,7 @@ const EMP_STAGES = [
   { id: 'self-evaluation',  label: 'Self evaluation',     short: 'Self eval',        color: '#0891B2', bg: '#ECFEFF', border: '#A5F3FC' },
   { id: 'mgr-evaluation',   label: 'Manager evaluation',  short: 'Manager eval',     color: '#7C3AED', bg: '#F5F3FF', border: '#DDD6FE' },
   { id: 'hr-review',        label: 'HR review',           short: 'HR review',        color: '#EA580C', bg: '#FFF7ED', border: '#FED7AA' },
+  { id: 'calibrated',       label: 'Calibrated',          short: 'Calibrated',       color: '#7C3AED', bg: '#F5F3FF', border: '#DDD6FE' },
   { id: 'completed',        label: 'Completed',           short: 'Completed',        color: '#16A34A', bg: '#F0FDF4', border: '#BBF7D0' },
   // "Exempt" = roster row that can't participate this cycle (outside-PMS rows
   // tagged NONE, or in-PMS employees whose RM isn't in the roster). Counted
@@ -582,37 +585,35 @@ async function parseObjectsXlsx(file) {
   } catch { return []; }
 }
 
-// Reporting managers referenced by code but not themselves uploaded as employees.
-// They show up alongside regular employees in admin lists. Their email lives on
-// the children's "Reporting Manager Email" field — `_external` flags the row so
-// updates can fan out to every child that reports to them.
-function synthesizeExternalManagers(employees) {
-  const byCode = new Map();
-  employees.forEach((e) => byCode.set(String(e['Employee Code'] || '').trim().toLowerCase(), e));
-  const map = new Map();
+
+// Turn any manager code that's referenced but missing from the roster into a
+// REAL NONE/Exempt employee row (rater-only, no goals) — this replaces the old
+// "not in PMS" phantom concept. Returns the (possibly extended) list, plus how
+// many rows were added so callers can persist the backfill once.
+function backfillManagerRows(employees) {
+  const byCode = new Set(employees.map((e) => String(e['Employee Code'] || '').trim().toLowerCase()));
+  const toAdd = new Map();
   employees.forEach((e) => {
     const raw = String(e['Reporting Manager Code'] || '').trim();
     if (!raw) return;
     const lower = raw.toLowerCase();
-    if (byCode.has(lower)) return;
-    if (map.has(lower)) { map.get(lower)._reportsCount += 1; return; }
-    const name = String(e['Reporting Manager Name'] || '').trim() || raw;
-    const email = String(e['Reporting Manager Email'] || '').trim();
-    map.set(lower, {
+    if (byCode.has(lower) || toAdd.has(lower)) return;
+    toAdd.set(lower, {
       'Employee Code': raw,
-      'Employee Name': name,
-      'Email ID': email,
+      'Employee Name': String(e['Reporting Manager Name'] || '').trim() || raw,
+      'Email ID': String(e['Reporting Manager Email'] || '').trim(),
+      'Group Name': OUTSIDE_PMS_GROUP_LABEL,
       'Designation': '',
-      _external: true,
-      _reportsCount: 1,
+      _outsidePms: true,
     });
   });
-  return Array.from(map.values()).sort((a, b) => (a['Employee Name'] || '').localeCompare(b['Employee Name'] || ''));
+  return { employees: toAdd.size ? [...employees, ...toAdd.values()] : employees, added: toAdd.size };
 }
 
-// Combined roster: real employees + synthesized external-manager rows.
+// Roster used by list/remove UIs. Phantoms are gone — every referenced manager
+// is a real row now (backfilled), so this is just the employee list.
 function buildRoster(employees) {
-  return [...employees, ...synthesizeExternalManagers(employees)];
+  return employees;
 }
 
 // Helm Managers = top-level managers who sit OUTSIDE the PMS (Group Name =
@@ -642,6 +643,35 @@ function buildHelmManagerRecipients(employees) {
           designation: String(r?.Designation || r?.Role || '').trim(),
         }));
       return { ...emp, _helmManager: true, _reportees: reportees };
+    })
+    .sort((a, b) => (a['Employee Name'] || '').localeCompare(b['Employee Name'] || ''));
+}
+
+// HODs = employees referenced as another employee's HOD Code. They review and
+// calibrate their department during HR review, so they get a login invite that
+// carries fresh credentials AND their department roster.
+function buildHodRecipients(employees) {
+  const list = Array.isArray(employees) ? employees : [];
+  const hodCodes = new Set();
+  list.forEach((e) => {
+    const code = String(e?.['HOD Code'] || '').trim().toLowerCase();
+    if (code) hodCodes.add(code);
+  });
+  return list
+    .filter((emp) => {
+      const code = String(emp?.['Employee Code'] || '').trim().toLowerCase();
+      return code && hodCodes.has(code);
+    })
+    .map((emp) => {
+      const code = String(emp?.['Employee Code'] || '').trim().toLowerCase();
+      const reportees = list
+        .filter((e) => String(e?.['HOD Code'] || '').trim().toLowerCase() === code)
+        .map((r) => ({
+          name: String(r?.['Employee Name'] || '').trim(),
+          code: String(r?.['Employee Code'] || '').trim(),
+          designation: String(r?.Designation || r?.Role || '').trim(),
+        }));
+      return { ...emp, _hodInvite: true, _reportees: reportees };
     })
     .sort((a, b) => (a['Employee Name'] || '').localeCompare(b['Employee Name'] || ''));
 }
@@ -1357,7 +1387,12 @@ function ModuleEmpStatus({ employees, groups, orgKey, org }) {
                   </td>
                   <td style={{ padding: '9px 12px' }}>
                     {getEmpStage(emp) === 'exempt'
-                      ? <StagePill stageId="exempt" />
+                      ? (
+                        // Exempt people already read as "NONE" in the Group column, so the
+                        // "Exempt" tag here is redundant — this slot is more useful showing
+                        // whether they've logged in (exempt managers must log in to rate).
+                        <LoginStatusPill status={getLoginStatus(emp)} />
+                      )
                       : getLoginStatus(emp) === 'permanent'
                         ? <StagePill stageId={getEmpStage(emp)} />
                         : <LoginStatusPill status={getLoginStatus(emp)} />}
@@ -1769,10 +1804,13 @@ function ComposeRecipients({
       {/* Recipients table */}
       {(activeTemplate === 'co-admin-invite'
         || activeTemplate === 'scoped-hr-invite'
-        || activeTemplate === 'helm-managers') && (
+        || activeTemplate === 'helm-managers'
+        || activeTemplate === 'hod-invite') && (
         <div style={{ fontSize: 11.5, color: '#64748B', marginBottom: 8 }}>
           {activeTemplate === 'helm-managers'
             ? 'Recipients: top-level managers with reports but no goals to set themselves (Group = NONE in the roster).'
+            : activeTemplate === 'hod-invite'
+            ? 'Recipients: employees set as a department head (referenced by another employee’s HOD Code in the roster).'
             : 'Recipients come from the HR Team panel. To add or edit emails, manage them there.'}
         </div>
       )}
@@ -1887,6 +1925,8 @@ function ComposeRecipients({
               ? 'Sends the welcome email to all Co-Admins on the HR Team that have an email and a temp password.'
               : activeTemplate === 'scoped-hr-invite'
               ? 'Sends the welcome email to all Scoped HR members on the HR Team that have an email and a temp password.'
+              : activeTemplate === 'hod-invite'
+              ? 'Sends a calibration invite to every department head (HOD). A fresh 6-digit password is generated per recipient.'
               : 'Sends a login invite + reportee list to top-level managers outside the PMS. A fresh 6-digit password is generated per recipient.' };
         return (
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: 14, padding: '12px 16px', background: banner.bg, border: `1px solid ${banner.bd}`, borderRadius: 11, gap: 12, flexWrap: 'wrap' }}>
@@ -1960,6 +2000,10 @@ function ModuleComms({ employees, groups, org, config, onUpdate, onConfigPatch, 
       'helm-managers': {
         subject: `Your team is set up · ${orgLabel}`,
         body: `Hi {employee_name},\n\nYour team for this cycle:\n\n{reportee_list}\n\nSign in to review and approve their goals.\n\nLogin email : {recipient_email}\nManager code : {employee_code}\nPassword : {password}\n\n${signOff}`,
+      },
+      'hod-invite': {
+        subject: `HOD calibration is open · ${orgLabel}`,
+        body: `Hi {employee_name},\n\nManager ratings for your department are ready. Sign in to review and calibrate the final ratings.\n\nEmployee Code : {employee_code}\nPassword : {password}\n\n${signOff}`,
       },
     };
   }, [org.name, org.hrAdminName]);
@@ -2065,6 +2109,16 @@ function ModuleComms({ employees, groups, org, config, onUpdate, onConfigPatch, 
         kind: 'broadcast',
       };
     }
+    if (activeTemplate === 'hod-invite') {
+      const recipients = buildHodRecipients(employees)
+        .filter((e) => String(e?.['Email ID'] || e?.Email || '').trim());
+      return {
+        label: `Send invite to ${recipients.length} HOD${recipients.length !== 1 ? 's' : ''}`,
+        disabled: recipients.length === 0,
+        recipients,
+        kind: 'broadcast',
+      };
+    }
     if (activeTemplate === 'co-admin-invite' || activeTemplate === 'scoped-hr-invite') {
       const wantedType = activeTemplate === 'co-admin-invite' ? 'co-admin' : 'scoped-hr';
       const team = hrTeam.filter((m) => {
@@ -2121,11 +2175,11 @@ function ModuleComms({ employees, groups, org, config, onUpdate, onConfigPatch, 
       // recipient right before send so no two recipients share a password
       // and a resend always supersedes the prior OTP.
       let otpByCode = new Map();
-      if (activeTemplate === 'cycle-launch' || activeTemplate === 'helm-managers') {
+      if (activeTemplate === 'cycle-launch' || activeTemplate === 'helm-managers' || activeTemplate === 'hod-invite') {
         otpByCode = await rotateEmployeeOtpsForSend({
           orgKey: org.key,
           employees: recipientsToSend,
-          forceResetActive: activeTemplate === 'helm-managers',
+          forceResetActive: activeTemplate === 'helm-managers' || activeTemplate === 'hod-invite',
         });
         cycleLaunchOtpCodes = [...otpByCode.keys()];
         const beforeFilterCount = recipientsToSend.length;
@@ -2150,7 +2204,7 @@ function ModuleComms({ employees, groups, org, config, onUpdate, onConfigPatch, 
         // Helm Managers carry their own list of direct reports — render it
         // as a bullet list so the email mirrors the Manager-summary layout.
         const helmExtras = {};
-        if (rcpt?._helmManager && Array.isArray(rcpt._reportees)) {
+        if ((rcpt?._helmManager || rcpt?._hodInvite) && Array.isArray(rcpt._reportees)) {
           helmExtras.reportee_list = rcpt._reportees
             .map((r) => `• ${r.name || r.code}${r.designation ? ` — ${r.designation}` : ''}${r.code ? ` (${r.code})` : ''}`)
             .join('\n') || '—';
@@ -2224,7 +2278,8 @@ function ModuleComms({ employees, groups, org, config, onUpdate, onConfigPatch, 
   // employees (cycle-launch + helm-managers). Co-Admin / Scoped-HR invites
   // pull from `org.hrTeam`; those need to be edited in the HR Team panel.
   const canEditRecipientEmails = activeTemplate === 'cycle-launch'
-    || activeTemplate === 'helm-managers';
+    || activeTemplate === 'helm-managers'
+    || activeTemplate === 'hod-invite';
   const canBulkEditRecipientEmails = canEditRecipientEmails;
   const canSelectRecipients = true;
   const addRecipientsTarget = activeTemplate === 'cycle-launch'
@@ -2233,6 +2288,8 @@ function ModuleComms({ employees, groups, org, config, onUpdate, onConfigPatch, 
     ? { module: 'hr-team', label: 'Add Co-Admin' }
     : activeTemplate === 'scoped-hr-invite'
     ? { module: 'hr-team', label: 'Add Scoped HR' }
+    : activeTemplate === 'hod-invite'
+    ? { module: 'roster', label: 'Add HODs' }
     : { module: 'roster', label: 'Add Helm Managers', intent: 'helm-manager' };
 
   useEffect(() => {
@@ -2383,6 +2440,19 @@ function ModuleComms({ employees, groups, org, config, onUpdate, onConfigPatch, 
         kind: 'helm-manager',
         name: sample?.['Employee Name'] || 'Helm Manager',
         email: sample?.['Email ID'] || sample?.Email || 'manager@example.com',
+        code: sample?.['Employee Code'] || '—',
+        password: '123456',
+        sampleReportees: reportees,
+      };
+    }
+    if (activeTemplate === 'hod-invite') {
+      const hods = buildHodRecipients(employees);
+      const sample = hods[0] || null;
+      const reportees = (sample?._reportees || []).slice(0, 3);
+      return {
+        kind: 'hod',
+        name: sample?.['Employee Name'] || 'Department Head',
+        email: sample?.['Email ID'] || sample?.Email || 'hod@example.com',
         code: sample?.['Employee Code'] || '—',
         password: '123456',
         sampleReportees: reportees,
@@ -2552,6 +2622,7 @@ function ModuleComms({ employees, groups, org, config, onUpdate, onConfigPatch, 
               { k: 'co-admin-invite',  label: 'Co-Admin invite',  desc: 'Send when you add a Co-Admin' },
               { k: 'scoped-hr-invite', label: 'Scoped HR invite', desc: 'Send when you add a Scoped HR' },
               { k: 'helm-managers',    label: 'Helm Managers',    desc: 'Invite top-level managers (no goals to set)' },
+              { k: 'hod-invite',       label: 'HOD invite',       desc: 'Invite department heads to calibrate' },
             ].map((t) => {
               const active = activeTemplate === t.k;
               return (
@@ -3026,54 +3097,138 @@ function ModuleStageControl({ employees, onUpdate, orgKey }) {
   // and that derivation overrides a manual _pmsStage. So a forced stage change must
   // also reset the ratings submissions to match the target — otherwise a stale
   // "manager submitted" keeps the row stuck on "Completed".
-  function syncRatingsForStageChange(codeToTarget) {
-    if (!orgKey || !codeToTarget || codeToTarget.size === 0) return;
+  async function syncRatingsForStageChange(codeToTarget) {
+    if (!orgKey || !codeToTarget || codeToTarget.size === 0) return 0;
     const all = readRatings(orgKey);
     const ratings = { ...(all.ratings || {}) };
     const nowIso = new Date().toISOString();
     const keyByNorm = {};
     Object.keys(ratings).forEach((k) => { keyByNorm[normalizeCodeStr(k)] = k; });
     let changed = false;
+    const persistOps = [];
+    const clearCalibrationStage = (stageValue = {}) => {
+      const {
+        calibratedScore,
+        calibrationNote,
+        calibratedBy,
+        calibratedAt,
+        ...rest
+      } = stageValue || {};
+      void calibratedScore; void calibrationNote; void calibratedBy; void calibratedAt;
+      return {
+        ...rest,
+        submittedAt: null,
+        submittedBy: null,
+        updatedAt: nowIso,
+        clearedAt: nowIso,
+        clearedBy: 'hr-admin',
+      };
+    };
     codeToTarget.forEach((targetStage, rawCode) => {
       const norm = normalizeCodeStr(rawCode);
       const storeKey = keyByNorm[norm] || String(rawCode).trim();
       const cur = ratings[storeKey] || {};
       const self = { ...(cur.self || {}) };
       const manager = { ...(cur.manager || {}) };
-      const final = { ...(cur.final || {}) };
+      let hod = { ...(cur.hod || {}) };
+      let final = { ...(cur.final || {}) };
       if (targetStage === 'mgr-evaluation') {
         if (!self.submittedAt) self.submittedAt = nowIso; // employee considered done
+        self.updatedAt = nowIso;
         manager.submittedAt = null;
-        final.submittedAt = null;
+        manager.submittedBy = null;
+        manager.updatedAt = nowIso;
+        manager.clearedAt = nowIso;
+        hod = clearCalibrationStage(hod);
+        final = clearCalibrationStage(final);
+        persistOps.push(clearEmployeeStageAndPersist(orgKey, storeKey, 'manager', 'hr-admin', { allowFallback: false, optimistic: false }));
+        persistOps.push(clearEmployeeStageAndPersist(orgKey, storeKey, 'hod', 'hr-admin', { allowFallback: false, optimistic: false }));
+        persistOps.push(clearEmployeeStageAndPersist(orgKey, storeKey, 'final', 'hr-admin', { allowFallback: false, optimistic: false }));
       } else if (targetStage === 'hr-review') {
         if (!self.submittedAt) self.submittedAt = nowIso;
+        self.updatedAt = nowIso;
         if (!manager.submittedAt) manager.submittedAt = nowIso;
-        final.submittedAt = null;
+        manager.updatedAt = nowIso;
+        hod = clearCalibrationStage(hod);
+        final = clearCalibrationStage(final);
+        persistOps.push(clearEmployeeStageAndPersist(orgKey, storeKey, 'hod', 'hr-admin', { allowFallback: false, optimistic: false }));
+        persistOps.push(clearEmployeeStageAndPersist(orgKey, storeKey, 'final', 'hr-admin', { allowFallback: false, optimistic: false }));
+      } else if (targetStage === 'calibrated') {
+        if (!self.submittedAt) self.submittedAt = nowIso;
+        self.updatedAt = nowIso;
+        if (!manager.submittedAt) manager.submittedAt = nowIso;
+        manager.updatedAt = nowIso;
+        const managerScore = Number(manager.overallScore);
+        final = {
+          ...final,
+          calibratedScore: Number.isFinite(managerScore) ? managerScore : final.calibratedScore,
+          calibrationNote: final.calibrationNote || '',
+          calibratedBy: final.calibratedBy || 'hr-admin',
+          calibratedAt: final.calibratedAt || nowIso,
+          submittedAt: final.submittedAt || nowIso,
+          submittedBy: final.submittedBy || 'hr-admin',
+          updatedAt: nowIso,
+        };
+        if (Number.isFinite(managerScore)) {
+          persistOps.push(submitEmployeeStageAndPersist(
+            orgKey,
+            storeKey,
+            'final',
+            {
+              ...final,
+              calibratedScore: managerScore,
+              calibrationNote: final.calibrationNote || '',
+              calibratedBy: final.calibratedBy || 'hr-admin',
+              calibratedAt: final.calibratedAt || nowIso,
+              updatedAt: nowIso,
+            },
+            'hr-admin',
+            { allowFallback: false, optimistic: false },
+          ));
+        }
       } else if (targetStage === 'completed') {
         if (!self.submittedAt) self.submittedAt = nowIso;
+        self.updatedAt = nowIso;
         if (!manager.submittedAt) manager.submittedAt = nowIso;
+        manager.updatedAt = nowIso;
         if (!final.submittedAt) final.submittedAt = nowIso;
+        final.updatedAt = nowIso;
       } else {
         // goal-creation / pending-approval / self-evaluation → nothing rated yet
         self.submittedAt = null;
+        self.submittedBy = null;
+        self.updatedAt = nowIso;
+        self.clearedAt = nowIso;
         manager.submittedAt = null;
-        final.submittedAt = null;
+        manager.submittedBy = null;
+        manager.updatedAt = nowIso;
+        manager.clearedAt = nowIso;
+        hod = clearCalibrationStage(hod);
+        final = clearCalibrationStage(final);
+        persistOps.push(clearEmployeeStageAndPersist(orgKey, storeKey, 'self', 'hr-admin', { allowFallback: false, optimistic: false }));
+        persistOps.push(clearEmployeeStageAndPersist(orgKey, storeKey, 'manager', 'hr-admin', { allowFallback: false, optimistic: false }));
+        persistOps.push(clearEmployeeStageAndPersist(orgKey, storeKey, 'hod', 'hr-admin', { allowFallback: false, optimistic: false }));
+        persistOps.push(clearEmployeeStageAndPersist(orgKey, storeKey, 'final', 'hr-admin', { allowFallback: false, optimistic: false }));
       }
-      ratings[storeKey] = { ...cur, self, manager, final };
+      ratings[storeKey] = { ...cur, self, manager, hod, final };
       changed = true;
     });
     if (changed) writeRatings(orgKey, { ...all, ratings });
+    if (!persistOps.length) return 0;
+    const results = await Promise.all(persistOps);
+    return results.filter((result) => !result?.ok).length;
   }
 
   // When HR forces a stage change, also update the goal workflow so the manager's approvals queue
   // and notifications fire — otherwise stage and submission.status drift apart.
-  function syncWorkflowForStageChange(codeToTarget) {
+  async function syncWorkflowForStageChange(codeToTarget) {
     if (!orgKey || !codeToTarget || codeToTarget.size === 0) return;
     const wf = loadWorkflowState(orgKey);
     const nextSubs = { ...(wf.submissions || {}) };
     const newNotifs = [];
     const nowIso = new Date().toISOString();
     const empByCode = {};
+    const reopenCodes = [];
     employees.forEach((e) => { empByCode[normalizeCodeStr(e['Employee Code'])] = e; });
     codeToTarget.forEach((targetStage, rawCode) => {
       const key = normalizeCodeStr(rawCode);
@@ -3095,6 +3250,10 @@ function ModuleStageControl({ employees, onUpdate, orgKey }) {
       }
       const managerCode = String(emp['Reporting Manager Code'] || '').trim();
       const employeeName = emp['Employee Name'] || emp['Employee Code'];
+      if (targetStage === 'goal-creation' && existing) {
+        reopenCodes.push(emp['Employee Code']);
+        return;
+      }
       const next = {
         ...(existing || {
           employeeCode: emp['Employee Code'],
@@ -3154,6 +3313,9 @@ function ModuleStageControl({ employees, onUpdate, orgKey }) {
       submissions: nextSubs,
       notifications: [...newNotifs, ...(wf.notifications || [])],
     });
+    if (reopenCodes.length) {
+      await Promise.all(reopenCodes.map((code) => reopenGoalsAction(orgKey, code)));
+    }
   }
 
   const [mode, setMode]             = useState('single');
@@ -3186,8 +3348,15 @@ function ModuleStageControl({ employees, onUpdate, orgKey }) {
 
   function stageChangeInvalidForCode(code, stageId, wf = loadWorkflowState(orgKey)) {
     const nextStatus = stageToStatus(stageId);
-    if (nextStatus !== 'pending-manager' && nextStatus !== 'approved') return false;
     const key = normalizeCodeStr(code);
+    if (stageId === 'calibrated') {
+      const ratingStore = readRatings(orgKey);
+      const ratings = ratingStore.ratings || {};
+      const ratingKey = Object.keys(ratings).find((item) => normalizeCodeStr(item) === key) || code;
+      const managerScore = Number(ratings?.[ratingKey]?.manager?.overallScore);
+      return !Number.isFinite(managerScore) || managerScore < 1;
+    }
+    if (nextStatus !== 'pending-manager' && nextStatus !== 'approved') return false;
     const sub = wf?.submissions?.[key] || null;
     const activeCount = getWorkflowActiveGoals(sub?.goals).length;
     const activeWeight = getWorkflowGoalWeight(sub?.goals);
@@ -3206,7 +3375,7 @@ function ModuleStageControl({ employees, onUpdate, orgKey }) {
   }
   function toggle(code) { setSelected((p) => { const n = new Set(p); n.has(code) ? n.delete(code) : n.add(code); return n; }); }
 
-  function applySelected() {
+  async function applySelected() {
     if (!selected.size) return;
     const wf = loadWorkflowState(orgKey);
     const validSelected = Array.from(selected).filter((code) => !stageChangeInvalidForCode(code, targetStage, wf));
@@ -3221,11 +3390,11 @@ function ModuleStageControl({ employees, onUpdate, orgKey }) {
     // Keep the workflow submissions + notifications in sync with the stage change.
     const codeToTarget = new Map();
     validSelected.forEach((code) => { codeToTarget.set(code, targetStage); });
-    syncWorkflowForStageChange(codeToTarget);
-    syncRatingsForStageChange(codeToTarget);
+    await syncWorkflowForStageChange(codeToTarget);
+    const ratingFailedCount = await syncRatingsForStageChange(codeToTarget);
     showToast(blockedCount
       ? `${validSelected.length} moved · ${blockedCount} skipped until goals total 100%`
-      : `${validSelected.length} employee${validSelected.length !== 1 ? 's' : ''} moved to "${EMP_STAGES.find((s) => s.id === targetStage)?.label}"`);
+      : `${validSelected.length} employee${validSelected.length !== 1 ? 's' : ''} moved to "${EMP_STAGES.find((s) => s.id === targetStage)?.label}"${ratingFailedCount ? ` · ${ratingFailedCount} rating sync failed` : ''}`);
     setSelected(new Set());
   }
 
@@ -3389,7 +3558,7 @@ function ModuleStageControl({ employees, onUpdate, orgKey }) {
     e.target.value = '';
   }
 
-  function applyBulk() {
+  async function applyBulk() {
     if (!bulkPreview) return;
     const okRows = bulkPreview.filter((r) => r.status === 'ok' && (r.toId || bulkOverride));
     if (!okRows.length) return;
@@ -3409,9 +3578,11 @@ function ModuleStageControl({ employees, onUpdate, orgKey }) {
       return target ? { ...e, _pmsStage: target } : e;
     });
     onUpdate(updated);
-    syncWorkflowForStageChange(codeToTarget);
-    syncRatingsForStageChange(codeToTarget);
-    showToast(blockedCount ? `${validRows.length} updated · ${blockedCount} skipped until goals total 100%` : `${validRows.length} employee${validRows.length !== 1 ? 's' : ''} updated`);
+    await syncWorkflowForStageChange(codeToTarget);
+    const ratingFailedCount = await syncRatingsForStageChange(codeToTarget);
+    showToast(blockedCount
+      ? `${validRows.length} updated · ${blockedCount} skipped until prerequisites are met${ratingFailedCount ? ` · ${ratingFailedCount} rating sync failed` : ''}`
+      : `${validRows.length} employee${validRows.length !== 1 ? 's' : ''} updated${ratingFailedCount ? ` · ${ratingFailedCount} rating sync failed` : ''}`);
     setBulkPreview(null);
   }
 
@@ -3631,7 +3802,7 @@ function ModuleStageControl({ employees, onUpdate, orgKey }) {
                 </select>
                 {invalidStageSelectionCount > 0 && (
                   <span style={{ fontSize: 11.5, fontWeight: 700, color: '#B45309', background: '#FFFBEB', border: '1px solid #FDE68A', borderRadius: 999, padding: '5px 10px' }}>
-                    {invalidStageSelectionCount} need active goals at 100%
+                    {targetStage === 'calibrated' ? `${invalidStageSelectionCount} need manager score` : `${invalidStageSelectionCount} need active goals at 100%`}
                   </span>
                 )}
                 <button type="button" onClick={applySelected} style={btnP}>Apply change</button>
@@ -3761,6 +3932,7 @@ function ModuleMgrChange({ employees, config, onUpdate, orgKey }) {
   const [selected, setSelected] = useState(null);
   const [newL1, setNewL1]     = useState('');
   const [newL2, setNewL2]     = useState('');
+  const [changeError, setChangeError] = useState('');
   const [oldManagerCode, setOldManagerCode] = useState('');
   const [replacementManagerCode, setReplacementManagerCode] = useState('');
   const [replaceError, setReplaceError] = useState('');
@@ -3817,13 +3989,29 @@ function ModuleMgrChange({ employees, config, onUpdate, orgKey }) {
     saveWorkflowState(orgKey, { submissions: nextSubs, notifications: [notif, ...(wf.notifications || [])] });
   }
 
+  // Resolve a typed manager value (name OR code) to a real roster employee.
+  function resolveManagerInput(typed) {
+    const lower = String(typed || '').trim().toLowerCase();
+    if (!lower) return null;
+    return employees.find((e) => String(e['Employee Code'] || '').trim().toLowerCase() === lower)
+      || employees.find((e) => String(e['Employee Name'] || '').trim().toLowerCase() === lower)
+      || null;
+  }
   function applyChange() {
+    setChangeError('');
     if (!selected || !newL1.trim()) return;
+    const mgr = resolveManagerInput(newL1);
+    if (!mgr) { setChangeError(`No employee matches "${newL1.trim()}". Pick a manager by name or code — add them first from Add employees if they're new.`); return; }
     const code = selected['Employee Code'];
     const codeKey = String(code || '').trim().toLowerCase();
-    const updated = employees.map((e) => String(e['Employee Code'] || '').trim().toLowerCase() === codeKey ? { ...e, 'Reporting Manager Code': newL1.trim(), ...(newL2 ? { 'L2 Manager Code': newL2.trim() } : {}) } : e);
+    const newCode = String(mgr['Employee Code'] || '').trim();
+    const newName = String(mgr['Employee Name'] || '').trim();
+    if (newCode.toLowerCase() === codeKey) { setChangeError("An employee can't report to themselves."); return; }
+    const updated = employees.map((e) => String(e['Employee Code'] || '').trim().toLowerCase() === codeKey
+      ? { ...e, 'Reporting Manager Code': newCode, 'Reporting Manager Name': newName, ...(newL2 ? { 'L2 Manager Code': newL2.trim() } : {}) }
+      : e);
     onUpdate(updated); showToast(`Manager updated for ${selected['Employee Name'] || code}`);
-    setSelected(null); setSearch(''); setNewL1(''); setNewL2('');
+    setSelected(null); setSearch(''); setNewL1(''); setNewL2(''); setChangeError('');
   }
 
   async function handleFile(e) {
@@ -3911,9 +4099,15 @@ function ModuleMgrChange({ employees, config, onUpdate, orgKey }) {
             {selected && <div style={{ marginTop: 8, background: '#F0FDF4', border: '1.5px solid #BBF7D0', borderRadius: 9, padding: '8px 12px', fontSize: 12.5, color: '#166534' }}>✓ <strong>{selected['Employee Name']}</strong> — current L1: <strong>{selected['Reporting Manager Code'] || '—'}</strong></div>}
           </div>
           <div>
-            <label style={{ fontSize: 11.5, fontWeight: 600, color: '#64748B', display: 'block', marginBottom: 5 }}>New {hasL2 ? 'L1 ' : ''}Manager Code</label>
-            <input value={newL1} onChange={(e) => setNewL1(e.target.value)} placeholder="e.g. 3000" style={inputStyle} />
+            <label style={{ fontSize: 11.5, fontWeight: 600, color: '#64748B', display: 'block', marginBottom: 5 }}>New {hasL2 ? 'L1 ' : ''}Manager</label>
+            <input value={newL1} onChange={(e) => { setNewL1(e.target.value); setChangeError(''); }} placeholder="Name or code…" style={inputStyle} />
+            {newL1.trim() && (
+              resolveManagerInput(newL1)
+                ? <div style={{ marginTop: 6, fontSize: 11.5, color: '#166534' }}>✓ {resolveManagerInput(newL1)['Employee Name']} · {resolveManagerInput(newL1)['Employee Code']}</div>
+                : <div style={{ marginTop: 6, fontSize: 11.5, color: '#DC2626' }}>No match — pick an existing manager, or add them first from Add employees.</div>
+            )}
           </div>
+          {changeError && <div style={{ padding: '8px 12px', background: '#FEF2F2', border: '1px solid #FECACA', borderRadius: 8, fontSize: 12.5, color: '#991B1B' }}>{changeError}</div>}
           {hasL2 && (
             <div>
               <label style={{ fontSize: 11.5, fontWeight: 600, color: '#64748B', display: 'block', marginBottom: 5 }}>New L2 Manager Code <span style={{ fontWeight: 400, color: '#94A3B8' }}>(optional)</span></label>
@@ -4027,24 +4221,22 @@ function ModuleMgrChange({ employees, config, onUpdate, orgKey }) {
 /* ── Group Transfer ──────────────────────────────────────────── */
 function ModuleGrpTransfer({ employees, groups, goalLibraries = [], onUpdate, orgKey }) {
   // The new group ships a different goal library, so the employee's stale
-  // submission (KRAs/KPIs drafted against the OLD library) has to be cleared
-  // — otherwise their dashboard shows old saved goals next to the new
-  // library cards. We only clobber drafts (`pending` / no status); anything
-  // already approved is left alone with a console note so HR can decide.
-  function resetEmployeeSubmissionForTransfer(code) {
+  // submission and every downstream rating have to be cleared together —
+  // otherwise the dashboard shows new goals but stale submitted evaluations.
+  async function resetEmployeeSubmissionForTransfer(code) {
     if (!orgKey || !code) return { cleared: false, kept: false };
     const wf = loadWorkflowState(orgKey) || { submissions: {}, notifications: [] };
     const submissions = { ...(wf.submissions || {}) };
     const key = normalizeCodeStr(code);
     const matchKey = Object.keys(submissions).find((k) => normalizeCodeStr(k) === key);
-    if (!matchKey) return { cleared: false, kept: false };
-    const status = submissions[matchKey]?.status;
-    if (status === 'approved' || status === 'manager_approved' || status === 'completed') {
-      return { cleared: false, kept: true };
+    if (matchKey) {
+      delete submissions[matchKey];
+      saveWorkflowState(orgKey, { ...wf, submissions });
     }
-    delete submissions[matchKey];
-    saveWorkflowState(orgKey, { ...wf, submissions });
-    return { cleared: true, kept: false };
+    const results = await Promise.all(['self', 'manager', 'hod', 'final'].map((stage) =>
+      clearEmployeeStageAndPersist(orgKey, String(code).trim(), stage, 'hr-admin', { allowFallback: false, optimistic: false })));
+    const failed = results.filter((result) => !result?.ok).length;
+    return { cleared: true, kept: false, failed };
   }
   function getTransferResetImpact(code) {
     if (!orgKey || !code) return { clears: false, kept: false, activeGoals: 0 };
@@ -4052,13 +4244,15 @@ function ModuleGrpTransfer({ employees, groups, goalLibraries = [], onUpdate, or
     const submissions = wf.submissions || {};
     const key = normalizeCodeStr(code);
     const matchKey = Object.keys(submissions).find((k) => normalizeCodeStr(k) === key);
-    if (!matchKey) return { clears: false, kept: false, activeGoals: 0 };
+    const ratings = readRatings(orgKey)?.ratings || {};
+    const ratingKey = Object.keys(ratings).find((k) => normalizeCodeStr(k) === key);
+    const stages = ratingKey ? ratings[ratingKey] || {} : {};
+    const hasRatings = ['self', 'manager', 'hod', 'final'].some((stage) =>
+      !!stages?.[stage]?.submittedAt || stages?.[stage]?.calibratedScore !== undefined);
+    if (!matchKey) return { clears: hasRatings, kept: false, activeGoals: 0 };
     const submission = submissions[matchKey] || {};
     const activeGoals = getWorkflowActiveGoals(submission.goals).length;
-    if (submission.status === 'approved' || submission.status === 'manager_approved' || submission.status === 'completed') {
-      return { clears: false, kept: true, activeGoals };
-    }
-    return { clears: activeGoals > 0 || !!submission.status, kept: false, activeGoals };
+    return { clears: activeGoals > 0 || !!submission.status || hasRatings, kept: false, activeGoals };
   }
   const [mode, setMode]       = useState('single');
   const [search, setSearch]   = useState('');
@@ -4105,7 +4299,7 @@ function ModuleGrpTransfer({ employees, groups, goalLibraries = [], onUpdate, or
     setConfirmDraftReset(false);
   }, [selected, targetGrp, routingValue]);
 
-  function applyChange() {
+  async function applyChange() {
     if (!selected || !targetGrp) return;
     if (needsRouting && !routingValue) return;
     const code = selected['Employee Code'];
@@ -4122,11 +4316,11 @@ function ModuleGrpTransfer({ employees, groups, goalLibraries = [], onUpdate, or
     const codeKey = String(code || '').trim().toLowerCase();
     const updated = employees.map((e) => String(e['Employee Code'] || '').trim().toLowerCase() === codeKey ? { ...e, ...patch } : e);
     onUpdate(updated);
-    const resetResult = resetEmployeeSubmissionForTransfer(code);
+    const resetResult = await resetEmployeeSubmissionForTransfer(code);
     const baseMsg = needsRouting
       ? `${selected['Employee Name'] || code} → "${targetGrp}" as ${targetSegmentAttr} "${routingValue}"`
       : `${selected['Employee Name'] || code} transferred to "${targetGrp}"`;
-    showToast(resetResult.kept ? `${baseMsg} · existing approved goals kept` : baseMsg);
+    showToast(resetResult?.failed ? `${baseMsg} · moved, but ${resetResult.failed} rating clears failed` : `${baseMsg} · goals and evaluations reset`);
     setSelected(null); setSearch(''); setTargetGrp(''); setRoutingValue(''); setConfirmDraftReset(false);
   }
 
@@ -4163,7 +4357,7 @@ function ModuleGrpTransfer({ employees, groups, goalLibraries = [], onUpdate, or
     e.target.value = '';
   }
 
-  function applyBulk() {
+  async function applyBulk() {
     // Only apply rows that have a valid group AND, when the new group routes
     // by an attribute, an employee value that matches one of the slots.
     const valid = bulkPreview.filter((r) => r.found && r.grpValid && r.routingOk);
@@ -4184,10 +4378,11 @@ function ModuleGrpTransfer({ employees, groups, goalLibraries = [], onUpdate, or
       };
     });
     onUpdate(updated);
-    // Clear stale goal drafts for everyone we transferred.
-    valid.forEach((r) => resetEmployeeSubmissionForTransfer(r.code));
+    // Clear stale goal plans and downstream ratings for everyone transferred.
+    const resetResults = await Promise.all(valid.map((r) => resetEmployeeSubmissionForTransfer(r.code)));
+    const failedClears = resetResults.reduce((sum, result) => sum + Number(result?.failed || 0), 0);
     const skipped = bulkPreview.length - valid.length;
-    showToast(skipped > 0 ? `${valid.length} transferred · ${skipped} skipped` : `${valid.length} employees transferred`);
+    showToast(`${valid.length} transferred${skipped > 0 ? ` · ${skipped} skipped` : ''}${failedClears ? ` · ${failedClears} rating clears failed` : ' · goals/evaluations reset'}`);
     setBulkPreview(null);
   }
 
@@ -5602,30 +5797,9 @@ function ModuleTestCreds({ employees, org, orgKey, groups = [] }) {
     return m;
   }, [employees]);
 
-  // External managers — referenced as a manager by at least one employee but not themselves uploaded.
-  // Synthesised as virtual rows so HR can log in as them to test the manager flow.
-  const externalManagers = useMemo(() => {
-    const map = new Map();
-    employees.forEach((e) => {
-      const raw = String(e['Reporting Manager Code'] || '').trim();
-      if (!raw) return;
-      const lower = raw.toLowerCase();
-      if (empByCode[lower]) return; // real employee, already in list
-      const existing = map.get(lower);
-      if (existing) { existing._reportsCount += 1; return; }
-      const name = String(e['Reporting Manager Name'] || '').trim() || raw;
-      map.set(lower, {
-        'Employee Code': raw,
-        'Employee Name': name,
-        Designation: 'Manager (not in PMS)',
-        _external: true,
-        _reportsCount: 1,
-      });
-    });
-    return Array.from(map.values()).sort((a, b) => (a['Employee Name'] || '').localeCompare(b['Employee Name'] || ''));
-  }, [employees, empByCode]);
-
-  const allRows = useMemo(() => [...employees, ...externalManagers], [employees, externalManagers]);
+  // Every referenced manager is a real roster row now (backfilled to NONE/Exempt
+  // if they weren't uploaded), so there are no synthesized "not in PMS" rows.
+  const allRows = employees;
 
   // Build group + manager option lists from data
   const groupOptions = useMemo(() => {
@@ -5707,7 +5881,7 @@ function ModuleTestCreds({ employees, org, orgKey, groups = [] }) {
           <button type="button" onClick={() => { setSearch(''); setFilterGroup(''); setFilterStage(''); setFilterManager(''); }}
             style={{ padding: '8px 14px', background: '#fff', color: '#475569', border: '1.5px solid #E2E8F0', borderRadius: 8, fontSize: 12.5, cursor: 'pointer', fontFamily: 'inherit' }}>Clear all</button>
         )}
-        <span style={{ fontSize: 12, color: '#94A3B8' }}>{filtered.length} of {allRows.length}{externalManagers.length > 0 ? ` · ${externalManagers.length} external mgr${externalManagers.length !== 1 ? 's' : ''}` : ''}</span>
+        <span style={{ fontSize: 12, color: '#94A3B8' }}>{filtered.length} of {allRows.length}</span>
         <span style={{ marginLeft: 'auto', fontSize: 11.5, color: '#64748B', background: '#F8FAFC', border: '1px solid #E2E8F0', borderRadius: 999, padding: '6px 12px' }}>
           Proxy mode uses the employee session directly. Reset individual passwords from Employee Status.
         </span>
@@ -7536,6 +7710,16 @@ export default function HRCycleDashboard() {
     ));
   }, [config]);
 
+  // Backfill: any manager code referenced but missing from the roster becomes a
+  // real NONE/Exempt employee (rater-only) — replaces the old "not in PMS"
+  // phantom. Runs once whenever a gap is detected, then settles (no loop).
+  useEffect(() => {
+    if (!config || liveEmployees.length === 0) return;
+    const { employees: filled, added } = backfillManagerRows(liveEmployees);
+    if (added > 0) handleEmpUpdate(filled);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [liveEmployees, config]);
+
   // Ensure every employee in this org has a credential entry so they can log in via LoginPage.
   // Runs whenever the employee list or org changes. Skips employees that already have credentials
   // (preserves any permanent passwords they've already set).
@@ -7613,19 +7797,23 @@ export default function HRCycleDashboard() {
   const [submissionStatuses, setSubmissionStatuses] = useState(() => {
     const wf = loadWorkflowState(orgKey);
     const m = {};
-    Object.entries(wf.submissions || {}).forEach(([k, s]) => { if (s?.status) m[k] = s.status; });
+    Object.entries(wf.submissions || {}).forEach(([k, s]) => { if (s?.status) m[k] = s; });
     return m;
   });
   const [ratingStatuses, setRatingStatuses] = useState(() => {
     const ratingStore = readRatings(orgKey);
+    const published = isPublished(orgKey);
     const ratings = ratingStore.ratings || {};
+    const submissions = loadWorkflowState(orgKey).submissions || {};
     const m = {};
     Object.entries(ratings).forEach(([k, stages]) => {
+      const stageState = resolveEmployeeStageState(submissions[normalizeCodeStr(k)], stages, published);
       m[normalizeCodeStr(k)] = {
-        selfSubmitted: !!stages?.self?.submittedAt,
-        managerSubmitted: !!stages?.manager?.submittedAt,
-        finalSubmitted: !!stages?.final?.submittedAt,
-        published: !!ratingStore.publishedAt,
+        selfSubmitted: stageState.selfDone,
+        managerSubmitted: stageState.managerDone,
+        finalSubmitted: stageState.finalDone,
+        calibrated: stageState.finalDone,
+        published,
       };
     });
     return m;
@@ -7635,17 +7823,20 @@ export default function HRCycleDashboard() {
     function reread() {
       const wf = loadWorkflowState(orgKey);
       const m = {};
-      Object.entries(wf.submissions || {}).forEach(([k, s]) => { if (s?.status) m[k] = s.status; });
+      Object.entries(wf.submissions || {}).forEach(([k, s]) => { if (s?.status) m[k] = s; });
       setSubmissionStatuses(m);
       const ratingStore = readRatings(orgKey);
+      const published = isPublished(orgKey);
       const ratings = ratingStore.ratings || {};
       const nextRatings = {};
       Object.entries(ratings).forEach(([k, stages]) => {
+        const stageState = resolveEmployeeStageState(wf.submissions?.[normalizeCodeStr(k)], stages, published);
         nextRatings[normalizeCodeStr(k)] = {
-          selfSubmitted: !!stages?.self?.submittedAt,
-          managerSubmitted: !!stages?.manager?.submittedAt,
-          finalSubmitted: !!stages?.final?.submittedAt,
-          published: !!ratingStore.publishedAt,
+          selfSubmitted: stageState.selfDone,
+          managerSubmitted: stageState.managerDone,
+          finalSubmitted: stageState.finalDone,
+          calibrated: stageState.finalDone,
+          published,
         };
       });
       setRatingStatuses(nextRatings);
@@ -7653,7 +7844,7 @@ export default function HRCycleDashboard() {
     void hydrateRatings(orgKey).then(reread);
     void hydrateWorkflow(orgKey).then((wf) => {
       const m = {};
-      Object.entries(wf?.submissions || {}).forEach(([k, s]) => { if (s?.status) m[k] = s.status; });
+      Object.entries(wf?.submissions || {}).forEach(([k, s]) => { if (s?.status) m[k] = s; });
       setSubmissionStatuses(m);
     });
     const wfKey = workflowStorageKey(orgKey);
@@ -7683,7 +7874,9 @@ export default function HRCycleDashboard() {
 
   // Map submission.status → PMS stage id. Kept in sync with EmployeePage's submit flow.
   function statusToStage(status, ratingStatus = null) {
-    if (ratingStatus?.published || ratingStatus?.finalSubmitted) return 'completed';
+    if (ratingStatus?.published) return 'completed';
+    if (ratingStatus?.calibrated) return 'calibrated';
+    if (ratingStatus?.finalSubmitted) return 'completed';
     if (ratingStatus?.managerSubmitted) return 'hr-review';
     if (ratingStatus?.selfSubmitted) return 'mgr-evaluation';
     if (status === 'pending-manager') return 'pending-approval';
@@ -7696,7 +7889,8 @@ export default function HRCycleDashboard() {
   const liveEmployeesWithStage = useMemo(() => {
     return liveEmployees.map((e) => {
       const key = normalizeCodeStr(e['Employee Code']);
-      const wfStatus = submissionStatuses[key];
+      const submission = submissionStatuses[key];
+      const wfStatus = submission?.status;
       const ratingStatus = ratingStatuses[key] || null;
       const derived = wfStatus || ratingStatus ? statusToStage(wfStatus, ratingStatus) : (e._pmsStage || 'goal-creation');
       const isExempt = !!e._outsidePms;

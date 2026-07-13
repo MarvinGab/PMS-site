@@ -1,6 +1,7 @@
 import { shouldUseSupabase, getBackendDiagnostics } from './config';
 import { supabase } from './supabaseClient';
 import { hashPasswordValue } from './passwordCrypto';
+import { isSessionTimeoutMessage, notifySessionTimeout } from './sessionTimeout';
 
 const APP_DATA_KEY = 'zarohr_app_data_v1';
 const WIZARD_STATE_KEY = 'zarohr_pms_wizard_state_v1';
@@ -52,6 +53,12 @@ const ORG_SCOPED_TABLES = [
   'pms_configs',
   'organization_branding',
 ];
+
+function readServerSessionToken() {
+  const authSession = readAuthSessionSync();
+  const employeeSession = readEmployeeSessionSync();
+  return authSession?.serverSessionToken || employeeSession?.serverSessionToken || '';
+}
 
 function warnOnce(scope, error) {
   const key = `${scope}:${error?.message || 'unknown'}`;
@@ -127,12 +134,13 @@ function getDomainFromSlug(slug) {
 function buildOrganizationRow(org) {
   const workspaceSlug = String(org?.workspaceSlug || '').trim().toLowerCase();
   const domain = String(org?.domain || getDomainFromSlug(workspaceSlug)).trim().toLowerCase();
+  const storedDomain = domain && domain !== 'pms.zarohr.com' ? domain : null;
   return {
     org_key: String(org?.key || '').trim(),
     org_code: String(org?.orgCode || org?.key || '').trim() || null,
     name: String(org?.name || '').trim() || 'Organization',
     workspace_slug: workspaceSlug || null,
-    domain: domain || null,
+    domain: storedDomain,
     industry: String(org?.industry || '').trim() || null,
     hr_admin_name: String(org?.hrAdminName || '').trim() || null,
     hr_admin_email: String(org?.hrAdminEmail || '').trim().toLowerCase() || null,
@@ -423,6 +431,87 @@ async function resolveOrganizationIdentity(orgKey = '') {
   } catch (error) {
     warnOnce(`remote-read:organization-identity:${orgKey}`, error);
     return null;
+  }
+}
+
+function workflowPayloadToRow(organizationId, employeeCode, submission = {}) {
+  const code = normalizeCode(employeeCode || submission?.employeeCode);
+  if (!organizationId || !code) return null;
+  return {
+    organization_id: organizationId,
+    employee_code: code,
+    status: String(submission?.status || 'draft').trim() || 'draft',
+    submitted_at: submission?.submittedAt || null,
+    approved_at: submission?.approvedAt || null,
+    manager_decision_at: submission?.managerDecisionAt || null,
+    manager_note: String(submission?.managerNote || '').trim(),
+    payload: submission && typeof submission === 'object' ? submission : {},
+    updated_at: submission?.updatedAt || submission?.managerDecisionAt || submission?.approvedAt || submission?.submittedAt || new Date().toISOString(),
+  };
+}
+
+function workflowRowsToPayload(rows = []) {
+  const submissions = {};
+  (Array.isArray(rows) ? rows : []).forEach((row) => {
+    const code = normalizeCode(row?.employee_code);
+    if (!code) return;
+    const payload = row?.payload && typeof row.payload === 'object' ? row.payload : {};
+    submissions[code] = {
+      ...payload,
+      employeeCode: payload.employeeCode || code,
+      status: row?.status || payload.status || 'draft',
+      submittedAt: payload.submittedAt || row?.submitted_at || null,
+      approvedAt: payload.approvedAt || row?.approved_at || null,
+      managerDecisionAt: payload.managerDecisionAt || row?.manager_decision_at || null,
+      managerNote: payload.managerNote || row?.manager_note || '',
+      updatedAt: payload.updatedAt || row?.updated_at || row?.submitted_at || null,
+    };
+  });
+  return { submissions, notifications: [] };
+}
+
+async function hydrateWorkflowRows(orgKey = '') {
+  if (!shouldUseSupabase || !supabase || !orgKey) return null;
+  try {
+    const identity = await resolveOrganizationIdentity(orgKey);
+    if (!identity?.id) return null;
+    const { data, error } = await supabase
+      .from('goal_workflows')
+      .select('employee_code, status, submitted_at, approved_at, manager_decision_at, manager_note, payload, updated_at')
+      .eq('organization_id', identity.id);
+    if (error) throw error;
+    return workflowRowsToPayload(data || []);
+  } catch (error) {
+    warnOnce(`remote-read:goal_workflows:${orgKey}`, error);
+    return null;
+  }
+}
+
+async function syncGoalWorkflowRows(orgKey = '', payload = {}, options = {}) {
+  if (!shouldUseSupabase || !supabase || !orgKey) return true;
+  try {
+    const identity = await resolveOrganizationIdentity(orgKey);
+    if (!identity?.id) return false;
+    const submissions = payload?.submissions && typeof payload.submissions === 'object' ? payload.submissions : {};
+    const rows = Object.entries(submissions)
+      .map(([code, submission]) => workflowPayloadToRow(identity.id, code, submission))
+      .filter(Boolean);
+    if (options?.replace) {
+      const { error: deleteError } = await supabase
+        .from('goal_workflows')
+        .delete()
+        .eq('organization_id', identity.id);
+      if (deleteError) throw deleteError;
+    }
+    if (rows.length === 0) return true;
+    const { error } = await supabase
+      .from('goal_workflows')
+      .upsert(rows, { onConflict: 'organization_id,employee_code' });
+    if (error) throw error;
+    return true;
+  } catch (error) {
+    warnOnce(`remote-write:goal_workflows:${orgKey}`, error);
+    return false;
   }
 }
 
@@ -717,8 +806,18 @@ function isStaleRemoteEcho(recordKey, orgKey = '', payload) {
 }
 
 function workflowTimestamp(value) {
-  const parsed = Date.parse(String(value?.updatedAt || value?.createdAt || ''));
-  return Number.isFinite(parsed) ? parsed : 0;
+  const candidates = [
+    value?.updatedAt,
+    value?.managerDecisionAt,
+    value?.approvedAt,
+    value?.submittedAt,
+    value?.createdAt,
+  ];
+  const latest = candidates.reduce((max, stamp) => {
+    const parsed = Date.parse(String(stamp || ''));
+    return Number.isFinite(parsed) ? Math.max(max, parsed) : max;
+  }, 0);
+  return latest;
 }
 
 function mergeWorkflowPayload(remote, local) {
@@ -1095,10 +1194,16 @@ export async function saveOrganizationRecord(org) {
     return { ok: true, org: nextOrg };
   }
 
-  const ok = await upsertOrganizationsRemote([nextOrg]);
-  if (!ok) return { ok: false, error: 'Failed to create organization in backend.' };
-  writeOrganizationsToLocalCache(nextOrgs);
-  return { ok: true, org: nextOrg };
+  const result = await runWorkflowAction('save-organization', { orgKey: nextOrg.key, org: nextOrg });
+  if (!result?.ok) {
+    return { ok: false, error: result?.error || 'Failed to save organization in backend.' };
+  }
+  const savedOrg = result.org || nextOrg;
+  const savedOrgs = localOrgs.some((item) => item.key === savedOrg.key)
+    ? localOrgs.map((item) => (item.key === savedOrg.key ? savedOrg : item))
+    : [savedOrg, ...localOrgs];
+  writeOrganizationsToLocalCache(savedOrgs);
+  return { ok: true, org: savedOrg };
 }
 
 export async function syncOrganizationsCollection(nextOrgs, prevOrgs = []) {
@@ -1293,11 +1398,17 @@ export async function hydrateWorkflow(orgKey = '', options = {}) {
   const { emit = true } = options || {};
   const local = readWorkflowSync(orgKey);
   if (!shouldUseSupabase) return local;
-  const remote = await readRemoteStateScoped('workflow', orgKey);
-  if (remote) {
-    if (isStaleRemoteEcho('workflow', orgKey, remote)) return local;
-    writeLocalJson(`${GOAL_WORKFLOW_KEY}:${orgKey || 'default'}`, remote, { emit });
-    return remote;
+  const [remote, rowsPayload] = await Promise.all([
+    readRemoteStateScoped('workflow', orgKey),
+    hydrateWorkflowRows(orgKey),
+  ]);
+  const mergedRemote = rowsPayload
+    ? mergeWorkflowPayload(remote || { submissions: {}, notifications: [] }, rowsPayload)
+    : remote;
+  if (mergedRemote) {
+    if (remote && isStaleRemoteEcho('workflow', orgKey, remote)) return local;
+    writeLocalJson(`${GOAL_WORKFLOW_KEY}:${orgKey || 'default'}`, mergedRemote, { emit });
+    return mergedRemote;
   }
   return local;
 }
@@ -1308,8 +1419,59 @@ export function persistWorkflow(orgKey, payload, options = {}) {
   // Return the remote-write promise so callers can show a save-status
   // indicator and react to failure (e.g. surface "Saved" vs "Failed").
   // Falls back to a resolved-true if Supabase isn't configured.
-  const remote = writeRemoteState('workflow', orgKey, payload, options);
+  const remote = Promise.all([
+    Promise.resolve(writeRemoteState('workflow', orgKey, payload, options)),
+    syncGoalWorkflowRows(orgKey, payload, options),
+  ]).then((results) => results.every(Boolean));
   return remote && typeof remote.then === 'function' ? remote : Promise.resolve(true);
+}
+
+async function runWorkflowAction(action, body = {}) {
+  if (!shouldUseSupabase || !supabase) {
+    return { ok: false, error: 'PMS actions backend is not configured.' };
+  }
+  try {
+    const { data, error } = await supabase.functions.invoke('pms-actions', {
+      body: {
+        ...body,
+        action,
+        serverSessionToken: readServerSessionToken(),
+      },
+    });
+    if (error) throw error;
+    if (!data?.ok) throw new Error(data?.error || 'Workflow action failed.');
+    if (data.workflow && body.orgKey) {
+      writeLocalJson(`${GOAL_WORKFLOW_KEY}:${body.orgKey || 'default'}`, data.workflow, { emit: true });
+    }
+    return data;
+  } catch (error) {
+    let errorMessage = error?.message || 'Workflow action failed.';
+    try {
+      const parsed = error?.context?.clone ? await error.context.clone().json() : null;
+      errorMessage = parsed?.error || parsed?.message || errorMessage;
+    } catch {
+      // Keep the original client error when the function response is not JSON.
+	    }
+	    warnOnce(`workflow-action:${action}`, error);
+	    if (isSessionTimeoutMessage(errorMessage)) notifySessionTimeout(errorMessage);
+	    return { ok: false, error: errorMessage };
+	  }
+	}
+
+export function submitGoalsAction(orgKey, empCode, payload) {
+  return runWorkflowAction('submit-goals', { orgKey, empCode, payload });
+}
+
+export function approveGoalsAction(orgKey, empCode, goals, managerNote = '') {
+  return runWorkflowAction('approve-goals', { orgKey, empCode, goals, managerNote });
+}
+
+export function sendBackGoalsAction(orgKey, empCode, goals, managerNote = '') {
+  return runWorkflowAction('send-back-goals', { orgKey, empCode, goals, managerNote });
+}
+
+export function reopenGoalsAction(orgKey, empCode) {
+  return runWorkflowAction('reopen-goals', { orgKey, empCode });
 }
 
 // Super-admin Communications page state — templates + email theme. Global
@@ -1423,8 +1585,9 @@ export async function syncEmployeeCredentialsForOrg({ orgKey = '', employees = [
 
   Object.entries(existing).forEach(([credentialKey, credential]) => {
     if (credential?.orgKey !== normalizedOrgKey) return;
-    if (!credential?.isTemp) return;
-    if (uploadedCodes.has(normalizeCode(credentialKey))) return;
+    if (credential?.isPrimaryHR || credential?.isHRTeam) return;
+    const credentialCode = normalizeCode(credential?.empCode || credentialKey);
+    if (uploadedCodes.has(credentialCode)) return;
     delete existing[credentialKey];
     changed = true;
   });
@@ -1434,7 +1597,16 @@ export async function syncEmployeeCredentialsForOrg({ orgKey = '', employees = [
     if (!code) continue;
 
     const email = resolveEmployeeEmail(employee);
-    const current = existing[code];
+    const emailKey = String(email || '').trim().toLowerCase();
+    const duplicateKeys = Object.entries(existing)
+      .filter(([key, value]) => {
+        if (key === code) return false;
+        if (value?.orgKey !== normalizedOrgKey) return false;
+        if (value?.isPrimaryHR || value?.isHRTeam) return false;
+        return emailKey && String(value?.email || '').trim().toLowerCase() === emailKey;
+      })
+      .map(([key]) => key);
+    const current = existing[code] || duplicateKeys.map((key) => existing[key]).find(Boolean);
     let nextValue;
     if (current) {
       nextValue = {
@@ -1450,9 +1622,9 @@ export async function syncEmployeeCredentialsForOrg({ orgKey = '', employees = [
       const otp = generateEmployeeOtp();
       nextValue = {
         passwordHash: await hashPasswordValue(otp),
-        // Plaintext kept temporarily so the imminent invite email can include
-        // it. Cleared after a successful send by `clearPendingEmployeeOtps`.
-        pendingTempPassword: otp,
+        // SECURITY: never persist the plaintext OTP at rest — only the hash is
+        // stored. The actual invite email uses the freshly-rotated OTP returned
+        // in-memory by rotateEmployeeOtpsForSend at send time.
         name: String(employee['Employee Name'] || '').trim(),
         email,
         empCode: code,
@@ -1467,6 +1639,12 @@ export async function syncEmployeeCredentialsForOrg({ orgKey = '', employees = [
       existing[code] = nextValue;
       changed = true;
     }
+    duplicateKeys.forEach((key) => {
+      if (key !== code) {
+        delete existing[key];
+        changed = true;
+      }
+    });
   }
 
   if (changed) persistEmployeeCredentials(existing);
@@ -1516,7 +1694,8 @@ export async function rotateEmployeeOtpsForSend({ orgKey = '', employees = [], f
     const nextCredential = {
       ...(current || {}),
       passwordHash,
-      pendingTempPassword: otp,
+      // SECURITY: plaintext OTP is returned in-memory (plaintextByCode) for the
+      // email only — never persisted at rest.
       name: String(employee?.['Employee Name'] || current?.name || '').trim(),
       email: email || current?.email || '',
       empCode: code,
@@ -1528,6 +1707,7 @@ export async function rotateEmployeeOtpsForSend({ orgKey = '', employees = [], f
     matchingKeys.forEach((key) => {
       existing[key] = { ...(existing[key] || {}), ...nextCredential };
       delete existing[key].password;
+      delete existing[key].pendingTempPassword;
     });
     plaintextByCode.set(code, otp);
     changed = true;

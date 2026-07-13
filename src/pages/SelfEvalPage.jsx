@@ -3,7 +3,7 @@ import { readEmployeeSessionSync, readWorkflowSync } from '../backend/stateStore
 import { useApp } from '../AppContext';
 import { usePMSData, SUB_PHASE } from '../hooks/usePMSData';
 import { RatingWidget } from '../components/RatingWidget';
-import { getEmployeeStage, setEmployeeStage, submitEmployeeStage } from '../backend/ratingsStore';
+import { getEmployeeStage, hydrateRatings, setEmployeeStage, submitEmployeeStageAndPersist } from '../backend/ratingsStore';
 import { resolveCompetenciesForEmployee } from '../backend/competencyResolver';
 import { computeGoalAutoRatings, computeSelfScoreBreakdown, formatFinalRating } from '../backend/scoring';
 
@@ -34,6 +34,34 @@ function normalizeTargetTypeName(value) {
   return String(value || '').trim().toLowerCase().replace(/[_\s-]+/g, ' ');
 }
 
+const TARGET_TYPE_ALIASES = {
+  number: 'tt_default_number',
+  percentage: 'tt_default_percentage',
+  percent: 'tt_default_percentage',
+  currency: 'tt_default_currency',
+  text: 'tt_default_text',
+  free_text: 'tt_default_text',
+  neg_number: 'tt_neg_number',
+  negative_number: 'tt_neg_number',
+  neg_currency: 'tt_neg_currency',
+  negative_currency: 'tt_neg_currency',
+  neg_percentage: 'tt_neg_percentage',
+  negative_percentage: 'tt_neg_percentage',
+  tt_default_number: 'number',
+  tt_default_percentage: 'percentage',
+  tt_default_currency: 'currency',
+  tt_default_text: 'text',
+  tt_neg_number: 'neg_number',
+  tt_neg_currency: 'neg_currency',
+  tt_neg_percentage: 'neg_percentage',
+};
+
+function targetTypeAliasIds(typeId) {
+  const raw = String(typeId || '').trim();
+  const alias = TARGET_TYPE_ALIASES[raw.toLowerCase()];
+  return [raw, alias].filter(Boolean);
+}
+
 function getMergedTargetTypes(config = {}) {
   const stored = Array.isArray(config?.targetTypes) ? config.targetTypes : [];
   const storedById = new Map(stored.map((type) => [type.id, type]));
@@ -45,9 +73,10 @@ function getMergedTargetTypes(config = {}) {
 function getTargetTypeMeta(typeId, targetTypes = []) {
   const raw = String(typeId || '').trim();
   const normalized = normalizeTargetTypeName(raw);
-  return (targetTypes || []).find((type) => type.id === raw)
+  const ids = targetTypeAliasIds(raw);
+  return (targetTypes || []).find((type) => ids.includes(String(type.id || '').trim()))
     || (targetTypes || []).find((type) => normalizeTargetTypeName(type.name) === normalized)
-    || DEFAULT_TARGET_TYPES.find((type) => type.id === raw)
+    || DEFAULT_TARGET_TYPES.find((type) => ids.includes(type.id))
     || DEFAULT_TARGET_TYPES.find((type) => normalizeTargetTypeName(type.name) === normalized)
     || DEFAULT_TARGET_TYPES.find((type) => type.id === 'tt_default_text');
 }
@@ -115,9 +144,9 @@ export default function SelfEvalPage({ embedded = false, overrideEmpCode = '', o
 
   const { ready, config, employees, subPhase, activeSubPhases = [], workflow } = usePMSData(orgKey);
   const employee = findEmployee(employees, actingEmpCode);
-  const myStatus = workflow?.submissions?.[String(actingEmpCode || '').trim().toUpperCase()]?.status || null;
+  const workflowSubmission = workflow?.submissions?.[String(actingEmpCode || '').trim().toUpperCase()] || null;
   const goals = useMemo(() => getEmployeeGoals(orgKey, actingEmpCode), [orgKey, actingEmpCode]);
-  const resolved = useMemo(() => resolveCompetenciesForEmployee(config, employee), [config, employee]);
+  const resolved = useMemo(() => resolveCompetenciesForEmployee(config, employee, workflowSubmission), [config, employee, workflowSubmission]);
   const competencies = resolved.competencies;
   const targetTypes = useMemo(() => getMergedTargetTypes(config), [config]);
 
@@ -127,16 +156,21 @@ export default function SelfEvalPage({ embedded = false, overrideEmpCode = '', o
   const [achievements, setAchievements] = useState(initial.achievements || {});
   const [compScores, setCompScores] = useState(initial.competencyScores || {});
   const [overallComment, setOverallComment] = useState(initial.overallComment || '');
-  const [overallOpen, setOverallOpen] = useState(!!(initial.overallComment || ''));
+  const [overallOpen, setOverallOpen] = useState(true);
   const [saved, setSaved] = useState(!!initial.submittedAt);
+  const [stageMeta, setStageMeta] = useState(initial);
   const [savedMsg, setSavedMsg] = useState('');
+  const [syncError, setSyncError] = useState('');
+  const [submitting, setSubmitting] = useState(false);
   const [submitErrors, setSubmitErrors] = useState([]);
   const [errorsOpen, setErrorsOpen] = useState(false);
   const [softArmed, setSoftArmed] = useState(false);
   const [finalOpen, setFinalOpen] = useState(false);
+  const localEditRef = useRef(false);
+  const activeStageKeyRef = useRef('');
 
   const selfWindowActive = activeSubPhases.includes(SUB_PHASE.SELF_EVALUATION) || subPhase === SUB_PHASE.SELF_EVALUATION;
-  const phaseActive = selfWindowActive || myStatus === 'approved';
+  const phaseActive = selfWindowActive;
   const previewMode = !phaseActive && (isHRAdmin || !!overrideCode);
 
   const bands = useMemo(() => config.autoRatingBands || [], [config.autoRatingBands]);
@@ -147,14 +181,45 @@ export default function SelfEvalPage({ embedded = false, overrideEmpCode = '', o
     itemComments: comments,
     achievements,
     competencyScores: compScores,
+    overallScore: scoreBreakdown.final,
     overallComment,
   });
 
   const onSaveDraft = () => {
+    localEditRef.current = false;
     setEmployeeStage(orgKey, actingEmpCode, 'self', { ...buildPayload(), submittedAt: null, submittedBy: null });
     setSaved(false);
     setSavedMsg('Draft saved.');
   };
+
+  const applyStageToForm = (stage = {}) => {
+    setScores(stage.itemScores || {});
+    setAchievements(stage.achievements || {});
+    setCompScores(stage.competencyScores || {});
+    setOverallComment(stage.overallComment || '');
+    setStageMeta(stage || {});
+    setSaved(!!stage.submittedAt);
+  };
+
+  useEffect(() => {
+    if (!orgKey || !actingEmpCode) return undefined;
+    let cancelled = false;
+    const stageKey = `${orgKey}:${normalizeCode(actingEmpCode)}:self`;
+    if (activeStageKeyRef.current !== stageKey) {
+      activeStageKeyRef.current = stageKey;
+      localEditRef.current = false;
+      applyStageToForm(getEmployeeStage(orgKey, actingEmpCode, 'self') || {});
+      setSavedMsg('');
+      setSyncError('');
+      setSubmitErrors([]);
+      setSoftArmed(false);
+    }
+    void hydrateRatings(orgKey).then(() => {
+      if (cancelled || localEditRef.current) return;
+      applyStageToForm(getEmployeeStage(orgKey, actingEmpCode, 'self') || {});
+    });
+    return () => { cancelled = true; };
+  }, [orgKey, actingEmpCode]);
 
   const group = getEmployeeGroup(config, employee);
   const rateAtKpi = group?.kpiRatingMode !== 'free-text';
@@ -219,13 +284,15 @@ export default function SelfEvalPage({ embedded = false, overrideEmpCode = '', o
     }
     return errors;
   };
-  const onSubmit = () => {
+  const onSubmit = async () => {
+    if (submitting) return;
     const all = validateSelfEvaluation();
     const hard = all.filter((e) => e.severity === 'hard');
     const soft = all.filter((e) => e.severity === 'soft');
     if (hard.length > 0) {
       setSubmitErrors(all);
       setSavedMsg('');
+      setSyncError('');
       setSaved(false);
       setEmployeeStage(orgKey, actingEmpCode, 'self', { ...buildPayload(), submittedAt: null, submittedBy: null });
       return;
@@ -235,13 +302,26 @@ export default function SelfEvalPage({ embedded = false, overrideEmpCode = '', o
       setSubmitErrors(soft);
       setSoftArmed(true);
       setSavedMsg('');
+      setSyncError('');
       setSaved(false);
       return;
     }
-    submitEmployeeStage(orgKey, actingEmpCode, 'self', buildPayload(), actor);
-    setSaved(true);
+    setSubmitting(true);
+    setSavedMsg('');
+    setSyncError('');
+    localEditRef.current = false;
+    const result = await submitEmployeeStageAndPersist(orgKey, actingEmpCode, 'self', buildPayload(), actor);
+    setSubmitting(false);
+    setSaved(!!result?.ok);
     setSubmitErrors([]);
-    setSavedMsg('Self-evaluation submitted.');
+    if (result?.ok) {
+      setSavedMsg(result.pending ? 'Self-evaluation submitted. Sync continues in the background.' : 'Self-evaluation submitted.');
+      setStageMeta(result.stamped || {});
+    } else {
+      const reason = result?.error ? ` Server said: ${result.error}` : '';
+      setStageMeta(result?.stamped || {});
+      setSyncError(`Self-evaluation was saved on this device but could not sync.${reason}`);
+    }
   };
   const scoreBreakdown = computeSelfScoreBreakdown({
     config, goals, scores, rateAtKpi,
@@ -300,21 +380,26 @@ export default function SelfEvalPage({ embedded = false, overrideEmpCode = '', o
   const isSubmittedLocked = saved && validateSelfEvaluation().filter((e) => e.severity === 'hard').length === 0;
   const clearSubmitFeedback = () => {
     if (savedMsg) setSavedMsg('');
+    if (syncError) setSyncError('');
     if (submitErrors.length) setSubmitErrors([]);
   };
   const setScoreValue = (id, value) => {
+    localEditRef.current = true;
     clearSubmitFeedback();
     setScores((prev) => ({ ...prev, [id]: value }));
   };
   const setAchievementValue = (id, value) => {
+    localEditRef.current = true;
     clearSubmitFeedback();
     setAchievements((prev) => ({ ...prev, [id]: value }));
   };
   const setCompetencyScoreValue = (name, value) => {
+    localEditRef.current = true;
     clearSubmitFeedback();
     setCompScores((prev) => ({ ...prev, [name]: value }));
   };
   const setOverallCommentValue = (value) => {
+    localEditRef.current = true;
     clearSubmitFeedback();
     setOverallComment(value);
   };
@@ -344,10 +429,10 @@ export default function SelfEvalPage({ embedded = false, overrideEmpCode = '', o
           </NoticeCard>
         )}
 
-        {initial.completionRequested && !initial.submittedAt && (
+        {stageMeta.completionRequested && !stageMeta.submittedAt && (
           <NoticeCard tone="info" title="Your manager asked you to complete a few things">
-            {initial.completionRequested.note
-              ? `“${initial.completionRequested.note}” — please fill the blanks below and submit again.`
+            {stageMeta.completionRequested.note
+              ? `“${stageMeta.completionRequested.note}” — please fill the blanks below and submit again.`
               : 'Please fill the blank fields below and submit your self-evaluation again.'}
           </NoticeCard>
         )}
@@ -531,11 +616,9 @@ export default function SelfEvalPage({ embedded = false, overrideEmpCode = '', o
         })()}
 
         {/* OVERALL */}
-        <button
-          type="button"
-          onClick={() => setOverallOpen((o) => !o)}
+        <div
           style={{
-            display: 'block', width: '100%', textAlign: 'left', cursor: 'pointer',
+            display: 'block', width: '100%', textAlign: 'left',
             background: 'transparent', border: 'none',
             marginTop: 26, marginBottom: 12, padding: '0 4px', fontFamily: 'inherit',
           }}
@@ -545,29 +628,27 @@ export default function SelfEvalPage({ embedded = false, overrideEmpCode = '', o
             background: '#F1F5F9', color: '#64748B', fontSize: 10.5, fontWeight: 800,
             textTransform: 'uppercase', letterSpacing: '.06em',
           }}>{competencies.length > 0 ? 'Section 3' : 'Section 2'}</div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 6 }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, marginTop: 6 }}>
             <span style={{ fontSize: 17, fontWeight: 800, color: '#0F172A' }}>Overall comment</span>
-            <span style={{
+            <button type="button" onClick={() => setOverallOpen((o) => !o)} style={{
               display: 'inline-flex', alignItems: 'center', gap: 5,
               padding: '3px 10px', borderRadius: 999,
               background: '#EFF6FF', color: '#2563EB', fontSize: 12, fontWeight: 700,
+              border: 0, cursor: 'pointer', fontFamily: 'inherit',
             }}>
               {overallOpen ? 'Hide ▲' : (overallComment ? 'Edit ▼' : 'Add ▼')}
-            </span>
+            </button>
           </div>
-          <div style={{ fontSize: 12.5, color: '#64748B', marginTop: 2 }}>What went well, what you'd improve, what blocked you.</div>
-        </button>
+        </div>
         {overallOpen && (
-          <div style={{ background: '#fff', border: `1px solid ${BORDER}`, borderRadius: 14, padding: 18, marginBottom: 18 }}>
-            <textarea
-              value={overallComment}
-              onChange={(e) => setOverallCommentValue(e.target.value)}
-              disabled={isSubmittedLocked}
-              rows={4}
-              style={{ width: '100%', padding: 12, borderRadius: 8, border: `1px solid ${BORDER}`, fontFamily: 'inherit', fontSize: 13, resize: 'vertical', boxSizing: 'border-box' }}
-              placeholder="Reflect on this cycle…"
-            />
-          </div>
+          <textarea
+            value={overallComment}
+            onChange={(e) => setOverallCommentValue(e.target.value)}
+            disabled={isSubmittedLocked}
+            rows={4}
+            style={{ width: '100%', padding: 12, borderRadius: 12, border: `1px solid ${BORDER}`, fontFamily: 'inherit', fontSize: 13, resize: 'vertical', boxSizing: 'border-box', background: '#fff', marginBottom: 18 }}
+            placeholder="What went well, what you'd improve, what blocked you."
+          />
         )}
 
         <SelfScoreSummary
@@ -609,12 +690,13 @@ export default function SelfEvalPage({ embedded = false, overrideEmpCode = '', o
           )}
           <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
             <button
-              type="button" onClick={onSaveDraft} disabled={isSubmittedLocked}
-              style={btnStyle('ghost', isSubmittedLocked)}>Save draft</button>
+              type="button" onClick={onSaveDraft} disabled={isSubmittedLocked || submitting}
+              style={btnStyle('ghost', isSubmittedLocked || submitting)}>Save draft</button>
             <button
-              type="button" onClick={onSubmit} disabled={isSubmittedLocked}
-              style={btnStyle('primary', isSubmittedLocked)}>{onlySoftPending ? 'Submit anyway' : 'Submit self-evaluation'}</button>
+              type="button" onClick={onSubmit} disabled={isSubmittedLocked || submitting}
+              style={btnStyle('primary', isSubmittedLocked || submitting)}>{isSubmittedLocked ? 'Submitted' : (onlySoftPending ? 'Submit anyway' : 'Submit self-evaluation')}</button>
             {savedMsg && <span style={{ fontSize: 12, color: '#16A34A', fontWeight: 700 }}>{savedMsg}</span>}
+            {syncError && <span style={{ fontSize: 12, color: '#DC2626', fontWeight: 700, maxWidth: 520 }}>{syncError}</span>}
             {isSubmittedLocked && <span style={{ fontSize: 12, color: '#16A34A', fontWeight: 700 }}>Submitted — waiting on manager rating.</span>}
           </div>
         </div>

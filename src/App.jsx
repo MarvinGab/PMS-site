@@ -2,6 +2,7 @@ import { useState, useEffect, Component, lazy, Suspense } from 'react';
 import { AppProvider, useApp } from './AppContext';
 import { readWizardStateSync, syncEmployeeCredentialsForOrg } from './backend/stateStore';
 import { logAuditEvent } from './backend/auditLog';
+import { SESSION_TIMEOUT_EVENT } from './backend/sessionTimeout';
 import LoginPage from './pages/LoginPage';
 import DashboardPage from './pages/DashboardPage';
 import OrganizationsPage from './pages/OrganizationsPage';
@@ -136,14 +137,151 @@ function BootScreen() {
   );
 }
 
+function SessionTimeoutModal({ onCancel, onSignIn }) {
+  useEffect(() => {
+    const onKeyDown = (event) => {
+      if (event.key === 'Escape') onCancel?.();
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [onCancel]);
+
+  return (
+    <div
+      role="presentation"
+      onMouseDown={onCancel}
+      style={{
+        position: 'fixed',
+        inset: 0,
+        zIndex: 10000,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        padding: '24px',
+        background: 'rgba(15, 23, 42, 0.38)',
+        backdropFilter: 'blur(9px)',
+        WebkitBackdropFilter: 'blur(9px)',
+        fontFamily: "'Geist','Inter','Segoe UI',Arial,sans-serif",
+      }}
+    >
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="session-timeout-title"
+        aria-describedby="session-timeout-message"
+        onMouseDown={(event) => event.stopPropagation()}
+        style={{
+          width: '100%',
+          maxWidth: '430px',
+          background: '#FFFFFF',
+          border: '1px solid rgba(226, 232, 240, 0.95)',
+          borderRadius: '18px',
+          boxShadow: '0 28px 80px rgba(15, 23, 42, 0.28)',
+          padding: '26px',
+          color: '#0F172A',
+        }}
+      >
+        <div style={{
+          width: 46,
+          height: 46,
+          borderRadius: '14px',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          marginBottom: '18px',
+          background: 'linear-gradient(135deg, #EEF2FF 0%, #E0F2FE 100%)',
+          border: '1px solid #DBEAFE',
+          color: '#2563EB',
+          fontSize: 24,
+          fontWeight: 800,
+        }}>
+          !
+        </div>
+        <h2
+          id="session-timeout-title"
+          style={{
+            margin: '0 0 8px',
+            fontSize: '22px',
+            lineHeight: 1.2,
+            fontWeight: 800,
+            letterSpacing: 0,
+          }}
+        >
+          Session timed out
+        </h2>
+        <p
+          id="session-timeout-message"
+          style={{
+            margin: '0 0 24px',
+            fontSize: '15px',
+            lineHeight: 1.55,
+            color: '#64748B',
+          }}
+        >
+          Please log in again to continue.
+        </p>
+        <div style={{
+          display: 'flex',
+          justifyContent: 'flex-end',
+          gap: '10px',
+          flexWrap: 'wrap',
+        }}>
+          <button
+            type="button"
+            onClick={onCancel}
+            style={{
+              minWidth: '96px',
+              border: '1px solid #CBD5E1',
+              borderRadius: '10px',
+              background: '#FFFFFF',
+              color: '#334155',
+              padding: '10px 16px',
+              fontSize: '14px',
+              fontWeight: 700,
+              cursor: 'pointer',
+            }}
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={onSignIn}
+            style={{
+              minWidth: '104px',
+              border: '1px solid #2563EB',
+              borderRadius: '10px',
+              background: '#2563EB',
+              color: '#FFFFFF',
+              padding: '10px 16px',
+              fontSize: '14px',
+              fontWeight: 800,
+              cursor: 'pointer',
+              boxShadow: '0 10px 24px rgba(37, 99, 235, 0.28)',
+            }}
+          >
+            Sign in
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function Router() {
-  const { role, orgKey, orgs, authReady, setOrgs, userName } = useApp();
+  const { role, orgKey, orgs, authReady, setOrgs, userName, logout } = useApp();
   const [route, setRoute] = useState(getRoute);
+  const [sessionModalOpen, setSessionModalOpen] = useState(false);
 
   useEffect(() => {
     const h = () => setRoute(getRoute());
     window.addEventListener('hashchange', h);
     return () => window.removeEventListener('hashchange', h);
+  }, []);
+
+  useEffect(() => {
+    const show = () => setSessionModalOpen(true);
+    window.addEventListener(SESSION_TIMEOUT_EVENT, show);
+    return () => window.removeEventListener(SESSION_TIMEOUT_EVENT, show);
   }, []);
 
   useEffect(() => {
@@ -155,30 +293,47 @@ function Router() {
     }
   }, [authReady, role, route]);
 
+  const withSessionModal = (page) => (
+    <>
+      {page}
+      {sessionModalOpen && (
+        <SessionTimeoutModal
+          onCancel={() => setSessionModalOpen(false)}
+          onSignIn={() => {
+            setSessionModalOpen(false);
+            logout?.();
+            window.location.hash = '#login';
+            setRoute('login');
+          }}
+        />
+      )}
+    </>
+  );
+
   if (!authReady) {
-    return <BootScreen />;
+    return withSessionModal(<BootScreen />);
   }
 
   // Public routes (no auth needed)
-  if (route === 'login') return <LoginPage />;
-  if (route === 'employee') return <EmployeePage />;
-  if (route === 'self-eval') return <Suspense fallback={<BootScreen />}><SelfEvalPage /></Suspense>;
-  if (route === 'manager-eval') return <Suspense fallback={<BootScreen />}><ManagerEvalPage /></Suspense>;
+  if (route === 'login') return withSessionModal(<LoginPage />);
+  if (route === 'employee') return withSessionModal(<EmployeePage />);
+  if (route === 'self-eval') return withSessionModal(<Suspense fallback={<BootScreen />}><SelfEvalPage /></Suspense>);
+  if (route === 'manager-eval') return withSessionModal(<Suspense fallback={<BootScreen />}><ManagerEvalPage /></Suspense>);
 
   // Not logged in → redirect to login
   if (!role) {
-    return <LoginPage />;
+    return withSessionModal(<LoginPage />);
   }
 
   // HR admin
   if (role === 'hr-admin') {
     if (route === 'hr-review') {
-      return <Suspense fallback={<BootScreen />}><HRReviewPage /></Suspense>;
+      return withSessionModal(<Suspense fallback={<BootScreen />}><HRReviewPage /></Suspense>);
     }
     const org = orgs.find((o) => o.key === orgKey);
     const orgName = org?.name || 'Assigned Organization';
     if (org?.launched) {
-      return <HRCycleDashboard />;
+      return withSessionModal(<HRCycleDashboard />);
     }
 
     function handleLaunched() {
@@ -224,22 +379,22 @@ function Router() {
       }
     }
 
-    return <PMSWizard orgKeyOverride={orgKey || ''} orgNameOverride={orgName} onLaunched={handleLaunched} />;
+    return withSessionModal(<PMSWizard orgKeyOverride={orgKey || ''} orgNameOverride={orgName} onLaunched={handleLaunched} />);
   }
 
   // Employee route (logged in as employee)
-  if (role === 'employee') return <EmployeePage />;
+  if (role === 'employee') return withSessionModal(<EmployeePage />);
 
   // Super admin routes
-  if (route === 'create-org' || route === 'edit-org') return <CreateOrgPage />;
-  if (route === 'organizations') return <OrganizationsPage />;
-  if (route === 'super-comms') return <SuperAdminCommsPage />;
+  if (route === 'create-org' || route === 'edit-org') return withSessionModal(<CreateOrgPage />);
+  if (route === 'organizations') return withSessionModal(<OrganizationsPage />);
+  if (route === 'super-comms') return withSessionModal(<SuperAdminCommsPage />);
 
   // Keep #dashboard as compatibility, but use the organizations-first admin surface
-  if (route === 'dashboard') return <OrganizationsPage />;
+  if (route === 'dashboard') return withSessionModal(<OrganizationsPage />);
 
   // Default for super admin
-  return <OrganizationsPage />;
+  return withSessionModal(<OrganizationsPage />);
 }
 
 export default function App() {

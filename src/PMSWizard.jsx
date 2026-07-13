@@ -63,11 +63,10 @@ function getNavSteps(config) {
   if (hasLibrary) steps.push({ id: 'kra_library', label: 'KRA Library', desc: 'Build & upload goal library' });
   steps.push({ id: 'limits', label: 'Limits & Rules', desc: 'Counts, weights & permissions' });
   steps.push(
-    { id: 'hierarchy',    label: 'Rating Hierarchy',        desc: 'Who rates whom' },
+    { id: 'hierarchy',    label: 'Rating Flow',             desc: 'Live appraisal flow' },
     { id: 'scale',        label: 'Rating Scale',            desc: 'Points & labels' },
     { id: 'competencies', label: 'Competencies',            desc: 'Behavioural assessment' },
     { id: 'bellcurve',    label: 'Bell Curve',              desc: 'Normalization bands' },
-    { id: 'phases',       label: 'Phase Windows',           desc: 'Cycle dates' },
     { id: 'export',       label: 'Export & Launch',         desc: 'Template & go-live' },
   );
   return steps;
@@ -280,6 +279,8 @@ const EMP_STAGES = [
   { id: 'pending-approval', label: 'Pending Approval',    short: 'Pending Approval', color: '#D97706', bg: '#FFFBEB', border: '#FDE68A' },
   { id: 'self-evaluation',  label: 'Self Evaluation',     short: 'Self Eval',        color: '#0891B2', bg: '#ECFEFF', border: '#A5F3FC' },
   { id: 'mgr-evaluation',   label: 'Manager Evaluation',  short: 'Manager Eval',     color: '#7C3AED', bg: '#F5F3FF', border: '#DDD6FE' },
+  { id: 'hr-review',        label: 'HR Review',           short: 'HR Review',        color: '#EA580C', bg: '#FFF7ED', border: '#FED7AA' },
+  { id: 'calibrated',       label: 'Calibrated',          short: 'Calibrated',       color: '#A21CAF', bg: '#FDF4FF', border: '#F5D0FE' },
   { id: 'completed',        label: 'Completed',           short: 'Completed',        color: '#16A34A', bg: '#F0FDF4', border: '#BBF7D0' },
 ];
 
@@ -307,6 +308,55 @@ function getEmployeeFieldValue(employee, fieldName) {
   const normalizedField = normalizeEmployeeFieldKey(fieldName);
   const matchedKey = Object.keys(employee).find((key) => normalizeEmployeeFieldKey(key) === normalizedField);
   return matchedKey ? String(employee[matchedKey] || '').trim() : '';
+}
+
+function canonicalListValue(values = [], value) {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  return (values || [])
+    .map((item) => String(item?.name || item || '').trim())
+    .filter(Boolean)
+    .find((item) => item.toLowerCase() === raw.toLowerCase()) || raw;
+}
+
+function canonicalizeEmployeeUploadRows(employees = [], config = {}) {
+  const routingColumns = getEmployeeRoutingColumns(config);
+  const groupNames = (config.goalGroups || []).map((group) => String(group.name || '').trim()).filter(Boolean);
+  const gradeLabels = config.gradeEnabled === true ? getActiveGradeLabels(config) : [];
+  const codeMap = new Map();
+  employees.forEach((employee) => {
+    const code = String(employee?.['Employee Code'] || '').trim();
+    if (code) codeMap.set(code.toLowerCase(), code);
+  });
+
+  return (employees || []).map((employee) => {
+    const next = { ...employee };
+    const groupName = getEmployeeFieldValue(next, 'Group Name');
+    if (groupName) {
+      next['Group Name'] = groupName.toUpperCase() === 'NONE'
+        ? 'NONE'
+        : canonicalListValue(groupNames, groupName);
+      if (next['Group Name'] === 'NONE') next._outsidePms = true;
+    }
+
+    routingColumns.forEach((column) => {
+      const raw = getEmployeeFieldValue(next, column.label);
+      if (raw) next[column.label] = canonicalListValue(column.values || [], raw);
+    });
+
+    if (config.gradeEnabled === true) {
+      const grade = getEmployeeFieldValue(next, 'Grade');
+      if (grade) next.Grade = canonicalListValue(gradeLabels, grade);
+    }
+
+    ['Reporting Manager Code', 'L2 Manager Code', 'HOD Code'].forEach((field) => {
+      const raw = getEmployeeFieldValue(next, field);
+      if (!raw) return;
+      next[field] = codeMap.get(raw.toLowerCase()) || raw;
+    });
+
+    return next;
+  });
 }
 
 function isCatchAllGoalGroup(group) {
@@ -418,7 +468,8 @@ function getAssignedGoalLibraryForEmployee(employee, config) {
 }
 
 function attachGoalLibraryToEmployees(employeeResult, config) {
-  const sourceEmployees = employeeResult.employees || [];
+  const sourceEmployees = canonicalizeEmployeeUploadRows(employeeResult.employees || [], config);
+  const normalizedEmployeeResult = { ...employeeResult, employees: sourceEmployees };
   const totalEmployees = employeeResult.count ?? sourceEmployees.length;
   const goalGroups = config.goalGroups || [];
   const deferredGoalGroupNames = normalizeDeferredGoalGroups(config.deferredGoalGroupNames || []);
@@ -509,7 +560,7 @@ function attachGoalLibraryToEmployees(employeeResult, config) {
     }
 
     return {
-      ...employeeResult,
+      ...normalizedEmployeeResult,
       employees,
       groupLinked: true,
       libraryLinked: hasGroupLibraries,
@@ -527,7 +578,7 @@ function attachGoalLibraryToEmployees(employeeResult, config) {
   }
 
   if (!config.goalLibraryData) {
-    return employeeResult;
+    return normalizedEmployeeResult;
   }
 
   const employees = sourceEmployees.map((employee) => {
@@ -541,7 +592,7 @@ function attachGoalLibraryToEmployees(employeeResult, config) {
 
   const assignedCount = employees.filter((employee) => employee.assignedGoalLibraryCount > 0).length;
   return {
-    ...employeeResult,
+    ...normalizedEmployeeResult,
     employees,
     groupLinked: false,
     libraryLinked: true,
@@ -832,14 +883,44 @@ function getGoalLibraryDataSnapshot(goalLibraryData) {
   });
 }
 
+function normalizeGradeList(list) {
+  return (Array.isArray(list) ? list : [])
+    .map((item) => String(item?.name || item || '').trim())
+    .filter(Boolean);
+}
+
+const DEFAULT_GRADE_LABELS = ['G1', 'G2', 'G3', 'G4', 'G5'];
+
+function getActiveGradeLabels(config) {
+  const labels = normalizeGradeList(config?.gradeLabels);
+  return labels.length ? labels : DEFAULT_GRADE_LABELS;
+}
+
+function isGradeConfigValid(config) {
+  if (config.gradeEnabled !== true) return true;
+  const labels = getActiveGradeLabels(config);
+  if (labels.length === 0) return false;
+  const lower = labels.map((item) => item.toLowerCase());
+  return new Set(lower).size === lower.length;
+}
+
 function isEmployeeSettingsValid(config) {
-  return config.managerLevels === 1 || config.managerLevels === 2;
+  const validManager = config.managerLevels === 1 || config.managerLevels === 2;
+  if (!validManager) return false;
+  if (!isGradeConfigValid(config)) return false;
+  return true;
 }
 
 function getEmployeeSettingsSnapshot(config) {
   return JSON.stringify({
     managerLevels: config.managerLevels,
     requireEmail: config.requireEmail !== false,
+    hodEnabled: config.hodEnabled === true,
+    hodDetailedCalibration: config.hodDetailedCalibration === true,
+    gradeEnabled: config.gradeEnabled === true,
+    gradeLabels: config.gradeEnabled === true ? getActiveGradeLabels(config) : [],
+    finalEmployeeAcceptanceEnabled: config.finalEmployeeAcceptanceEnabled === true,
+    emailCommsEnabled: config.emailCommsEnabled === true,
   });
 }
 
@@ -1092,12 +1173,13 @@ function ChoiceCards({ value, options, onChange, columns = 3, disabled = false, 
     <div style={{ display: 'grid', gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))`, gap: compact ? 6 : 8 }}>
       {options.map((opt) => {
         const active = value === opt.id;
+        const optionDisabled = disabled || !!opt.disabled;
         return (
           <button
             key={opt.id}
             type="button"
-            disabled={disabled}
-            onClick={() => onChange(opt.id)}
+            disabled={optionDisabled}
+            onClick={() => { if (!optionDisabled) onChange(opt.id); }}
             style={{
               minHeight: compact ? 38 : 58,
               padding: compact ? '7px 10px' : '10px 12px',
@@ -1105,10 +1187,10 @@ function ChoiceCards({ value, options, onChange, columns = 3, disabled = false, 
               border: `1.5px solid ${active ? '#2563EB' : '#E2E8F0'}`,
               background: active ? '#EFF4FF' : '#fff',
               color: active ? '#1D4ED8' : '#334155',
-              cursor: disabled ? 'not-allowed' : 'pointer',
+              cursor: optionDisabled ? 'not-allowed' : 'pointer',
               fontFamily: 'inherit',
               textAlign: 'left',
-              opacity: disabled ? 0.55 : 1,
+              opacity: optionDisabled ? 0.55 : 1,
             }}
           >
             <div style={{ display: 'flex', alignItems: 'center', gap: 7, fontSize: compact ? 12.5 : 13, fontWeight: 800 }}>
@@ -1901,87 +1983,37 @@ function StepModules({ config, update }) {
   );
 }
 
-/* ── STEP 3: RATING HIERARCHY ──────────────────────────────────────────── */
-function StepHierarchy({ config, update }) {
+/* ── STEP 3: RATING FLOW ───────────────────────────────────────────────── */
+function StepHierarchy() {
   const levels = [
-    { id: 'self',  label: 'Self rating',               desc: 'Employee rates their own KRAs / KPIs' },
-    { id: 'l1',    label: 'L1 Manager rating',         desc: 'Direct reporting manager reviews and rates' },
-    { id: 'l2',    label: 'L2 / Skip-level manager',   desc: 'Second-level manager review — can override L1' },
-    { id: 'hod',   label: 'HOD / Department head',     desc: 'Department head final sign-off' },
-    { id: 'hr',    label: 'HR Normalization',           desc: 'HR reviews and adjusts final ratings' },
-    { id: 'peer',  label: 'Peer feedback',             desc: 'Nominated peers rate collaboration and teamwork' },
-    { id: 'sub',   label: 'Subordinate feedback',      desc: 'Team members rate manager — managers only' },
+    { label: 'Employee self-evaluation', desc: 'Employee scores approved goals during the self-evaluation calendar window.' },
+    { label: 'Manager evaluation', desc: 'Reporting manager scores the employee during the manager-evaluation calendar window.' },
+    { label: 'HR review / calibration', desc: 'HR reviews completed manager ratings, calibrates final scores, and publishes results.' },
+    { label: 'Employee acknowledgement', desc: 'Optional acknowledgement is controlled from Employee Settings and is visible to HR after publish.' },
   ];
-  const toggle = (id) => {
-    const next = (config.ratingLevels || []).includes(id)
-      ? (config.ratingLevels || []).filter(l => l !== id)
-      : [...(config.ratingLevels || []), id];
-    update('ratingLevels', next);
-  };
   return (
     <div>
-      <SectionHead title="Rating hierarchy" sub="Define who rates the employee and in what order. Self and L1 are recommended minimum." />
+      <SectionHead title="Rating flow" sub="This setup reflects the appraisal workflow that is currently enforced in the app." />
+      <Banner type="blue">
+        <span>i</span>
+        <span>
+          Peer, subordinate, skip-level, and custom formula rating flows are not active in the product yet, so they are no longer shown as configurable switches here.
+        </span>
+      </Banner>
       <Card>
-        <CardHead title="Rating levels" badge="Enable / reorder" />
+        <CardHead title="Active workflow" />
         <CardBody>
-          <div style={{ fontSize: 12, fontWeight: 600, color: '#374151', marginBottom: 10, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Active levels</div>
           {levels.map((l, i) => (
-            <div key={l.id} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '9px 0', borderBottom: i < levels.length - 1 ? '1px solid #F1F3F5' : 'none' }}>
+            <div key={l.label} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '9px 0', borderBottom: i < levels.length - 1 ? '1px solid #F1F3F5' : 'none' }}>
               <div style={{ width: 24, height: 24, borderRadius: '50%', background: '#EFF4FF', color: '#2563EB', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 11, fontWeight: 700, flexShrink: 0 }}>
                 {i + 1}
               </div>
               <div style={{ flex: 1 }}>
-                <div style={{ fontSize: 13, fontWeight: 500 }}>{l.label}</div>
+                <div style={{ fontSize: 13, fontWeight: 700, color: '#0F172A' }}>{l.label}</div>
                 <div style={{ fontSize: 11.5, color: '#9CA3AF' }}>{l.desc}</div>
               </div>
-              <Toggle on={(config.ratingLevels || []).includes(l.id)} onChange={() => toggle(l.id)} />
             </div>
           ))}
-        </CardBody>
-      </Card>
-      <Card>
-        <CardHead title="Visibility & override rules" />
-        <CardBody>
-          <Grid3>
-            <Field label="Self rating visible to L1?">
-              <select style={selectStyle} value={config.selfVisibility} onChange={e => update('selfVisibility', e.target.value)}>
-                <option>Yes — always visible</option>
-                <option>Visible after L1 submits</option>
-                <option>Hidden from manager</option>
-              </select>
-            </Field>
-            <Field label="L1 rating visible to employee?">
-              <select style={selectStyle} value={config.l1Visibility} onChange={e => update('l1Visibility', e.target.value)}>
-                <option>After results are published</option>
-                <option>Immediately after L1 submits</option>
-                <option>Never</option>
-              </select>
-            </Field>
-            <Field label="Can manager override self rating?">
-              <select style={selectStyle} value={config.managerOverride} onChange={e => update('managerOverride', e.target.value)}>
-                <option>Yes — full override</option>
-                <option>Yes — within ±1 band</option>
-                <option>No — separate scores</option>
-              </select>
-            </Field>
-          </Grid3>
-          <Grid2>
-            <Field label="Peer feedback visible to employee?">
-              <select style={selectStyle} value={config.peerVisibility} onChange={e => update('peerVisibility', e.target.value)}>
-                <option>Anonymous — aggregated only</option>
-                <option>Named — visible after review</option>
-                <option>Hidden</option>
-              </select>
-            </Field>
-            <Field label="Final rating owner">
-              <select style={selectStyle} value={config.finalRatingOwner} onChange={e => update('finalRatingOwner', e.target.value)}>
-                <option>Weighted average of all levels</option>
-                <option>L1 manager rating</option>
-                <option>HR normalized score</option>
-                <option>Custom formula</option>
-              </select>
-            </Field>
-          </Grid2>
         </CardBody>
       </Card>
     </div>
@@ -2115,6 +2147,7 @@ const FINAL_RATING_DISPLAY_OPTIONS = [
   { id: 'code',          label: 'Rank code',     format: ({ code }) => code },
   { id: 'code-label',    label: 'Rank + label',  format: ({ code, l }) => `${code} - ${l}` },
   { id: 'label',         label: 'Label only',    format: ({ l }) => l },
+  { id: 'decimal',       label: 'Score only',    format: ({ decimal }) => decimal.toFixed(2) },
   { id: 'decimal-code',  label: 'Score + rank',  format: ({ code, decimal }) => `${decimal.toFixed(2)} - ${code}` },
   { id: 'decimal-label', label: 'Score + label', format: ({ l, decimal }) => `${decimal.toFixed(2)} - ${l}` },
 ];
@@ -2159,23 +2192,10 @@ export function getScaleSnapshot(config = {}) {
     scorePrecision: config.scorePrecision || 'half',
     ratingChoiceDisplay: config.ratingChoiceDisplay || 'number-label',
     finalRatingDisplay: config.finalRatingDisplay || 'code-label',
-    commentRequiredAt: config.commentRequiredAt || 'lowest',
     managerRatingVisibleFrom: config.managerRatingVisibleFrom || 'manager-rating',
     finalRatingVisibleFrom: config.finalRatingVisibleFrom || 'hr-review',
   });
 }
-
-const RATING_VISIBILITY_PHASES = {
-  manager: [
-    { id: 'manager-rating', label: 'After manager submits their rating' },
-    { id: 'hr-review',      label: 'After HR review & publish (coming soon)', unavailable: true },
-    { id: 'never',          label: 'Never (always hidden)' },
-  ],
-  final: [
-    { id: 'hr-review', label: 'After HR review & publish (coming soon)', unavailable: true },
-    { id: 'never',     label: 'Never (always hidden)' },
-  ],
-};
 
 function isScaleConfigValid(config = {}) {
   const scale = getScaleLevels(config);
@@ -2237,7 +2257,9 @@ export function StepScale({ config, update, hideHead, hideApplyBar = false }) {
     applyPreset(points);
   };
   const scaleValid = isScaleConfigValid(config);
-  const finalRatingDisplay = config.finalRatingDisplay || 'code-label';
+  const finalRatingDisplay = FINAL_RATING_DISPLAY_OPTIONS.some((opt) => opt.id === config.finalRatingDisplay)
+    ? config.finalRatingDisplay
+    : 'code-label';
   const sampleFormatter = FINAL_RATING_DISPLAY_OPTIONS.find((o) => o.id === finalRatingDisplay) || FINAL_RATING_DISPLAY_OPTIONS[1];
   const scaleApplied = scaleValid && config.scaleAppliedSnapshot === getScaleSnapshot(config);
   const inputMode = config.scoreInputMode || 'dropdown';
@@ -2740,7 +2762,7 @@ export function StepScale({ config, update, hideHead, hideApplyBar = false }) {
           <div style={{ marginBottom: 18 }}>
             <div style={{ fontSize: 12, fontWeight: 800, color: '#64748B', textTransform: 'uppercase', letterSpacing: '.04em', marginBottom: 6 }}>Final rating display</div>
             <div style={{ fontSize: 12, color: '#6B7280', marginBottom: 12, lineHeight: 1.5 }}>
-              Choose the format used in reports, employee pages, and manager summaries.
+              Choose the format used in reports, employee pages, and manager summaries. The system calculates a decimal score first, maps it to a final rating band, then displays it in the format selected here.
             </div>
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 8, marginBottom: 12 }}>
               {(() => {
@@ -2803,15 +2825,7 @@ export function StepScale({ config, update, hideHead, hideApplyBar = false }) {
 
           <div style={{ borderTop: '1px solid #F1F3F5', paddingTop: 16 }}>
             <div style={{ fontSize: 12, fontWeight: 800, color: '#64748B', textTransform: 'uppercase', letterSpacing: '.04em', marginBottom: 12 }}>Score handling</div>
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: 12 }}>
-              <Field label="Mandatory comment if score at/below">
-                <select style={selectStyle} value={config.commentRequiredAt || 'lowest'} onChange={(e) => update('commentRequiredAt', e.target.value)}>
-                  <option value="lowest">Lowest point only</option>
-                  <option value="below-mid">Below midpoint</option>
-                  <option value="always">Always mandatory</option>
-                  <option value="never">Not required</option>
-                </select>
-              </Field>
+            <div style={{ display: 'grid', gridTemplateColumns: 'minmax(260px, 420px)', gap: 12 }}>
               <Field label="Manager comments during rating">
                 <select style={selectStyle} value={config.managerCommentMode || 'overall'} onChange={(e) => update('managerCommentMode', e.target.value)}>
                   <option value="overall">One overall comment only</option>
@@ -2825,32 +2839,22 @@ export function StepScale({ config, update, hideHead, hideApplyBar = false }) {
           <div style={{ borderTop: '1px solid #F1F3F5', paddingTop: 16, marginTop: 16 }}>
             <div style={{ fontSize: 12, fontWeight: 800, color: '#64748B', textTransform: 'uppercase', letterSpacing: '.04em', marginBottom: 6 }}>Visibility to employee</div>
             <div style={{ fontSize: 12, color: '#6B7280', marginBottom: 12, lineHeight: 1.5 }}>
-              Choose the cycle phase that unlocks each rating on the employee page. Until that phase, the cell shows <em>"Awaiting review"</em>.
+              These controls match the current published employee score page. Phase-based visibility timing is not configurable yet.
             </div>
             <div style={{ display: 'grid', gap: 10 }}>
-              {[
-                { key: 'managerRatingVisibleFrom', title: 'Manager rating visible from', desc: 'When the employee starts seeing the manager\'s score.',          options: RATING_VISIBILITY_PHASES.manager, fallback: 'manager-rating' },
-                { key: 'finalRatingVisibleFrom',   title: 'Final rating visible from',   desc: 'When the employee starts seeing the calibrated final rating.', options: RATING_VISIBILITY_PHASES.final,   fallback: 'hr-review'       },
-              ].map((opt) => {
-                const value = config[opt.key] || opt.fallback;
-                return (
-                  <div key={opt.key} style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(260px, 320px)', gap: 12, alignItems: 'center', padding: '10px 12px', border: '1px solid #E2E8F0', borderRadius: 10, background: '#fff' }}>
-                    <div style={{ minWidth: 0 }}>
-                      <div style={{ fontSize: 12.5, fontWeight: 800, color: '#0F172A' }}>{opt.title}</div>
-                      <div style={{ marginTop: 3, fontSize: 11.5, color: '#64748B', lineHeight: 1.5 }}>{opt.desc}</div>
-                    </div>
-                    <select
-                      style={selectStyle}
-                      value={value}
-                      onChange={(e) => update(opt.key, e.target.value)}
-                    >
-                      {opt.options.map((phase) => (
-                        <option key={phase.id} value={phase.id} disabled={!!phase.unavailable}>{phase.label}</option>
-                      ))}
-                    </select>
-                  </div>
-                );
-              })}
+              <TogRow
+                label="Show manager rating after publish"
+                desc="When off, the employee's published score page hides manager score and achievement columns."
+                on={(config.managerRatingVisibleFrom || 'manager-rating') !== 'never'}
+                onChange={(v) => update('managerRatingVisibleFrom', v ? 'manager-rating' : 'never')}
+              />
+              <TogRow
+                label="Show final rating after publish"
+                desc="When off, the employee's published score page hides the calibrated final score."
+                last
+                on={(config.finalRatingVisibleFrom || 'hr-review') !== 'never'}
+                onChange={(v) => update('finalRatingVisibleFrom', v ? 'hr-review' : 'never')}
+              />
             </div>
           </div>
           {!hideApplyBar && (
@@ -8379,12 +8383,51 @@ function StepKRALibrary({ config, update }) {
 }
 
 /* ── STEP 4: EMPLOYEE SETTINGS ───────────────────────────────────────────── */
+function GradeChips({ value, onChange }) {
+  const labels = normalizeGradeList(value);
+  const list = labels.length ? labels : [''];
+  const duplicate = list.filter(Boolean).some((item, idx, arr) => arr.findIndex((v) => v.toLowerCase() === item.toLowerCase()) !== idx);
+  const setAt = (idx, next) => { const copy = [...list]; copy[idx] = next; onChange(copy); };
+  const removeAt = (idx) => onChange(list.filter((_, i) => i !== idx));
+  const add = () => {
+    const used = new Set(list.map((item) => String(item || '').trim().toLowerCase()).filter(Boolean));
+    let n = list.length + 1;
+    let next = `G${n}`;
+    while (used.has(next.toLowerCase())) {
+      n += 1;
+      next = `G${n}`;
+    }
+    onChange([...list, next]);
+  };
+  return (
+    <div>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+        {list.map((label, idx) => (
+          <div key={idx} style={{ display: 'flex', alignItems: 'center', background: '#fff', border: '1.5px solid #D9E2EC', borderRadius: 9, overflow: 'hidden' }}>
+            <span style={{ width: 28, height: 38, display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#F1F5F9', color: '#64748B', fontSize: 11.5, fontWeight: 700, borderRight: '1px solid #E2E8F0' }}>{idx + 1}</span>
+            <input
+              value={label}
+              onChange={(e) => setAt(idx, e.target.value)}
+              placeholder={`Grade ${idx + 1}`}
+              style={{ width: 96, border: 'none', outline: 'none', padding: '8px 10px', fontSize: 13, fontWeight: 600, color: '#0D1117', background: 'transparent', fontFamily: 'inherit' }}
+            />
+            <button type="button" onClick={() => removeAt(idx)} disabled={list.length <= 1} style={{ width: 32, height: 38, border: 'none', borderLeft: '1px solid #EEF2F7', background: 'transparent', color: list.length <= 1 ? '#CBD5E1' : '#94A3B8', cursor: list.length <= 1 ? 'default' : 'pointer', fontSize: 16, lineHeight: 1, fontFamily: 'inherit' }}>×</button>
+          </div>
+        ))}
+        <button type="button" onClick={add} style={{ display: 'flex', alignItems: 'center', gap: 5, height: 41, padding: '0 14px', borderRadius: 9, border: '1.5px dashed #BFDBFE', background: '#F5F9FF', color: '#2563EB', fontSize: 12.5, fontWeight: 700, cursor: 'pointer', fontFamily: 'inherit' }}>+ Add grade</button>
+      </div>
+      {duplicate && <div style={{ color: '#DC2626', fontSize: 12, fontWeight: 700, marginTop: 10 }}>Grade labels must be unique.</div>}
+    </div>
+  );
+}
+
 function StepEmployeeSettings({ config, update }) {
   const isValidManagerSetup = isEmployeeSettingsValid(config);
   const settingsApplied = isValidManagerSetup && config.empSettingsAppliedSnapshot === getEmployeeSettingsSnapshot(config);
   const routingColumns = getEmployeeRoutingColumns(config);
   const routingColumnLabels = routingColumns.map(column => column.label);
   const hasGoalGroups = (config.goalGroups || []).length > 0;
+  const sharedGradeLabels = getActiveGradeLabels(config);
   return (
     <div>
       <SectionHead title="Employee settings" sub="Configure manager fields and any routing columns needed before upload." />
@@ -8418,6 +8461,129 @@ function StepEmployeeSettings({ config, update }) {
         </CardBody>
       </Card>
 
+      <Card>
+        <CardHead title="HOD calibration" />
+        <CardBody>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16 }}>
+            <div>
+              <div style={{ fontSize: 13.5, fontWeight: 600, color: '#0D1117', marginBottom: 2 }}>Enable HOD mapping</div>
+              <div style={{ fontSize: 12.5, color: '#64748B', lineHeight: 1.6 }}>
+                Adds HOD Code to the upload. HODs calibrate only employees mapped to their code during HR review.
+              </div>
+            </div>
+            <Toggle on={config.hodEnabled === true} onChange={v => update('hodEnabled', v)} />
+          </div>
+          {config.hodEnabled === true && (
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16, marginTop: 16, paddingTop: 16, borderTop: '1px solid #E2E8F0' }}>
+              <div>
+                <div style={{ fontSize: 13.5, fontWeight: 600, color: '#0D1117', marginBottom: 2 }}>Allow detailed HOD calibration</div>
+                <div style={{ fontSize: 12.5, color: '#64748B', lineHeight: 1.6 }}>
+                  Lets HODs open employee details and set an HOD calibrated rating for employees mapped to them. HR final calibration can still override it.
+                </div>
+              </div>
+              <Toggle on={config.hodDetailedCalibration === true} onChange={v => update('hodDetailedCalibration', v)} />
+            </div>
+          )}
+        </CardBody>
+      </Card>
+
+      <Card>
+        <CardHead title="Grade setup" />
+        <CardBody>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16, marginBottom: config.gradeEnabled === true ? 14 : 0 }}>
+            <div>
+              <div style={{ fontSize: 13.5, fontWeight: 600, color: '#0D1117', marginBottom: 2 }}>Enable Grade</div>
+              <div style={{ fontSize: 12.5, color: '#64748B', lineHeight: 1.6 }}>
+                Adds Grade to employee upload and makes it available as a filter in HOD calibration, HR review, bell curve, reports, and exports.
+              </div>
+            </div>
+            <Toggle
+              on={config.gradeEnabled === true}
+              onChange={v => {
+                if (v && normalizeGradeList(config.gradeLabels).length === 0) update('gradeLabels', DEFAULT_GRADE_LABELS);
+                update('gradeEnabled', v);
+              }}
+            />
+          </div>
+          {config.gradeEnabled === true && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+              <div>
+                <div style={{ fontSize: 12, fontWeight: 700, color: '#374151', marginBottom: 8 }}>Define grades</div>
+                <GradeChips value={sharedGradeLabels} onChange={(labels) => update('gradeLabels', labels)} />
+              </div>
+              <div style={{ padding: '10px 12px', borderRadius: 9, border: '1px solid #E2E8F0', background: '#F8FAFC', fontSize: 12.5, color: '#64748B', lineHeight: 1.55 }}>
+                The upload sheet will include a <strong style={{ color: '#334155' }}>Grade</strong> column. Blank values stay ungraded; filled values must match one of the grades above.
+              </div>
+            </div>
+          )}
+        </CardBody>
+      </Card>
+
+      {hasGoalGroups && (
+        <Card>
+          <CardHead title="Groups & attributes" />
+          <CardBody>
+            <div style={{ fontSize: 12.5, color: '#64748B', lineHeight: 1.6, marginBottom: 14 }}>
+              The groups you set up and the employee attributes that route people into each one.
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+              {(config.goalGroups || []).map((g, idx) => {
+                const name = String(g.name || '').trim() || `Group ${idx + 1}`;
+                const attr = String(g.segmentAttr || '').trim();
+                const values = (g.segmentValues || []).map(v => String(v || '').trim()).filter(Boolean);
+                const catchAll = isCatchAllGoalGroup(g);
+                return (
+                  <div key={idx} style={{ padding: '12px 14px', borderRadius: 10, border: '1px solid #E9EEF5', background: '#F8FAFC' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: catchAll ? 0 : 8 }}>
+                      <span style={{ fontSize: 13.5, fontWeight: 700, color: '#0D1117' }}>{name}</span>
+                      {catchAll && <span style={{ fontSize: 11, color: '#64748B', background: '#EEF2F7', padding: '2px 8px', borderRadius: 10 }}>Catches everyone not matched above</span>}
+                    </div>
+                    {!catchAll && (
+                      <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 6 }}>
+                        <span style={{ fontSize: 12, color: '#64748B', fontWeight: 600 }}>{attr}:</span>
+                        {values.map((v, i) => (
+                          <span key={i} style={{ fontSize: 12, fontWeight: 500, color: '#1e40af', background: '#EFF4FF', border: '1px solid #BFCFFE', borderRadius: 7, padding: '3px 9px' }}>{v}</span>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </CardBody>
+        </Card>
+      )}
+
+      <Card>
+        <CardHead title="Final score acceptance" />
+        <CardBody>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16 }}>
+            <div>
+              <div style={{ fontSize: 13.5, fontWeight: 600, color: '#0D1117', marginBottom: 2 }}>Final employee acceptance</div>
+              <div style={{ fontSize: 12.5, color: '#64748B', lineHeight: 1.6 }}>
+                When enabled, employees must accept or reject their published final score. Rejections require a reason.
+              </div>
+            </div>
+            <Toggle on={config.finalEmployeeAcceptanceEnabled === true} onChange={v => update('finalEmployeeAcceptanceEnabled', v)} />
+          </div>
+        </CardBody>
+      </Card>
+
+      <Card>
+        <CardHead title="Communication channels" />
+        <CardBody>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16 }}>
+            <div>
+              <div style={{ fontSize: 13.5, fontWeight: 600, color: '#0D1117', marginBottom: 2 }}>Send communications by email too</div>
+              <div style={{ fontSize: 12.5, color: '#64748B', lineHeight: 1.6 }}>
+                When on, every in-app notification (goal creation, approvals, self-evaluation, results, acknowledgement) is also emailed to the recipient. When off, notifications stay in-app only.
+              </div>
+            </div>
+            <Toggle on={config.emailCommsEnabled === true} onChange={v => update('emailCommsEnabled', v)} />
+          </div>
+        </CardBody>
+      </Card>
+
       {/* Card 2: Email */}
       <Card>
         <CardHead title="Email address" />
@@ -8440,10 +8606,13 @@ function StepEmployeeSettings({ config, update }) {
         Employee Code, Employee Name{config.requireEmail !== false ? ', Email ID' : ''}
         {hasGoalGroups ? ', Group Name' : ''}
         {routingColumnLabels.length > 0 ? `, ${routingColumnLabels.join(', ')}` : ''}
-        {', '}Reporting Manager Code, Reporting Manager Name{config.requireEmail !== false ? ', Reporting Manager Email' : ''}
-        {config.managerLevels >= 2 ? ', L2 Manager Code (optional), L2 Manager Name (optional)' : ''}.
+        {config.gradeEnabled === true ? ', Grade' : ''}
+        {', '}Reporting Manager Code
+        {config.managerLevels >= 2 ? ', L2 Manager Code (optional)' : ''}
+        {config.hodEnabled === true ? ', HOD Code (optional)' : ''}.
         {hasGoalGroups ? ' Group Name is mandatory and must match a configured group exactly.' : ''}
         {routingColumnLabels.length > 0 ? ` These routing field${routingColumnLabels.length > 1 ? 's' : ''} must match the library tagging values for that group.` : ''}
+        {config.gradeEnabled === true ? ' Grade must match the configured grade list when filled.' : ''}
       </div>
 
       <div style={{ marginTop: 18, padding: '14px 16px', borderRadius: 10, background: settingsApplied ? '#F0FDF4' : '#EFF6FF', border: `1.5px solid ${settingsApplied ? '#86EFAC' : '#BFDBFE'}`, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16 }}>
@@ -8554,6 +8723,12 @@ function StepEmployeeUpload({ config, update, orgKey }) {
         ? `${employee.assignedGoalLibraryName} (${employee.assignedGoalLibraryCount || 0})`
         : 'No library',
     }] : []),
+    ...(config.gradeEnabled === true ? [{
+      key: 'grade',
+      label: 'Grade',
+      width: '0.8fr',
+      render: (employee) => getEmployeeFieldValue(employee, 'Grade') || <span style={{ color: '#9CA3AF' }}>Ungraded</span>,
+    }] : []),
     { key: 'manager', label: 'Manager', width: '1fr', render: (employee) => {
       const code = employee['Reporting Manager Code'] || '';
       if (!code) return '—';
@@ -8562,6 +8737,19 @@ function StepEmployeeUpload({ config, update, orgKey }) {
       const name = found?.['Employee Name'] || String(employee['Reporting Manager Name'] || '').trim();
       return name ? <span>{name}<span style={{ display: 'block', fontSize: 10.5, color: '#94A3B8', fontFamily: 'monospace' }}>{code}</span></span> : code;
     }},
+    ...(config.hodEnabled === true ? [{
+      key: 'hod',
+      label: 'HOD',
+      width: '1fr',
+      render: (employee) => {
+        const code = getEmployeeFieldValue(employee, 'HOD Code');
+        if (!code) return '—';
+        const allEmps = uploadState?.result?.employees || [];
+        const found = allEmps.find(e => String(e['Employee Code'] || '').trim().toLowerCase() === code.trim().toLowerCase());
+        const name = found?.['Employee Name'] || code;
+        return <span>{name}<span style={{ display: 'block', fontSize: 10.5, color: '#94A3B8', fontFamily: 'monospace' }}>{code}</span></span>;
+      },
+    }] : []),
   ] : [];
   const previewGridTemplate = previewColumns.map(column => column.width).join(' ');
   const getIssueRowLabel = (issue) => (typeof issue?.row === 'number' ? `Row ${issue.row}` : (issue?.row || 'Summary'));
@@ -8590,11 +8778,25 @@ function StepEmployeeUpload({ config, update, orgKey }) {
       const missingGroupNameColumn = hasGoalGroups && !parsed.headers.some(h =>
         normalizeEmployeeFieldKey(h) === 'groupname'
       );
+      const missingGradeColumn = config.gradeEnabled === true && !parsed.headers.some(h =>
+        normalizeEmployeeFieldKey(h) === 'grade'
+      );
+      const missingHodCodeColumn = config.hodEnabled === true && !parsed.headers.some(h =>
+        normalizeEmployeeFieldKey(h) === 'hodcode'
+      );
       const { errors, warnings } = validateEmployeeData(parsed.employees, config);
       const headerErrors = [
         ...(missingGroupNameColumn ? [{
           row: 1, code: 'HEADER', field: 'group_name_header',
           message: 'Missing "Group Name" column. Download a fresh template — this column is required to assign employees to the correct goal group.',
+        }] : []),
+        ...(missingGradeColumn ? [{
+          row: 1, code: 'HEADER', field: 'grade_header',
+          message: 'Missing "Grade" column. Download a fresh template — this column is required when Grade is enabled.',
+        }] : []),
+        ...(missingHodCodeColumn ? [{
+          row: 1, code: 'HEADER', field: 'hod_code_header',
+          message: 'Missing "HOD Code" column. Download a fresh template — this column is required when HOD mapping is enabled.',
         }] : []),
         ...missingRoutingColumns.map(column => ({
           row: 1, code: 'HEADER', field: 'routing_header',
@@ -8674,7 +8876,7 @@ function StepEmployeeUpload({ config, update, orgKey }) {
         <div style={{ padding: '13px 20px', borderBottom: '1px solid #E9EDF2', display: 'flex', alignItems: 'center', gap: 14, flexWrap: 'wrap' }}>
           <div style={{ fontSize: 13.5, fontWeight: 600, color: '#0D1117', flexShrink: 0 }}>Import from Excel</div>
           <div style={{ fontSize: 12.5, color: '#64748B', lineHeight: 1.6 }}>
-            Download the template → fill in employee details, manager mapping{hasGoalGroups ? ', Group Name' : ''}{routingColumns.length > 0 ? ', and routing fields' : ''} → upload back. Each upload replaces the current employee list; it does not append another group on top.
+            Download the template → fill in employee details, manager mapping{hasGoalGroups ? ', Group Name' : ''}{routingColumns.length > 0 ? ', routing fields' : ''}{config.gradeEnabled === true ? ', Grade' : ''}{config.hodEnabled === true ? ', and HOD Code' : ''} → upload back. Each upload replaces the current employee list; it does not append another group on top.
           </div>
         </div>
         <CardBody>
@@ -10173,6 +10375,13 @@ function validateCompetencyConfig(config) {
   const errors = [];
   const byGroup = {};
   const byRole = {};
+  const maxComp = Number(config.maxCompetencies);
+  if (!Number.isFinite(maxComp) || maxComp < 1) errors.push('Max competencies per employee must be at least 1.');
+  const weight = Number(config.competencyWeight);
+  if (!Number.isFinite(weight) || weight < 0 || weight > 100) errors.push('Competency weight must be between 0 and 100.');
+  if (config.employeeCanEditCompetencies === true) {
+    return { errors: [...new Set(errors)], byGroup, byRole };
+  }
   const addGroupError = (gid, msg) => {
     (byGroup[gid] = byGroup[gid] || []).push(msg);
     errors.push(msg);
@@ -10186,8 +10395,6 @@ function validateCompetencyConfig(config) {
   if (scope === 'org') {
     const list = (config.selectedCompetencies || []).filter(Boolean);
     if (list.length === 0) errors.push('Pick at least one competency or turn competency assessment off.');
-    const w = Number(config.competencyWeight);
-    if (!Number.isFinite(w) || w < 0 || w > 100) errors.push('Competency weight must be between 0 and 100.');
     return { errors, byGroup, byRole };
   }
   const groups = config.goalGroups || [];
@@ -10312,18 +10519,18 @@ export function StepCompetencies({ config, update, hideHead, hideApplyBar = fals
   ];
   const ratedByValue = config.competencyAllowSelfRate === false
     ? 'manager'
-    : config.competencyRatedBy === 'self-manager-peer'
-      ? 'self-manager-peer'
-      : 'self-manager';
+    : 'self-manager';
   const setRatedBy = (value) => {
+    if (value === 'self-manager-peer') return;
     update('competencyRatedBy', value);
     update('competencyAllowSelfRate', value !== 'manager');
   };
   const ratedByOptions = [
     { id: 'manager', label: 'Manager only', desc: 'Employees view the list, managers score' },
     { id: 'self-manager', label: 'Employee + manager', desc: 'Employee self-rates first' },
-    { id: 'self-manager-peer', label: 'Employee + manager + peers', desc: 'Use when peer input is part of the cycle' },
+    { id: 'self-manager-peer', label: 'Employee + manager + peers', desc: 'Coming later — peer workflow is not active yet', disabled: true },
   ];
+  const employeeCanEditCompetencies = config.employeeCanEditCompetencies === true;
 
   return (
     <div>
@@ -10335,15 +10542,27 @@ export function StepCompetencies({ config, update, hideHead, hideApplyBar = fals
           {enabled && (
             <div style={{ marginTop: 14 }}>
               <div style={{ height: 1, background: '#F1F3F5', margin: '10px 0 14px' }} />
-              <div style={{ display: 'grid', gridTemplateColumns: 'minmax(220px, .8fr) minmax(320px, 1.4fr) minmax(150px, .45fr)', gap: 14, marginBottom: 16, alignItems: 'start' }}>
-                <Field label="Recommendations" hint="Only changes suggested chips below. The final list is what you select.">
-                  <select style={selectStyle} value={config.competencyType || 'behavioural'} onChange={(e) => update('competencyType', e.target.value)}>
-                    {competencyTypeOptions.map((opt) => (
-                      <option key={opt.id} value={opt.id}>{opt.label}</option>
-                    ))}
-                  </select>
-                </Field>
-                <Field label="Who scores competencies">
+              <TogRow
+                label="Can employee edit/add own competencies?"
+                desc="When on, employees create their competency list during goal creation. The max per employee limit below is enforced."
+                on={employeeCanEditCompetencies}
+                onChange={(v) => update('__mergeConfig', {
+                  employeeCanEditCompetencies: v,
+                  ...(v ? { competencyRatedBy: 'self-manager', competencyAllowSelfRate: true } : {}),
+                })}
+              />
+              <div style={{ height: 1, background: '#F1F3F5', margin: '14px 0' }} />
+              <div style={{ display: 'grid', gridTemplateColumns: employeeCanEditCompetencies ? 'minmax(150px, 220px)' : 'minmax(220px, .8fr) minmax(320px, 1.4fr) minmax(150px, .45fr)', gap: 14, marginBottom: 16, alignItems: 'start' }}>
+                {!employeeCanEditCompetencies && (
+                  <Field label="Recommendations" hint="Only changes suggested chips below. The final list is what you select.">
+                    <select style={selectStyle} value={config.competencyType || 'behavioural'} onChange={(e) => update('competencyType', e.target.value)}>
+                      {competencyTypeOptions.map((opt) => (
+                        <option key={opt.id} value={opt.id}>{opt.label}</option>
+                      ))}
+                    </select>
+                  </Field>
+                )}
+                {!employeeCanEditCompetencies && <Field label="Who scores competencies">
                   <ChoiceCards
                     value={ratedByValue}
                     options={ratedByOptions}
@@ -10351,14 +10570,14 @@ export function StepCompetencies({ config, update, hideHead, hideApplyBar = fals
                     columns={3}
                     compact
                   />
-                </Field>
+                </Field>}
                 <Field label="Max per employee">
                   <input style={{ ...inputStyle, maxWidth: 180 }} type="number" value={config.maxCompetencies ?? 5} min={1} max={15} onChange={(e) => update('maxCompetencies', Number(e.target.value))} />
                 </Field>
               </div>
 
               {/* Scope picker */}
-              <div style={{ marginTop: 6, marginBottom: 14 }}>
+              {!employeeCanEditCompetencies && <div style={{ marginTop: 6, marginBottom: 14 }}>
                 <div style={{ fontSize: 11, fontWeight: 900, color: '#64748B', textTransform: 'uppercase', letterSpacing: '.04em', marginBottom: 8 }}>Assignment scope</div>
                 <div style={{ display: 'inline-flex', border: '1px solid #E2E8F0', borderRadius: 10, overflow: 'hidden', background: '#F8FAFC' }}>
                   {[
@@ -10385,11 +10604,11 @@ export function StepCompetencies({ config, update, hideHead, hideApplyBar = fals
                     No employees uploaded yet. Role overrides only show designations that exist in the roster — finish the Employee Upload step to see them.
                   </div>
                 )}
-              </div>
+              </div>}
 
-              <CompetencyUploadBar config={config} update={update} scope={scope} />
+              {!employeeCanEditCompetencies && <CompetencyUploadBar config={config} update={update} scope={scope} />}
 
-              {scope === 'org' && (
+              {!employeeCanEditCompetencies && scope === 'org' && (
                 <OrgCompetencyEditor
                   config={config}
                   libraries={libraries}
@@ -10401,7 +10620,7 @@ export function StepCompetencies({ config, update, hideHead, hideApplyBar = fals
                   onRemoveCustom={removeCustom}
                 />
               )}
-              {scope === 'group' && (
+              {!employeeCanEditCompetencies && scope === 'group' && (
                 <GroupCompetencyEditor
                   config={config}
                   groups={groups}
@@ -10413,7 +10632,7 @@ export function StepCompetencies({ config, update, hideHead, hideApplyBar = fals
                   onRemoveCustom={removeCustom}
                 />
               )}
-              {scope === 'group_role' && (
+              {!employeeCanEditCompetencies && scope === 'group_role' && (
                 <GroupRoleCompetencyEditor
                   config={config}
                   groups={groups}
@@ -10427,6 +10646,11 @@ export function StepCompetencies({ config, update, hideHead, hideApplyBar = fals
                   onAddCustom={addCustom}
                   onRemoveCustom={removeCustom}
                 />
+              )}
+              {employeeCanEditCompetencies && (
+                <div style={{ padding: '12px 14px', borderRadius: 12, border: '1px solid #BFDBFE', background: '#EFF6FF', color: '#1E40AF', fontSize: 12.5, fontWeight: 700, lineHeight: 1.5 }}>
+                  Employees will create their own competency list during goal creation. The system requires at least one competency and caps the list at {Number(config.maxCompetencies) || 1}.
+                </div>
               )}
 
               {validation.errors.length > 0 && (
@@ -11184,7 +11408,7 @@ export function getBellCurveSnapshot(config = {}) {
   });
 }
 
-function BellChart({ bands, tolerances, scale, max }) {
+function BellChart({ bands, tolerances, scale, max, scoreMode = false, fmtRange }) {
   const [mounted, setMounted] = useState(false);
   useEffect(() => {
     const t = setTimeout(() => setMounted(true), 16);
@@ -11249,7 +11473,7 @@ function BellChart({ bands, tolerances, scale, max }) {
                 maxWidth: '100%', overflow: 'hidden', textOverflow: 'ellipsis',
                 ...fadeIn,
               }}>
-                <div style={{ fontWeight: 800, color: '#334155' }}>{scale[i].n}</div>
+                <div style={{ fontWeight: 800, color: '#334155' }}>{scoreMode && fmtRange ? fmtRange(scale[i].n) : scale[i].n}</div>
                 <div title={scale[i].l} style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{scale[i].l}</div>
               </div>
             </div>
@@ -11267,6 +11491,12 @@ export function StepBellCurve({ config, update, hideHead, hideApplyBar = false }
   const tolerances = getBellTolerances(config);
   const total = bands.reduce((sum, value) => sum + (Number(value) || 0), 0);
   const max = Math.max(...bands.map(Number), 1);
+  // Bell curve targets are rating-band targets. Decimal scores are handled by
+  // the score-to-rating bands and the HR score histogram, not by this chart.
+  const scoreMode = false;
+  const rangeByN = {};
+  getMergedRankRanges(scale, config.scaleRankRanges || {}).forEach((r) => { rangeByN[r.n] = r; });
+  const fmtRange = (n) => { const r = rangeByN[n]; return r ? `${+r.from}–${+r.to}` : ''; };
   const activePreset = config.bellPreset || 'standard';
   const updateBand = (index, value) => {
     const next = [...bands];
@@ -11366,7 +11596,7 @@ export function StepBellCurve({ config, update, hideHead, hideApplyBar = false }
                 <div style={{ fontSize: 12, fontWeight: 700, color: '#374151', textTransform: 'uppercase', letterSpacing: '0.04em' }}>Distribution bands</div>
                 <div style={{ fontSize: 12, fontWeight: 800, color: total === 100 ? '#16A34A' : '#B91C1C' }}>Total: {total}%</div>
               </div>
-              <BellChart bands={bands} tolerances={tolerances} scale={scale} max={max} />
+              <BellChart bands={bands} tolerances={tolerances} scale={scale} max={max} scoreMode={scoreMode} fmtRange={fmtRange} />
 
               <div style={{ fontSize: 11, color: '#64748B', marginBottom: 12, display: 'flex', alignItems: 'center', gap: 6 }}>
                 <span style={{ display: 'inline-block', width: 12, height: 4, border: '1.5px dashed #16A34A', background: 'rgba(22, 163, 74, 0.08)' }} />
@@ -11374,7 +11604,7 @@ export function StepBellCurve({ config, update, hideHead, hideApplyBar = false }
               </div>
               <div style={{ border: '1px solid #E2E8F0', borderRadius: 10, overflow: 'hidden' }}>
                 <div style={{ display: 'grid', gridTemplateColumns: '110px 1fr 1fr', gap: 10, padding: '9px 12px', background: '#F8FAFC', color: '#64748B', fontSize: 11, fontWeight: 900, textTransform: 'uppercase', letterSpacing: '.04em' }}>
-                  <span>Rank</span>
+                  <span>{scoreMode ? 'Band · score' : 'Rank'}</span>
                   <span>Target %</span>
                   <span>Tolerance ±%</span>
                 </div>
@@ -11383,7 +11613,10 @@ export function StepBellCurve({ config, update, hideHead, hideApplyBar = false }
                   const tolBad = !Number.isFinite(tolNum) || tolNum < 0 || tolNum > 50;
                   return (
                     <div key={level.n} style={{ display: 'grid', gridTemplateColumns: '110px 1fr 1fr', gap: 10, padding: '10px 12px', borderTop: '1px solid #E2E8F0', alignItems: 'center' }}>
-                      <div style={{ fontSize: 12.5, fontWeight: 800, color: '#111827' }}>{level.n} - {level.l}</div>
+                      <div>
+                        <div style={{ fontSize: 12.5, fontWeight: 800, color: '#111827' }}>{level.n} - {level.l}</div>
+                        {scoreMode && <div style={{ fontSize: 10.5, fontWeight: 700, color: '#7C3AED', marginTop: 1 }}>score {fmtRange(level.n)}</div>}
+                      </div>
                       <input style={inputStyle} type="number" value={bands[i]} min={0} max={100} onChange={e => updateBand(i, e.target.value)} />
                       <input
                         style={{ ...inputStyle, ...(tolBad ? { borderColor: '#DC2626', boxShadow: '0 0 0 1px #FEE2E2 inset' } : {}) }}
@@ -11414,65 +11647,6 @@ export function StepBellCurve({ config, update, hideHead, hideApplyBar = false }
               onApply={() => update('bellAppliedSnapshot', getBellCurveSnapshot(config))}
             />
           )}
-        </CardBody>
-      </Card>
-    </div>
-  );
-}
-
-/* ── STEP: PHASES ──────────────────────────────────────────────────────── */
-function StepPhases({ config, update }) {
-  const phases = [
-    { label: 'Phase 1 — Goal setting',     open: '2025-04-01', close: '2025-04-30', note: 'Employees set KRAs' },
-    { label: 'Phase 2 — Mid-year review',  open: '2025-10-01', close: '2025-10-15', note: 'Optional check-in' },
-    { label: 'Phase 3 — Self evaluation',  open: '2026-03-01', close: '2026-03-15', note: 'Employee rates self' },
-    { label: 'Phase 4 — Manager rating',   open: '2026-03-16', close: '2026-03-25', note: 'L1 rates employee' },
-    { label: 'Phase 5 — HR normalization', open: '2026-03-26', close: '2026-03-31', note: 'Bell curve review' },
-    { label: 'Phase 6 — Results publish',  open: '2026-04-05', close: '2026-04-15', note: 'Employee acknowledgement' },
-  ];
-  return (
-    <div>
-      <SectionHead title="Phase windows & cycle dates" sub="Set all date windows for each phase of the appraisal cycle. Also configure goal phase controls." />
-      <Card>
-        <CardHead title="Goal phase controls" />
-        <CardBody>
-          {[
-            { label: 'Freeze goal setting after the deadline',            desc: 'Employees cannot add or edit KRAs once the goal setting window closes.',                key: 'freezeGoalSetting' },
-            { label: 'Allow manager to reopen goal setting per employee', desc: 'Manager can individually unlock the goal window for a specific reportee.',              key: 'managerUnlockGoals' },
-            { label: 'Allow HR to reopen goal setting globally',          desc: 'HR can extend the goal window for all or selected employees.',                           key: 'hrReopenSelf' },
-            { label: 'Allow mid-year KRA revision',                       desc: 'KRAs can be revised during the mid-year review window with manager approval.',           key: 'midYearRevision' },
-            { label: 'Freeze self-evaluation after the deadline',         desc: 'Employee cannot change self-ratings after the evaluation window closes.',                key: 'freezeSelfEval' },
-          ].map((t, i, arr) => (
-            <TogRow key={t.key} label={t.label} desc={t.desc} last={i === arr.length - 1}
-              on={config[t.key]} onChange={v => update(t.key, v)} />
-          ))}
-        </CardBody>
-      </Card>
-      <Card>
-        <CardHead title="Appraisal cycle timeline" />
-        <CardBody>
-          <Grid2 gap={16}>
-            <Field label="Cycle name">
-              <input style={inputStyle} defaultValue="Annual appraisal FY 2025–26" />
-            </Field>
-            <Field label="Cycle type">
-              <select style={selectStyle}><option>Annual</option><option>Half-yearly</option><option>Quarterly</option><option>Project-based</option></select>
-            </Field>
-          </Grid2>
-          <div style={{ height: 1, background: '#F1F3F5', marginBottom: 18 }} />
-          {phases.map((p, i) => (
-            <div key={i} style={{ marginBottom: 18 }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
-                <div style={{ width: 22, height: 22, borderRadius: '50%', background: '#EFF4FF', color: '#2563EB', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 11, fontWeight: 700, flexShrink: 0 }}>{i + 1}</div>
-                <div style={{ fontSize: 13.5, fontWeight: 600, color: '#0D1117' }}>{p.label}</div>
-                <span style={{ fontSize: 11.5, color: '#9CA3AF' }}>— {p.note}</span>
-              </div>
-              <Grid2 gap={14}>
-                <Field label="Opens"><input style={inputStyle} type="date" defaultValue={p.open} /></Field>
-                <Field label={i === 5 ? 'Acknowledgement deadline' : 'Closes (auto-freeze)'}><input style={inputStyle} type="date" defaultValue={p.close} /></Field>
-              </Grid2>
-            </div>
-          ))}
         </CardBody>
       </Card>
     </div>
@@ -12603,6 +12777,12 @@ const INITIAL = {
   empCodeFormat: { type: 'free' },
   managerLevels: 1,
   requireEmail: true,
+	  hodEnabled: false,
+	  hodDetailedCalibration: false,
+	  finalEmployeeAcceptanceEnabled: false,
+	  emailCommsEnabled: false,
+	  gradeEnabled: false,
+  gradeLabels: ['G1', 'G2', 'G3', 'G4', 'G5'],
   empSettingsAppliedSnapshot: null,
   goalLimitEnabled: false,
   goalLimitScope: 'common',            // 'common' | 'by-attribute'
@@ -12625,7 +12805,7 @@ const INITIAL = {
   // Rating scale
   scaleAppliedSnapshot: null,
   // Competencies
-  competenciesEnabled: true, competencyType: 'behavioural', maxCompetencies: 5, competencyWeight: 20, competencyRatedBy: 'manager', competencyAllowSelfRate: true,
+  competenciesEnabled: true, competencyType: 'behavioural', maxCompetencies: 5, competencyWeight: 20, competencyRatedBy: 'manager', competencyAllowSelfRate: true, employeeCanEditCompetencies: false,
   selectedCompetencies: ['Communication', 'Problem Solving', 'Teamwork', 'Ownership', 'Technical Expertise'],
   competencyScope: 'org', competencyByGroup: {}, competencyByRole: {},
   customCompetencies: { behavioural: [], functional: [], values: [], leadership: [] },
@@ -12684,7 +12864,9 @@ function normalizeConfig(raw) {
   if (!merged.scalePreset) merged.scalePreset = SCALE_PRESETS.includes(Number(merged.scalePoints)) ? String(merged.scalePoints) : 'custom';
   if (!merged.scorePrecision) merged.scorePrecision = INITIAL.scorePrecision;
   if (!merged.ratingChoiceDisplay) merged.ratingChoiceDisplay = INITIAL.ratingChoiceDisplay;
-  if (!merged.finalRatingDisplay) merged.finalRatingDisplay = INITIAL.finalRatingDisplay;
+  if (!FINAL_RATING_DISPLAY_OPTIONS.some((opt) => opt.id === merged.finalRatingDisplay)) {
+    merged.finalRatingDisplay = INITIAL.finalRatingDisplay;
+  }
   if (!Array.isArray(merged.autoRatingBands)) merged.autoRatingBands = INITIAL.autoRatingBands;
   delete merged.autoRatingRules;
   delete merged.autoRatingSelectedType;
@@ -12749,7 +12931,7 @@ function isStepComplete(stepId, config) {
       }
       return config.minKRAs > 0 && config.maxKRAs >= config.minKRAs && !!config.weightageOwnership;
     case 'hierarchy':
-      return (config.ratingLevels || []).length >= 1;
+      return true;
     case 'scale':
       return isScaleConfigValid(config)
         && config.scaleAppliedSnapshot === getScaleSnapshot(config);
@@ -12916,19 +13098,22 @@ export default function PMSWizard({ onLaunched, orgKeyOverride, orgNameOverride 
         next.targetTypesAppliedSnapshot = null;
         next.autoRatingAppliedSnapshot = null;
       }
-      if (changedKeys.some((item) => ['scalePreset','scalePoints','scaleLabels','scaleRankCodes','scaleRankRanges','scoreInputMode','scorePrecision','ratingChoiceDisplay','finalRatingDisplay','commentRequiredAt','managerRatingVisibleFrom','finalRatingVisibleFrom'].includes(item))) {
+      if (changedKeys.some((item) => ['scalePreset','scalePoints','scaleLabels','scaleRankCodes','scaleRankRanges','scoreInputMode','scorePrecision','ratingChoiceDisplay','finalRatingDisplay','managerRatingVisibleFrom','finalRatingVisibleFrom'].includes(item))) {
         next.scaleAppliedSnapshot = null;
         next.autoRatingAppliedSnapshot = null;
       }
       if (changedKeys.some((item) => ['autoRating','managerOverrideAuto','autoRatingBands'].includes(item))) {
         next.autoRatingAppliedSnapshot = null;
       }
-      if (changedKeys.some((item) => ['competenciesEnabled','competencyType','maxCompetencies','competencyWeight','competencyRatedBy','competencyAllowSelfRate','selectedCompetencies','competencyScope','competencyByGroup','competencyByRole','customCompetencies'].includes(item))) {
+      if (changedKeys.some((item) => ['competenciesEnabled','competencyType','maxCompetencies','competencyWeight','competencyRatedBy','competencyAllowSelfRate','employeeCanEditCompetencies','selectedCompetencies','competencyScope','competencyByGroup','competencyByRole','customCompetencies'].includes(item))) {
         next.competenciesAppliedSnapshot = null;
       }
       if (
         (changedKeys.includes('managerLevels') && next.managerLevels !== prev.managerLevels) ||
-        (changedKeys.includes('requireEmail') && next.requireEmail !== prev.requireEmail)
+        (changedKeys.includes('requireEmail') && next.requireEmail !== prev.requireEmail) ||
+        (changedKeys.includes('hodEnabled') && next.hodEnabled !== prev.hodEnabled) ||
+        (changedKeys.includes('gradeEnabled') && next.gradeEnabled !== prev.gradeEnabled) ||
+        (changedKeys.includes('gradeLabels') && JSON.stringify(next.gradeLabels || []) !== JSON.stringify(prev.gradeLabels || []))
       ) {
         next.empSettingsAppliedSnapshot = null;
         // Column structure of the upload sheet changes — old data is now incompatible
@@ -13062,8 +13247,6 @@ export default function PMSWizard({ onLaunched, orgKeyOverride, orgNameOverride 
         return <StepCompetencies key="competencies" config={config} update={update} />;
       case 'bellcurve':
         return <StepBellCurve key="bellcurve" config={config} update={update} />;
-      case 'phases':
-        return <StepPhases key="phases" config={config} update={update} />;
       case 'export':
         return <StepExport key="export" config={config} />;
       default:
@@ -13908,11 +14091,14 @@ function orgMapStageMeta(emp) {
   const raw = getEmpStage(emp);
   const explicit = orgMapField(emp, ['Review Stage', 'Review Cycle Stage', 'Cycle Stage', 'PMS Stage', 'Stage']).toLowerCase();
   if (explicit.includes('calibr')) return { key: 'calibration', label: 'Calibration', color: '#9333EA', bg: '#FAF5FF', border: '#E9D5FF' };
+  if (explicit.includes('hr review') || explicit.includes('hr-review')) return { key: 'hr-review', label: 'HR Review', color: '#EA580C', bg: '#FFF7ED', border: '#FED7AA' };
   if (explicit.includes('closed') || explicit.includes('complete')) return { key: 'closed', label: 'Closed', color: '#15803D', bg: '#F0FDF4', border: '#BBF7D0' };
   if (explicit.includes('manager')) return { key: 'manager-review', label: 'Manager Review', color: '#7C3AED', bg: '#F5F3FF', border: '#DDD6FE' };
   if (explicit.includes('self')) return { key: 'self-review', label: 'Self-Review', color: '#0891B2', bg: '#ECFEFF', border: '#A5F3FC' };
   if (raw === 'self-evaluation') return { key: 'self-review', label: 'Self-Review', color: '#0891B2', bg: '#ECFEFF', border: '#A5F3FC' };
   if (raw === 'mgr-evaluation') return { key: 'manager-review', label: 'Manager Review', color: '#7C3AED', bg: '#F5F3FF', border: '#DDD6FE' };
+  if (raw === 'hr-review') return { key: 'hr-review', label: 'HR Review', color: '#EA580C', bg: '#FFF7ED', border: '#FED7AA' };
+  if (raw === 'calibrated') return { key: 'calibration', label: 'Calibration', color: '#9333EA', bg: '#FAF5FF', border: '#E9D5FF' };
   if (raw === 'completed') return { key: 'closed', label: 'Closed', color: '#15803D', bg: '#F0FDF4', border: '#BBF7D0' };
   return { key: 'not-started', label: 'Not Started', color: '#D97706', bg: '#FFFBEB', border: '#FDE68A' };
 }
@@ -13922,6 +14108,8 @@ function orgMapGoalPct(emp) {
   if (explicit !== null) return Math.max(0, Math.min(100, Math.round(explicit)));
   const stage = getEmpStage(emp);
   if (stage === 'completed') return 100;
+  if (stage === 'calibrated') return 90;
+  if (stage === 'hr-review') return 85;
   if (stage === 'mgr-evaluation') return 75;
   if (stage === 'self-evaluation') return 55;
   if (stage === 'pending-approval') return 35;
