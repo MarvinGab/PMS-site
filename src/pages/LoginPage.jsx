@@ -73,7 +73,7 @@ function RightPanel() {
 }
 
 export default function LoginPage() {
-  const { authReady, role } = useApp();
+  const { authReady, userId } = useApp();
   const [identifier, setIdentifier] = useState(() => {
     const prefill = getLoginPrefillIdentifier();
     if (prefill) return prefill;
@@ -92,14 +92,15 @@ export default function LoginPage() {
     if (prefill) setIdentifier(prefill);
   }, []);
 
-  // If a session already exists (e.g. this tab still has #login in the URL
-  // from before signing in elsewhere), get off the login route so the
-  // router's role-based screen can take over.
+  // If a Supabase session already exists, get off the login route so the router's
+  // role-based screen — or the no-membership screen — can take over. Gate on userId
+  // (signed in), NOT role: a signed-in user with zero memberships has role null and
+  // must still leave #login to reach the "contact HR" screen (no login-form dead-end).
   useEffect(() => {
-    if (authReady && role && typeof window !== 'undefined' && window.location.hash === '#login') {
+    if (authReady && userId && typeof window !== 'undefined' && window.location.hash === '#login') {
       window.location.hash = '';
     }
-  }, [authReady, role]);
+  }, [authReady, userId]);
 
   async function handleSubmit(e) {
     e.preventDefault();

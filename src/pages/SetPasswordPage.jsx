@@ -13,6 +13,7 @@ export default function SetPasswordPage() {
   const [doneMessage, setDoneMessage] = useState('');
 
   useEffect(() => {
+    if (!supabase) { setMode('request'); return; }
     supabase.auth.getSession().then(({ data }) => setMode((m) => (m === 'loading' ? (data.session ? 'set' : 'request') : m)));
     const { data: sub } = supabase.auth.onAuthStateChange((event, session) => {
       if (event === 'PASSWORD_RECOVERY' || session) setMode('set');

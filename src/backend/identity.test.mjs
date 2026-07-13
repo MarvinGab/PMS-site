@@ -39,3 +39,9 @@ test('undefined input does not throw', () => {
   const id = deriveIdentity(undefined);
   assert.equal(id.role, null);
 });
+
+test('org-scoped super_admin role is NOT surfaced as super-admin', () => {
+  const id = deriveIdentity([{ organizationId: 'org1', roles: ['super_admin'], employeeId: 'e9' }]);
+  assert.equal(id.role, null); // neither hr_admin nor employee → null, not super_admin
+  assert.equal(id.orgId, 'org1');
+});
