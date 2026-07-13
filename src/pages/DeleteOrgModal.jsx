@@ -1,54 +1,33 @@
 import { useState } from 'react';
 import { useApp } from '../AppContext';
 import { deleteOrganizationRecord } from '../backend/stateStore';
-import { loginWithServerSession } from '../backend/serverAuth';
 import '../admin.css';
 
 export default function DeleteOrgModal({ orgKey, onClose, onDeleted }) {
-  const { orgs, feedData, pendingActions, dashboardFlags, applyAppData, clearOrganizationState, userEmail } = useApp();
-  const [pwd, setPwd]     = useState('');
-  const [emailOverride, setEmailOverride] = useState('');
+  const { role, orgs, feedData, pendingActions, dashboardFlags, applyAppData, clearOrganizationState } = useApp();
+  const [confirmText, setConfirmText] = useState('');
   const [error, setError] = useState('');
   const [submitting, setSubmitting] = useState(false);
 
   const org = orgs.find(o => o.key === orgKey);
-  const sessionEmail = String(userEmail || '').trim().toLowerCase();
-  const needsEmailFallback = !sessionEmail;
+  const confirmTarget = String(org?.name || orgKey || '').trim();
+  const confirmMatches = confirmText.trim().toLowerCase() === confirmTarget.toLowerCase() && confirmTarget !== '';
 
   async function handleDelete() {
     setError('');
-    const identifier = sessionEmail || String(emailOverride || '').trim().toLowerCase();
-    if (!identifier) {
-      setError('Enter your super-admin email to confirm.');
+
+    // Defense-in-depth: the modal is only routed to when the app-level whoami role is
+    // super_admin, but re-check here so the destructive op can never run for a lesser role.
+    if (role !== 'super_admin') {
+      setError('Only a super admin can delete an organization.');
       return;
     }
-    if (!pwd) {
-      setError('Enter your password.');
+    if (!confirmMatches) {
+      setError(`Type "${confirmTarget}" to confirm.`);
       return;
     }
 
     setSubmitting(true);
-
-    // Verify the typed password against the server (same source of truth as
-    // login). Avoids comparing against a build-time client constant, which
-    // breaks the moment VITE_SUPER_ADMIN_PASSWORD isn't baked into the
-    // production bundle.
-    const verify = await loginWithServerSession(identifier, pwd, '', false, '');
-    if (!verify?.ok) {
-      const errText = String(verify?.error || '');
-      if (/not configured|failed to contact/i.test(errText)) {
-        setError('Auth backend is unreachable. Try again in a moment.');
-      } else {
-        setError('Incorrect password.');
-      }
-      setSubmitting(false);
-      return;
-    }
-    if (verify?.user?.role !== 'super-admin') {
-      setError('Only the super-admin can delete an organization.');
-      setSubmitting(false);
-      return;
-    }
 
     const removed = await deleteOrganizationRecord(orgKey);
     if (!removed.ok) {
@@ -82,27 +61,15 @@ export default function DeleteOrgModal({ orgKey, onClose, onDeleted }) {
         <div className="glass-sub">
           Are you sure you want to delete <strong>{org?.name || 'this organization'}</strong>? This action cannot be undone.
         </div>
-        {needsEmailFallback && (
-          <div className="form-group" style={{ marginBottom: 12 }}>
-            <label className="lbl">Super-admin email</label>
-            <input
-              type="email"
-              placeholder="you@zarohr.com"
-              value={emailOverride}
-              onChange={e => { setEmailOverride(e.target.value); setError(''); }}
-              autoComplete="username"
-            />
-          </div>
-        )}
         <div className="form-group" style={{ marginBottom: 18 }}>
-          <label className="lbl">Confirm with password</label>
+          <label className="lbl">Type <strong>{confirmTarget}</strong> to confirm</label>
           <input
-            type="password"
-            placeholder="Enter your password"
-            value={pwd}
-            onChange={e => { setPwd(e.target.value); setError(''); }}
+            type="text"
+            placeholder={confirmTarget}
+            value={confirmText}
+            onChange={e => { setConfirmText(e.target.value); setError(''); }}
             autoFocus
-            autoComplete="current-password"
+            autoComplete="off"
           />
           {error && (
             <div className="input-hint hint-err">{error}</div>
@@ -110,7 +77,7 @@ export default function DeleteOrgModal({ orgKey, onClose, onDeleted }) {
         </div>
         <div className="glass-actions">
           <button className="btn btn-secondary" onClick={onClose} disabled={submitting}>Cancel</button>
-          <button className="btn btn-danger" onClick={handleDelete} disabled={submitting}>{submitting ? 'Verifying…' : 'Delete'}</button>
+          <button className="btn btn-danger" onClick={handleDelete} disabled={submitting || !confirmMatches}>{submitting ? 'Deleting…' : 'Delete'}</button>
         </div>
       </div>
     </div>
