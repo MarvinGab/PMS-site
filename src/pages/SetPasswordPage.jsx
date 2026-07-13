@@ -26,24 +26,34 @@ export default function SetPasswordPage() {
     if (password.length < 8) { setError('Use at least 8 characters.'); return; }
     if (password !== confirm) { setError('Passwords do not match.'); return; }
     setBusy(true);
-    const { error: err } = await supabase.auth.updateUser({ password });
-    setBusy(false);
-    if (err) { setError(err.message || 'Could not set password.'); return; }
-    setDoneMessage('Password set. Redirecting to sign in…');
-    setMode('done');
-    window.location.hash = '#login';
+    try {
+      const { error: err } = await supabase.auth.updateUser({ password });
+      if (err) { setError(err.message || 'Could not set password.'); return; }
+      setDoneMessage('Password set. Redirecting to sign in…');
+      setMode('done');
+      window.location.hash = '#login';
+    } catch {
+      setError('Could not set password. Please try again.');
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function submitRequest(e) {
     e.preventDefault();
     setError('');
     setBusy(true);
-    const redirectTo = `${window.location.origin}${window.location.pathname}#set-password`;
-    const { error: err } = await supabase.auth.resetPasswordForEmail(String(email).trim().toLowerCase(), { redirectTo });
-    setBusy(false);
-    if (err) { setError(err.message || 'Could not send reset email.'); return; }
-    setDoneMessage('Check your email for the reset link.');
-    setMode('done');
+    try {
+      const redirectTo = `${window.location.origin}${window.location.pathname}#set-password`;
+      const { error: err } = await supabase.auth.resetPasswordForEmail(String(email).trim().toLowerCase(), { redirectTo });
+      if (err) { setError(err.message || 'Could not send reset email.'); return; }
+      setDoneMessage('Check your email for the reset link.');
+      setMode('done');
+    } catch {
+      setError('Could not send reset email. Please try again.');
+    } finally {
+      setBusy(false);
+    }
   }
 
   return (

@@ -12,7 +12,6 @@ import { supabase } from './backend/supabaseClient';
 import { callPms } from './backend/pmsClient';
 import { deriveIdentity } from './backend/identity';
 
-export const SESSION_KEY        = 'zarohr_auth_session';
 export const APP_DATA_KEY       = 'zarohr_app_data_v1';
 export const EMP_CREDENTIALS_KEY = 'zarohr_emp_credentials';
 
