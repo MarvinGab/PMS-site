@@ -3,7 +3,9 @@ import { AppProvider, useApp } from './AppContext';
 import { readWizardStateSync, syncEmployeeCredentialsForOrg } from './backend/stateStore';
 import { logAuditEvent } from './backend/auditLog';
 import { SESSION_TIMEOUT_EVENT } from './backend/sessionTimeout';
+import { supabase } from './backend/supabaseClient';
 import LoginPage from './pages/LoginPage';
+import SetPasswordPage from './pages/SetPasswordPage';
 import DashboardPage from './pages/DashboardPage';
 import OrganizationsPage from './pages/OrganizationsPage';
 import SuperAdminCommsPage from './pages/SuperAdminCommsPage';
@@ -267,8 +269,41 @@ function SessionTimeoutModal({ onCancel, onSignIn }) {
   );
 }
 
+function NoMembershipScreen({ onSignOut }) {
+  return (
+    <div style={{
+      minHeight: '100vh', display: 'flex', flexDirection: 'column',
+      alignItems: 'center', justifyContent: 'center',
+      background: '#F8FAFC', padding: '40px 20px', fontFamily: "'Geist','Inter','Segoe UI',Arial,sans-serif",
+    }}>
+      <div style={{
+        background: '#fff', border: '1px solid #E2E8F0', borderRadius: '12px',
+        padding: '40px 48px', maxWidth: '480px', width: '100%', textAlign: 'center',
+        boxShadow: '0 4px 24px rgba(0,0,0,0.06)',
+      }}>
+        <h2 style={{ margin: '0 0 8px', fontSize: '20px', fontWeight: '700', color: '#0F172A' }}>
+          No organization access yet
+        </h2>
+        <p style={{ margin: '0 0 24px', fontSize: '14px', color: '#64748B', lineHeight: '1.6' }}>
+          Your account isn&apos;t linked to an organization yet — contact HR.
+        </p>
+        <button
+          type="button"
+          onClick={onSignOut}
+          style={{
+            background: '#2563EB', color: '#fff', border: 'none', borderRadius: '8px',
+            padding: '10px 24px', fontSize: '14px', fontWeight: '600', cursor: 'pointer',
+          }}
+        >
+          Sign out
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function Router() {
-  const { role, orgKey, orgs, authReady, setOrgs, userName, logout } = useApp();
+  const { role, orgKey, orgs, authReady, setOrgs, userName, userId, signOut } = useApp();
   const [route, setRoute] = useState(getRoute);
   const [sessionModalOpen, setSessionModalOpen] = useState(false);
 
@@ -284,14 +319,30 @@ function Router() {
     return () => window.removeEventListener(SESSION_TIMEOUT_EVENT, show);
   }, []);
 
+  // Recovery links (invite / forgot-password) establish a Supabase recovery session and fire
+  // PASSWORD_RECOVERY; send the user to the set-password screen regardless of what route they
+  // landed on.
   useEffect(() => {
-    // The employee route owns its own session (EMP_SESSION_KEY) independent of the app-level role,
-    // so don't bounce refreshes on #employee to login based on the app-level role being empty.
-    if (authReady && !role && route !== 'login' && route !== 'employee') {
+    if (!supabase) return;
+    const { data: sub } = supabase.auth.onAuthStateChange((event) => {
+      if (event === 'PASSWORD_RECOVERY') {
+        window.location.hash = '#set-password';
+      }
+    });
+    return () => sub?.subscription?.unsubscribe?.();
+  }, []);
+
+  useEffect(() => {
+    // Only a truly signed-out visitor (no Supabase session at all — userId null) gets bounced
+    // to login. A signed-in user whose whoami returned zero organization memberships (userId
+    // truthy, role null) is NOT redirected here — that would loop, since they're already
+    // authenticated; the render below shows them a "no organization" screen instead.
+    // set-password is a public route reached via a recovery link, so it's exempt too.
+    if (authReady && !userId && route !== 'login' && route !== 'set-password') {
       window.location.hash = '#login';
       setRoute('login');
     }
-  }, [authReady, role, route]);
+  }, [authReady, userId, route]);
 
   const withSessionModal = (page) => (
     <>
@@ -301,7 +352,7 @@ function Router() {
           onCancel={() => setSessionModalOpen(false)}
           onSignIn={() => {
             setSessionModalOpen(false);
-            logout?.();
+            signOut?.();
             window.location.hash = '#login';
             setRoute('login');
           }}
@@ -316,17 +367,29 @@ function Router() {
 
   // Public routes (no auth needed)
   if (route === 'login') return withSessionModal(<LoginPage />);
-  if (route === 'employee') return withSessionModal(<EmployeePage />);
+  if (route === 'set-password') return withSessionModal(<SetPasswordPage />);
   if (route === 'self-eval') return withSessionModal(<Suspense fallback={<BootScreen />}><SelfEvalPage /></Suspense>);
   if (route === 'manager-eval') return withSessionModal(<Suspense fallback={<BootScreen />}><ManagerEvalPage /></Suspense>);
 
-  // Not logged in → redirect to login
-  if (!role) {
+  // Truly signed out (no Supabase session at all) → login.
+  if (!userId) {
     return withSessionModal(<LoginPage />);
   }
 
+  // Signed in, but whoami resolved zero organization memberships for this account.
+  if (!role) {
+    return withSessionModal(<NoMembershipScreen onSignOut={signOut} />);
+  }
+
+  // Employee view: the default landing for an actual employee (by role) on any route, and
+  // also reachable via the #employee route for HR-admin "view as employee" impersonation /
+  // dual-role switch (HRCycleDashboard persists a local employee session and jumps here while
+  // keeping the app-level role as hr_admin). Gated behind the role check above, so an
+  // unauthenticated visitor can no longer reach it by hash alone.
+  if (role === 'employee' || route === 'employee') return withSessionModal(<EmployeePage />);
+
   // HR admin
-  if (role === 'hr-admin') {
+  if (role === 'hr_admin') {
     if (route === 'hr-review') {
       return withSessionModal(<Suspense fallback={<BootScreen />}><HRReviewPage /></Suspense>);
     }
@@ -381,9 +444,6 @@ function Router() {
 
     return withSessionModal(<PMSWizard orgKeyOverride={orgKey || ''} orgNameOverride={orgName} onLaunched={handleLaunched} />);
   }
-
-  // Employee route (logged in as employee)
-  if (role === 'employee') return withSessionModal(<EmployeePage />);
 
   // Super admin routes
   if (route === 'create-org' || route === 'edit-org') return withSessionModal(<CreateOrgPage />);
