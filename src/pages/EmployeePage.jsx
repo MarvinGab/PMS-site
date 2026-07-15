@@ -27,6 +27,7 @@ import { hydrateRatings, isPublished, readRatings, submitEmployeeStageAndPersist
 import SelfEvalPage from './SelfEvalPage';
 import ManagerEvalPage, { PublishedManagerRatingView, HeroScoreTiles } from './ManagerEvalPage';
 import HRReviewPage from './HRReviewPage';
+import EmployeeGoals from './EmployeeGoals';
 
 const EMP_SESSION_KEY = 'zarohr_emp_session';
 const WIZARD_STATE_KEY = 'zarohr_pms_wizard_state_v1';
@@ -7017,11 +7018,6 @@ export default function EmployeePage() {
   // Always rendered at the top of the page. Left zone is constant (greeting + role line).
   // Right zone swaps its content based on which tab is active.
   function renderHero(section) {
-    const progressTone = goalMetrics.invalid ? '#FCA5A5' : '#FFFFFF';
-    const progressFill = goalMetrics.invalid
-      ? 'linear-gradient(90deg,#F87171,#FCA5A5)'
-      : accentFill;
-
     const teamSubmitted = Object.values(workflow?.submissions || {}).filter((s) => normalizeCode(s.managerCode) === employeeCodeKey && s.status === 'pending-manager').length;
     const teamApproved = Object.values(workflow?.submissions || {}).filter((s) => normalizeCode(s.managerCode) === employeeCodeKey && s.status === 'approved').length;
     const teamTotal = directReports.length;
@@ -7076,25 +7072,12 @@ export default function EmployeePage() {
           </div>
         );
       } else {
-        rightPanel = (
-          <div style={panelBoxStyle}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'center', marginBottom: 6 }}>
-              <div style={{ minWidth: 0 }}>
-                <div style={{ fontSize: 13, fontWeight: 800, color: '#fff' }}>Goal plan completion</div>
-                <div style={{ fontSize: 11.5, color: 'rgba(255,255,255,0.72)', marginTop: 2 }}>
-                  Goal weights <span style={{ color: goalMetrics.goalOver ? '#FCA5A5' : 'rgba(255,255,255,0.92)', fontWeight: goalMetrics.goalOver ? 800 : 600 }}>{goalMetrics.goalPct}%</span>
-                  {goalMetrics.shouldTrackKpis ? <> · KPI <span style={{ color: goalMetrics.kpiOver ? '#FCA5A5' : 'rgba(255,255,255,0.92)', fontWeight: goalMetrics.kpiOver ? 800 : 600 }}>{goalMetrics.kpiPct}%</span></> : ''}
-                </div>
-              </div>
-              <div style={{ fontSize: 20, fontWeight: 800, lineHeight: 1, color: progressTone, textShadow: '0 2px 14px rgba(15,23,42,0.22)' }}>
-                {goalMetrics.goalOver ? `${goalMetrics.goalPct}%` : `${goalMetrics.overall}%`}
-              </div>
-            </div>
-            <div style={{ height: 5, background: 'rgba(255,255,255,0.24)', borderRadius: 999, overflow: 'hidden', boxShadow: 'inset 0 1px 3px rgba(15,23,42,0.22)' }}>
-              <div style={{ height: '100%', width: `${Math.min(100, goalMetrics.overall)}%`, background: progressFill, borderRadius: 999, transition: 'width .25s ease', boxShadow: `0 0 18px ${progressTone}` }} />
-            </div>
-          </div>
-        );
+        // Goal-setting phase: the goal editor is now <EmployeeGoals/> (Plan 5b),
+        // which reads/writes only the pms-workflow backend and shows its own live
+        // weight sums. The old "Goal plan completion" hero stat derived from the
+        // now-frozen workflow blob (goalMetrics), so it would show a stuck 0% next
+        // to the working editor — suppress it until the blob is fully retired.
+        rightPanel = null;
       }
     } else if (section === 'team' && directReports.length > 0) {
       rightPanel = (
@@ -7236,7 +7219,9 @@ export default function EmployeePage() {
     tabs.push({
       id: 'goals',
       label: 'My Goals',
-      count: myGoals.length,
+      // Goal count during goal-setting now lives in <EmployeeGoals/> (backend-backed);
+      // the old blob-derived myGoals is frozen post-cutover, so don't show a stale pill.
+      count: currentPhase === 'goal-setting' ? undefined : myGoals.length,
     });
     // My Goal Evaluation — visible once goals are approved (per-employee).
     if (myInSelfEvalPhase) {
@@ -7289,10 +7274,11 @@ export default function EmployeePage() {
   });
 
   // Primary CTA per tab — rendered on the right side of the tab row.
+  // Goal creation moved into <EmployeeGoals/> (Plan 5b): the migrated goals
+  // screen owns its own add-KRA controls, so the old-blob "+ Create Goal"
+  // header CTA is retired here to avoid a duplicate button that would mutate
+  // the now-unused workflow blob.
   const tabCTA = (() => {
-    if (activeSection === 'goals' && canAddKra) {
-      return { label: '+ Create Goal', onClick: addGoalAndEdit, primary: true };
-    }
     return null;
   })();
 
@@ -7662,7 +7648,7 @@ export default function EmployeePage() {
 
           {/* ── Section content ── */}
           {activeSection === 'goals' && (
-            currentPhase === 'goal-setting' ? renderGoalSetting()
+            currentPhase === 'goal-setting' ? <EmployeeGoals />
               : currentPhase === 'self-evaluation' ? renderSelfEvaluation()
               : <EmptyState title={`${PHASES[phaseIndex]?.label || 'Current phase'} in progress`} subtitle="This page will unlock the relevant workflow for the active appraisal phase." />
           )}
