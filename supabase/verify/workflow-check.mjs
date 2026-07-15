@@ -408,6 +408,34 @@ export async function setupCloseoutCycle() {
 // ============ EVALUATIONS (Plan 3b) ============
 export const evalFixture = await setupEvalCycle();
 
+// --- eval.context: one scoped read for the self-evaluation screen (Plan 5c Task 1) ---
+// Runs before any eval.ensure call so the "unseeded" (score: null) shape is exercised.
+{
+  const ctxRes = await callWorkflow(tokens.employee, 'eval.context', { orgId: evalFixture.orgId, cycleId: evalFixture.cycleId });
+  check('eval.context returns the active cycle', ctxRes.status === 200 && ctxRes.body.data.cycle?.id === evalFixture.cycleId);
+  check('eval.context stage is self', ctxRes.body.data.stage === 'self');
+  check('eval.context reports available:true (goals approved, window open)', ctxRes.body.data.available === true && ctxRes.body.data.reason === null);
+  check('eval.context reports selfEvalOpen as a boolean (true)', ctxRes.body.data.window?.selfEvalOpen === true);
+  check('eval.context config.ratingScale is the frozen 3-level scale', Array.isArray(ctxRes.body.data.config?.ratingScale) && ctxRes.body.data.config.ratingScale.length === 3);
+  check('eval.context config.competency.enabled is a boolean', typeof ctxRes.body.data.config?.competency?.enabled === 'boolean');
+  // The full approved tree: 2 KRAs + 2 KPIs = 4 rows, each with a non-empty title (join worked).
+  check('eval.context items include the full approved KRA/KPI tree with titles (join worked)', ctxRes.body.data.items.length === 4 && ctxRes.body.data.items.every((it) => typeof it.title === 'string' && it.title.length > 0) && ['New ARR', 'Churn'].every((t) => ctxRes.body.data.items.some((it) => it.item_type === 'kpi' && it.title === t)));
+  check('eval.context items carry score:null before eval.ensure', ctxRes.body.data.items.every((it) => it.score === null));
+  check('eval.context evaluation is null before eval.ensure', ctxRes.body.data.evaluation === null);
+
+  // HR passing employeeId explicitly (isHrOrSuper bypass — mirrors goal.context's hrCtx check).
+  const hrCtx = await callWorkflow(tokens.hr, 'eval.context', { orgId: evalFixture.orgId, cycleId: evalFixture.cycleId, employeeId: evalFixture.emp.EMP002 });
+  check('HR can fetch eval.context for an explicit employeeId', hrCtx.status === 200 && hrCtx.body.data.available === true);
+
+  // Non-owner, non-HR callers always see their OWN context (employeeId param is ignored
+  // for them, mirroring goal.context) — so this exercises available:false via each's own
+  // unapproved/missing plan rather than a 403 on someone else's data.
+  const mgrCtx = await callWorkflow(tokens.manager, 'eval.context', { orgId: evalFixture.orgId, cycleId: evalFixture.cycleId, employeeId: evalFixture.emp.EMP002 });
+  check('a caller with a draft (not approved) plan gets available:false/GOALS_NOT_APPROVED', mgrCtx.status === 200 && mgrCtx.body.data.available === false && mgrCtx.body.data.reason === 'GOALS_NOT_APPROVED');
+  const hodCtx = await callWorkflow(tokens.hod, 'eval.context', { orgId: evalFixture.orgId, cycleId: evalFixture.cycleId });
+  check('a caller with no goal plan at all gets available:false/NO_PLAN', hodCtx.status === 200 && hodCtx.body.data.available === false && hodCtx.body.data.reason === 'NO_PLAN');
+}
+
 // --- eval.ensure blocked when the employee's own goal plan is not approved ---
 {
   const notApproved = await callWorkflow(tokens.manager, 'eval.ensure', { orgId: evalFixture.orgId, cycleId: evalFixture.cycleId, stage: 'self' });
@@ -466,6 +494,18 @@ export const evalFixture = await setupEvalCycle();
     goalScores: [],
   });
   check('save-scores rejects a stale eval version', stale.status === 409 && stale.body.error.code === 'CONFLICT');
+}
+
+// --- eval.context reflects saved scores on the right items (after ensure + save-scores) ---
+{
+  const ctxRes = await callWorkflow(tokens.employee, 'eval.context', { orgId: evalFixture.orgId, cycleId: evalFixture.cycleId });
+  check('eval.context evaluation is non-null after eval.ensure', ctxRes.status === 200 && ctxRes.body.data.evaluation !== null && ctxRes.body.data.evaluation.status === 'draft');
+  const arr = ctxRes.body.data.items.find((it) => it.title === 'New ARR');
+  const churn = ctxRes.body.data.items.find((it) => it.title === 'Churn');
+  // Left over from the prior block: New ARR was manually overridden to 3 (120% achieved);
+  // Churn kept its first save's auto-banded score of 2 (50% achieved).
+  check('eval.context reflects the manual override on the right item (New ARR=3)', Number(arr?.score?.score) === 3 && Number(arr?.score?.achievement_percent) === 120);
+  check('eval.context reflects the auto-banded score on the other item (Churn=2)', Number(churn?.score?.score) === 2 && Number(churn?.score?.achievement_percent) === 50);
 }
 
 // --- self submit unlocks manager; manager rates + submits ---

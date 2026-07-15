@@ -2,8 +2,13 @@ import { ApiError, Handler, HandlerCtx } from '../_shared/kernel.ts';
 import { optUuid, reqEnum, reqUuid } from '../_shared/validate.ts';
 import { callerEmployeeId, callerEmployeeIdOrNull, isHodOf, isHrOrSuper, manages } from '../_shared/scope.ts';
 import { optNumber, optString, reqArray, reqInt, reqObject, reqString } from '../_shared/validate.ts';
-import { requireWindowOrHr } from '../_shared/phase.ts';
+import { pureWindowOpen, requireWindowOrHr } from '../_shared/phase.ts';
 import { achievementPercent, Band, computeGoalScore, computeOverall, ratingFromBands, ScoredItem } from '../_shared/scoring.ts';
+
+// phase.ts's todayIso() is module-private — mirror it here (date-granular, UTC).
+function todayIso(): string {
+  return new Date().toISOString().slice(0, 10);
+}
 
 export const STAGES = ['self', 'manager', 'hod', 'hr_final'];
 export const STAGE_WINDOW: Record<string, string> = {
@@ -117,6 +122,122 @@ export const evalHandlers: Record<string, Handler> = {
       throw new ApiError('FORBIDDEN', 'You cannot view this evaluation', 403);
     }
     return await readEvalBundle(ctx, orgId, cycleId, employeeId, stage);
+  },
+
+  // One scoped read for the employee self-evaluation screen: the current cycle + the
+  // approved goal tree + competencies-to-rate + config (rating scale, auto bands,
+  // competency weighting) + window + the employee's current self evaluation (scores
+  // LEFT-joined onto the items/competencies). Scoped to the caller unless HR/super
+  // passes employeeId (mirrors goal.context's resolution exactly).
+  'eval.context': async (payload, ctx) => {
+    const orgId = reqUuid(payload.orgId, 'orgId');
+    const requested = optUuid(payload.employeeId, 'employeeId');
+    const employeeId = requested && (await isHrOrSuper(ctx, orgId)) ? requested : callerEmployeeId(ctx, orgId);
+    const stage = 'self';
+
+    const emptyConfig = { kpiRatingMode: null, targetLevelMode: null, ratingScale: [] as unknown[], autoRatingBands: [] as unknown[], competency: { enabled: false, weight: null as number | null } };
+
+    // The org's current evaluable cycle (self-evaluation only ever runs while the cycle
+    // is active or, at the tail end, still under review — mirrors loadEvaluableCycle's
+    // allowed statuses so an already-submitted self stage stays viewable).
+    const { data: cycle, error: cErr } = await ctx.admin.from('appraisal_cycles')
+      .select('id, name, status').eq('organization_id', orgId).in('status', ['active', 'review']).maybeSingle();
+    if (cErr) { console.error('eval.context cycle', cErr); throw new ApiError('DB_ERROR', 'Database error', 500); }
+    if (!cycle) {
+      return { cycle: null, stage, available: false, reason: 'NO_PLAN', window: { selfEvalOpen: false }, config: emptyConfig, items: [], competencies: [], evaluation: null };
+    }
+    const cycleId = cycle.id;
+    const cycleOut = { id: cycle.id, name: cycle.name, status: cycle.status };
+
+    const { data: plan, error: pErr } = await ctx.admin.from('employee_goal_plans')
+      .select('id, status').eq('cycle_id', cycleId).eq('employee_id', employeeId).eq('organization_id', orgId).maybeSingle();
+    if (pErr) { console.error('eval.context plan', pErr); throw new ApiError('DB_ERROR', 'Database error', 500); }
+
+    const { data: windows, error: wErr } = await ctx.admin.from('cycle_phase_windows')
+      .select('window_key, starts_on, ends_on').eq('cycle_id', cycleId).eq('organization_id', orgId);
+    if (wErr) { console.error('eval.context windows', wErr); throw new ApiError('DB_ERROR', 'Database error', 500); }
+    const hrOrSuper = await isHrOrSuper(ctx, orgId);
+    const selfEvalOpen = pureWindowOpen((windows ?? []) as { window_key: string; starts_on: string; ends_on: string }[], STAGE_WINDOW[stage], todayIso());
+
+    // available/reason mirrors assertPrereqs('self') + requireWindowOrHr('self_evaluation')
+    // exactly: goals-approved has no HR bypass (assertPrereqs enforces it unconditionally);
+    // only the window check is bypassed for HR/super.
+    let available = false;
+    let reason: string | null = null;
+    if (!plan) reason = 'NO_PLAN';
+    else if (plan.status !== 'approved') reason = 'GOALS_NOT_APPROVED';
+    else if (!(selfEvalOpen || hrOrSuper)) reason = 'WINDOW_CLOSED';
+    else available = true;
+
+    // Approved goal items (only meaningful once the plan is approved).
+    let items: Record<string, unknown>[] = [];
+    if (plan && plan.status === 'approved') {
+      const { data: goalItems, error: giErr } = await ctx.admin.from('employee_goal_items')
+        .select('id, item_type, parent_item_id, title, description, perspective, weight, target_type_key, target_value, display_order')
+        .eq('plan_id', plan.id).order('display_order');
+      if (giErr) { console.error('eval.context items', giErr); throw new ApiError('DB_ERROR', 'Database error', 500); }
+      items = goalItems ?? [];
+    }
+
+    // Group-scoped config (kpi rating mode / target level) — same lookup as goal.context.
+    const { data: assign } = await ctx.admin.from('cycle_participant_assignments')
+      .select('group_id').eq('cycle_id', cycleId).eq('employee_id', employeeId).eq('organization_id', orgId).maybeSingle();
+    let group: { kpi_rating_mode: string | null; target_level: string | null } | null = null;
+    if (assign?.group_id) {
+      const { data: g } = await ctx.admin.from('cycle_groups')
+        .select('kpi_rating_mode, target_level').eq('id', assign.group_id).eq('organization_id', orgId).maybeSingle();
+      group = g;
+    }
+
+    const octx = await scoringContext(ctx, orgId, cycleId, employeeId);
+    const { data: ratingScale, error: rsErr } = await ctx.admin.from('cycle_rating_scale_levels')
+      .select().eq('cycle_id', cycleId).eq('organization_id', orgId).order('point');
+    if (rsErr) { console.error('eval.context ratingScale', rsErr); throw new ApiError('DB_ERROR', 'Database error', 500); }
+
+    // Competencies the employee rates: cycle-wide (group_id null) or their own group's
+    // assignments — only fetched when competency rating is enabled for the cycle.
+    let competencyAssignments: Record<string, unknown>[] = [];
+    if (octx.cfg.enabled) {
+      const { data: caRows, error: caErr } = await ctx.admin.from('cycle_competency_assignments')
+        .select('id, group_id, role_name, competency_id, competency_name, kra_share, competency_share, display_order')
+        .eq('cycle_id', cycleId).eq('organization_id', orgId).order('display_order');
+      if (caErr) { console.error('eval.context competencyAssignments', caErr); throw new ApiError('DB_ERROR', 'Database error', 500); }
+      competencyAssignments = (caRows ?? []).filter((r) => r.group_id === null || r.group_id === assign?.group_id);
+    }
+
+    // Current self evaluation (if eval.ensure has been called) — LEFT-join its scores.
+    const bundle = await readEvalBundle(ctx, orgId, cycleId, employeeId, stage);
+    const goalScoreByItem = new Map((bundle.goalScores as { goal_item_id: string; achievement_value: string | null; achievement_percent: number | null; score: number | null; comment: string | null }[])
+      .map((s) => [s.goal_item_id, s]));
+    const itemsOut = items.map((it) => {
+      const gs = goalScoreByItem.get(it.id as string);
+      return { ...it, score: gs ? { achievement_value: gs.achievement_value, achievement_percent: gs.achievement_percent, score: gs.score, comment: gs.comment } : null };
+    });
+
+    const compScoreByName = new Map((bundle.competencyScores as { competency_name: string; score: number | null; comment: string | null }[])
+      .map((s) => [s.competency_name, s]));
+    const competenciesOut = competencyAssignments.map((c) => {
+      const cs = compScoreByName.get(c.competency_name as string);
+      return { ...c, score: cs ? { score: cs.score, comment: cs.comment } : null };
+    });
+
+    return {
+      cycle: cycleOut,
+      stage,
+      available,
+      reason,
+      window: { selfEvalOpen },
+      config: {
+        kpiRatingMode: group?.kpi_rating_mode === 'free-text' ? 'free-text' : 'rated',
+        targetLevelMode: group?.target_level ? group.target_level.toUpperCase() : null,
+        ratingScale: ratingScale ?? [],
+        autoRatingBands: octx.bands,
+        competency: { enabled: octx.cfg.enabled, weight: octx.cfg.competency_weight },
+      },
+      items: itemsOut,
+      competencies: competenciesOut,
+      evaluation: bundle.evaluation ? { id: bundle.evaluation.id, version: bundle.evaluation.version, status: bundle.evaluation.status } : null,
+    };
   },
 
   'eval.ensure': async (payload, ctx) => {
