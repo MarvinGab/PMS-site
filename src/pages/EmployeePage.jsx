@@ -28,6 +28,7 @@ import SelfEvalPage from './SelfEvalPage';
 import ManagerEvalPage, { PublishedManagerRatingView, HeroScoreTiles } from './ManagerEvalPage';
 import HRReviewPage from './HRReviewPage';
 import EmployeeGoals from './EmployeeGoals';
+import ManagerGoalReview from './ManagerGoalReview';
 
 const EMP_SESSION_KEY = 'zarohr_emp_session';
 const WIZARD_STATE_KEY = 'zarohr_pms_wizard_state_v1';
@@ -7080,22 +7081,11 @@ export default function EmployeePage() {
         rightPanel = null;
       }
     } else if (section === 'team' && directReports.length > 0) {
-      rightPanel = (
-        <div style={panelBoxStyle}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'center', marginBottom: 6 }}>
-            <div style={{ minWidth: 0 }}>
-              <div style={{ fontSize: 13, fontWeight: 800, color: '#fff' }}>Team submission status</div>
-              <div style={{ fontSize: 11.5, color: 'rgba(255,255,255,0.78)', marginTop: 2 }}>
-                <span style={{ color: '#FCA5A5', fontWeight: 700 }}>{teamSubmitted}</span> pending review · <span style={{ color: '#86EFAC', fontWeight: 700 }}>{teamApproved}</span> approved · <span style={{ fontWeight: 700 }}>{Math.max(0, teamTotal - teamDone)}</span> awaiting submit
-              </div>
-            </div>
-            <div style={{ fontSize: 20, fontWeight: 800, lineHeight: 1, color: '#FFFFFF', textShadow: '0 2px 14px rgba(15,23,42,0.22)' }}>{teamPct}%</div>
-          </div>
-          <div style={{ height: 5, background: 'rgba(255,255,255,0.24)', borderRadius: 999, overflow: 'hidden', boxShadow: 'inset 0 1px 3px rgba(15,23,42,0.22)' }}>
-            <div style={{ height: '100%', width: `${teamPct}%`, background: accentFill, borderRadius: 999, transition: 'width .25s ease' }} />
-          </div>
-        </div>
-      );
+      // Team goal review is now <ManagerGoalReview/> (backend-backed). The old
+      // "Team submission status" hero counted the now-frozen workflow blob
+      // (teamSubmitted/teamApproved), so it would show stale zeros next to the
+      // live review screen — suppress it until the blob is fully retired.
+      rightPanel = null;
     } else if (section === 'hod-calibration' && hodReports.length > 0) {
       rightPanel = (
         <div style={panelBoxStyle}>
@@ -7653,7 +7643,7 @@ export default function EmployeePage() {
               : <EmptyState title={`${PHASES[phaseIndex]?.label || 'Current phase'} in progress`} subtitle="This page will unlock the relevant workflow for the active appraisal phase." />
           )}
           {activeSection === 'deleted-goals' && renderDeletedGoals()}
-          {activeSection === 'team' && renderTeam()}
+          {activeSection === 'team' && <ManagerGoalReview />}
           {activeSection === 'send-mail' && renderSendMail()}
           {activeSection === 'messages' && renderMessages()}
           {activeSection === 'notifications' && renderNotifications()}
