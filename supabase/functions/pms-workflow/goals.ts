@@ -1,8 +1,13 @@
 import { ApiError, Handler, HandlerCtx } from '../_shared/kernel.ts';
 import { optNumber, optString, optUuid, reqArray, reqEnum, reqInt, reqObject, reqString, reqUuid } from '../_shared/validate.ts';
 import { callerEmployeeId, isHodOf, isHrOrSuper, manages } from '../_shared/scope.ts';
-import { loadActiveCycle, requireWindowOrHr } from '../_shared/phase.ts';
+import { loadActiveCycle, pureWindowOpen, requireWindowOrHr } from '../_shared/phase.ts';
 import { GoalNode, GoalRules, validateGoalTree } from './goalrules.ts';
+
+// phase.ts's todayIso() is module-private — mirror it here (date-granular, UTC).
+function todayIso(): string {
+  return new Date().toISOString().slice(0, 10);
+}
 
 async function readPlanBundle(ctx: HandlerCtx, orgId: string, cycleId: string, employeeId: string) {
   const { data: plan, error } = await ctx.admin.from('employee_goal_plans')
@@ -180,6 +185,98 @@ export const goalHandlers: Record<string, Handler> = {
     });
     const { data: items } = await ctx.admin.from('employee_goal_items').select().eq('plan_id', plan.id).order('display_order');
     return { plan: freshPlan, items: items ?? [] };
+  },
+
+  // One scoped read for the employee goals screen: active cycle + config + library +
+  // prefill + window + the plan bundle. Scoped to the caller unless HR/super passes employeeId.
+  'goal.context': async (payload, ctx) => {
+    const orgId = reqUuid(payload.orgId, 'orgId');
+    const requested = optUuid(payload.employeeId, 'employeeId');
+    const employeeId = requested && (await isHrOrSuper(ctx, orgId)) ? requested : callerEmployeeId(ctx, orgId);
+
+    // Active/working cycle for the org (one active cycle per org).
+    const { data: cycle, error: cErr } = await ctx.admin.from('appraisal_cycles')
+      .select('id, name, status').eq('organization_id', orgId).eq('status', 'active').maybeSingle();
+    if (cErr) { console.error('goal.context cycle', cErr); throw new ApiError('DB_ERROR', 'Database error', 500); }
+    if (!cycle) return { cycle: null, participant: false, config: null, library: { items: [] }, prefill: { items: [] }, window: { goalOpen: false }, plan: null, items: [], competencies: [] };
+    const cycleId = cycle.id;
+
+    const { data: part, error: pErr } = await ctx.admin.from('cycle_participants')
+      .select('id').eq('cycle_id', cycleId).eq('employee_id', employeeId).eq('organization_id', orgId).maybeSingle();
+    if (pErr) { console.error('goal.context participant', pErr); throw new ApiError('DB_ERROR', 'Database error', 500); }
+    const cycleOut = { id: cycle.id, name: cycle.name, status: cycle.status };
+    if (!part) return { cycle: cycleOut, participant: false, config: null, library: { items: [] }, prefill: { items: [] }, window: { goalOpen: false }, plan: null, items: [], competencies: [] };
+
+    const { data: assign } = await ctx.admin.from('cycle_participant_assignments')
+      .select('group_id, goal_library_id, prefill_dataset_id').eq('cycle_id', cycleId).eq('employee_id', employeeId).eq('organization_id', orgId).maybeSingle();
+
+    // NOTE (discovery, Plan 5b Task 1): cycle_groups has no goal_creation_mode/goal_kpi_mode
+    // columns. Real columns: has_library (bool), prefill_type (text), target_level
+    // ('kra'|'kpi'|'custom'), kpi_rating_mode (text), can_edit_own_goals (bool).
+    let group: { can_edit_own_goals: boolean | null; kpi_rating_mode: string | null; has_library: boolean | null; prefill_type: string | null; target_level: string | null } | null = null;
+    if (assign?.group_id) {
+      const { data: g } = await ctx.admin.from('cycle_groups')
+        .select('can_edit_own_goals, kpi_rating_mode, has_library, prefill_type, target_level').eq('id', assign.group_id).eq('organization_id', orgId).maybeSingle();
+      group = g;
+    }
+
+    const { data: snapRow } = await ctx.admin.from('cycle_config_snapshots').select('snapshot').eq('cycle_id', cycleId).eq('organization_id', orgId).maybeSingle();
+    const snap = (snapRow?.snapshot ?? {}) as Record<string, any>;
+    const { data: targetTypes } = await ctx.admin.from('cycle_target_types').select().eq('cycle_id', cycleId).eq('organization_id', orgId).order('display_order');
+    const { data: ratingScale } = await ctx.admin.from('cycle_rating_scale_levels').select().eq('cycle_id', cycleId).eq('organization_id', orgId).order('point');
+    const { data: goalRules } = await ctx.admin.from('cycle_goal_rules').select().eq('cycle_id', cycleId).eq('organization_id', orgId);
+
+    // Library items (add-from-library) — only if the assigned library is active.
+    let library: { id?: string; items: unknown[] } = { items: [] };
+    if (assign?.goal_library_id) {
+      const { data: lib } = await ctx.admin.from('goal_libraries').select('id, status').eq('id', assign.goal_library_id).eq('organization_id', orgId).maybeSingle();
+      if (lib?.status === 'active') {
+        const { data: libItems } = await ctx.admin.from('goal_library_items').select().eq('goal_library_id', assign.goal_library_id).order('display_order');
+        library = { id: lib.id, items: libItems ?? [] };
+      }
+    }
+
+    // Prefill rows for this employee (by employee_code).
+    let prefill: { items: unknown[] } = { items: [] };
+    if (assign?.prefill_dataset_id) {
+      const { data: ds } = await ctx.admin.from('prefill_datasets').select('id, status').eq('id', assign.prefill_dataset_id).eq('organization_id', orgId).maybeSingle();
+      if (ds?.status === 'active') {
+        const { data: emp } = await ctx.admin.from('employees').select('employee_code').eq('id', employeeId).eq('organization_id', orgId).maybeSingle();
+        if (emp?.employee_code) {
+          const { data: pf } = await ctx.admin.from('prefill_dataset_items').select().eq('prefill_dataset_id', assign.prefill_dataset_id).eq('employee_code', emp.employee_code).order('display_order');
+          prefill = { items: pf ?? [] };
+        }
+      }
+    }
+
+    const { data: windows } = await ctx.admin.from('cycle_phase_windows').select('window_key, starts_on, ends_on').eq('cycle_id', cycleId).eq('organization_id', orgId);
+    const goalOpen = pureWindowOpen((windows ?? []) as { window_key: string; starts_on: string; ends_on: string }[], 'goal_creation', todayIso()) || (await isHrOrSuper(ctx, orgId));
+
+    const bundle = await readPlanBundle(ctx, orgId, cycleId, employeeId);
+
+    return {
+      cycle: cycleOut,
+      participant: true,
+      config: {
+        // has_library declares an admin-curated library group; prefill_type ('kra-only' |
+        // 'kra-kpi') declares admin-driven prefilled goals. Both are orthogonal per-group
+        // flags in the new schema (unlike the old blob model's single prefillType field).
+        goalCreationMode: group?.has_library ? 'admin-library' : 'employee-self',
+        goalKpiMode: (group?.prefill_type === 'kra-only' || group?.prefill_type === 'kras-only')
+          ? 'kra-only'
+          : (snap?.targets?.goalKpiMode ?? 'kra-kpi'),
+        kpiRatingMode: group?.kpi_rating_mode === 'free-text' ? 'free-text' : 'rated',
+        targetLevelMode: (group?.target_level ? group.target_level.toUpperCase() : null) ?? snap?.targets?.targetLevelMode ?? 'KPI',
+        targetTypes: targetTypes ?? [],
+        ratingScale: ratingScale ?? [],
+        canEditOwnGoals: group?.can_edit_own_goals ?? false,
+        goalRules: goalRules ?? [],
+      },
+      library,
+      prefill,
+      window: { goalOpen },
+      ...bundle,
+    };
   },
 };
 

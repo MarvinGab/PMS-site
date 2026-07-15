@@ -325,6 +325,26 @@ export async function setupCloseoutCycle() {
   check('workflow events recorded (submitted/sent_back/submitted/approved/reopened)', (events ?? []).length >= 5);
 }
 
+// --- goal.context: one scoped read for the employee's goal screen ---
+// Must run before the "phase gating" block below, which archives fixture.cycleId.
+{
+  const ctxRes = await callWorkflow(tokens.employee, 'goal.context', { orgId: fixture.orgId });
+  check('goal.context returns the active cycle', ctxRes.status === 200 && ctxRes.body.data.cycle?.id === fixture.cycleId);
+  check('goal.context marks the employee a participant', ctxRes.body.data.participant === true);
+  check('goal.context carries goal config', !!ctxRes.body.data.config && typeof ctxRes.body.data.config.goalCreationMode === 'string' && Array.isArray(ctxRes.body.data.config.targetTypes));
+  check('goal.context carries the library items for add-from-library', Array.isArray(ctxRes.body.data.library?.items) && ctxRes.body.data.library.items.length >= 1);
+  check('goal.context reports the goal window open', ctxRes.body.data.window?.goalOpen === true);
+  check('goal.context includes the plan bundle (plan/items)', 'plan' in ctxRes.body.data && Array.isArray(ctxRes.body.data.items));
+
+  // HR (no employee row of their own) viewing EMP004 — roster-only, never a participant in
+  // this cycle — must return participant:false gracefully, not crash. (HR calling with no
+  // employeeId would hit NO_EMPLOYEE via callerEmployeeId, same as goal.save-items above, so
+  // this exercises the isHrOrSuper + explicit-employeeId path instead.)
+  const { data: outsideEmp } = await admin.from('employees').select('id').eq('organization_id', fixture.orgId).eq('employee_code', 'EMP004').single();
+  const hrCtx = await callWorkflow(tokens.hr, 'goal.context', { orgId: fixture.orgId, employeeId: outsideEmp.id });
+  check('goal.context for a non-participant returns participant:false', hrCtx.status === 200 && hrCtx.body.data.participant === false);
+}
+
 // --- phase gating: goal edits refused when the goal_creation window is closed ---
 {
   const iso = (d) => d.toISOString().slice(0, 10);
