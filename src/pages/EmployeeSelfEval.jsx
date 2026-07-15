@@ -430,6 +430,9 @@ export default function EmployeeSelfEval() {
     }
     if (e instanceof PmsError && e.code === 'NOTHING_SCORED') {
       setActionError('Rate at least one goal before submitting.');
+      // submit() saved first (bumping the version) before this fired — re-sync so a
+      // retry doesn't spuriously hit CONFLICT on the now-stale local version.
+      await refreshBackground();
       return;
     }
     setActionError(e instanceof PmsError ? e.message : `Could not ${verb}.`);
@@ -566,7 +569,7 @@ export default function EmployeeSelfEval() {
           node={node}
           index={i}
           color={accentFor(node.kra.id, i)}
-          editable={editable}
+          editable={editable && !busy}
           readOnly={readOnly}
           kpiRatingMode={config.kpiRatingMode}
           ratingScale={config.ratingScale}
@@ -587,7 +590,7 @@ export default function EmployeeSelfEval() {
               key={comp.id ?? comp.competency_name}
               comp={comp}
               color={accentFor(comp.competency_name, i)}
-              editable={editable}
+              editable={editable && !busy}
               readOnly={readOnly}
               ratingScale={config.ratingScale}
               edit={compEdits[comp.competency_name]}
