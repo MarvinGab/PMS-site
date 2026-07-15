@@ -286,6 +286,24 @@ export async function setupCloseoutCycle() {
   check('employee submits the plan', submit.status === 200 && submit.body.data.plan.status === 'submitted');
   v = submit.body.data.plan.version;
 
+  // --- goal.review-queue: manager-scoped list of direct reports' goal-plan status ---
+  // Run right after submit (before send-back/approve mutate the status further) so
+  // EMP002's planStatus is deterministically 'submitted' here.
+  {
+    const rq = await callWorkflow(tokens.manager, 'goal.review-queue', { orgId: fixture.orgId });
+    check('review-queue returns the active cycle', rq.status === 200 && rq.body.data.cycle?.id === fixture.cycleId);
+    check('review-queue reports approvalOpen true (manager_approval window is open)', rq.body.data.window?.approvalOpen === true);
+    const eve = (rq.body.data.reports ?? []).find((r) => r.employeeId === fixture.emp.EMP002);
+    check('review-queue lists EMP002 as a direct report', !!eve);
+    check('review-queue reflects the submitted plan status', eve?.planStatus === 'submitted');
+    check('review-queue carries a numeric planVersion', typeof eve?.planVersion === 'number');
+    check('review-queue kraCount is a number', typeof eve?.kraCount === 'number');
+
+    // Eve (EMP002) manages no one — must get an empty list, not Mary's (EMP001) or anyone else's data.
+    const empRq = await callWorkflow(tokens.employee, 'goal.review-queue', { orgId: fixture.orgId });
+    check('a non-manager caller gets reports: [] from review-queue', empRq.status === 200 && Array.isArray(empRq.body.data.reports) && empRq.body.data.reports.length === 0);
+  }
+
   const empApprove = await callWorkflow(tokens.employee, 'goal.approve', { orgId: fixture.orgId, cycleId: fixture.cycleId, employeeId: fixture.emp.EMP002, planVersion: v });
   check('employee cannot approve their own plan', empApprove.status === 403);
 

@@ -278,6 +278,76 @@ export const goalHandlers: Record<string, Handler> = {
       ...bundle,
     };
   },
+
+  // Manager-scoped LIST read for the goal-approval screen: the caller's direct reports
+  // (reporting_relationships, relation_type manager/l2 — same set manages() checks)
+  // intersected with the active cycle's active participants, each left-joined to their
+  // employee_goal_plans row (status/version/submitted_at) and a KRA count.
+  'goal.review-queue': async (payload, ctx) => {
+    const orgId = reqUuid(payload.orgId, 'orgId');
+    const managerEmployeeId = callerEmployeeId(ctx, orgId);
+
+    const { data: cycle, error: cErr } = await ctx.admin.from('appraisal_cycles')
+      .select('id, name, status').eq('organization_id', orgId).eq('status', 'active').maybeSingle();
+    if (cErr) { console.error('goal.review-queue cycle', cErr); throw new ApiError('DB_ERROR', 'Database error', 500); }
+    if (!cycle) return { cycle: null, window: { approvalOpen: false }, reports: [] };
+    const cycleId = cycle.id;
+    const cycleOut = { id: cycle.id, name: cycle.name, status: cycle.status };
+
+    const { data: windows, error: wErr } = await ctx.admin.from('cycle_phase_windows')
+      .select('window_key, starts_on, ends_on').eq('cycle_id', cycleId).eq('organization_id', orgId);
+    if (wErr) { console.error('goal.review-queue windows', wErr); throw new ApiError('DB_ERROR', 'Database error', 500); }
+    const approvalOpen = pureWindowOpen((windows ?? []) as { window_key: string; starts_on: string; ends_on: string }[], 'manager_approval', todayIso()) || (await isHrOrSuper(ctx, orgId));
+
+    // Direct reports: reporting_relationships rows where related_employee_id (the "related
+    // to") is the caller and relation_type is manager/l2 — mirrors _shared/scope.ts manages().
+    const { data: rels, error: rErr } = await ctx.admin.from('reporting_relationships')
+      .select('employee_id').eq('organization_id', orgId).eq('related_employee_id', managerEmployeeId).in('relation_type', ['manager', 'l2']);
+    if (rErr) { console.error('goal.review-queue relations', rErr); throw new ApiError('DB_ERROR', 'Database error', 500); }
+    const reportIds = [...new Set((rels ?? []).map((r) => r.employee_id as string))];
+    if (reportIds.length === 0) return { cycle: cycleOut, window: { approvalOpen }, reports: [] };
+
+    // Intersect with this cycle's active participants.
+    const { data: parts, error: pErr } = await ctx.admin.from('cycle_participants')
+      .select('employee_id').eq('organization_id', orgId).eq('cycle_id', cycleId).eq('status', 'active').in('employee_id', reportIds);
+    if (pErr) { console.error('goal.review-queue participants', pErr); throw new ApiError('DB_ERROR', 'Database error', 500); }
+    const participantIds = (parts ?? []).map((p) => p.employee_id as string);
+    if (participantIds.length === 0) return { cycle: cycleOut, window: { approvalOpen }, reports: [] };
+
+    const { data: emps, error: eErr } = await ctx.admin.from('employees')
+      .select('id, full_name, employee_code').eq('organization_id', orgId).in('id', participantIds);
+    if (eErr) { console.error('goal.review-queue employees', eErr); throw new ApiError('DB_ERROR', 'Database error', 500); }
+
+    const { data: plans, error: plErr } = await ctx.admin.from('employee_goal_plans')
+      .select('id, employee_id, status, version, submitted_at').eq('organization_id', orgId).eq('cycle_id', cycleId).in('employee_id', participantIds);
+    if (plErr) { console.error('goal.review-queue plans', plErr); throw new ApiError('DB_ERROR', 'Database error', 500); }
+    const planByEmp = new Map((plans ?? []).map((p) => [p.employee_id as string, p]));
+
+    const planIds = (plans ?? []).map((p) => p.id as string);
+    const kraCountByPlan = new Map<string, number>();
+    if (planIds.length > 0) {
+      const { data: items, error: iErr } = await ctx.admin.from('employee_goal_items')
+        .select('plan_id').eq('organization_id', orgId).eq('item_type', 'kra').in('plan_id', planIds);
+      if (iErr) { console.error('goal.review-queue items', iErr); throw new ApiError('DB_ERROR', 'Database error', 500); }
+      for (const it of items ?? []) kraCountByPlan.set(it.plan_id, (kraCountByPlan.get(it.plan_id) ?? 0) + 1);
+    }
+
+    const reports = (emps ?? []).map((e) => {
+      const plan = planByEmp.get(e.id as string) ?? null;
+      return {
+        employeeId: e.id as string,
+        employeeName: e.full_name as string,
+        employeeCode: e.employee_code as string,
+        planId: plan?.id ?? null,
+        planStatus: plan?.status ?? null,
+        planVersion: plan?.version ?? null,
+        submittedAt: plan?.submitted_at ?? null,
+        kraCount: plan ? (kraCountByPlan.get(plan.id) ?? 0) : 0,
+      };
+    }).sort((a, b) => a.employeeName.localeCompare(b.employeeName));
+
+    return { cycle: cycleOut, window: { approvalOpen }, reports };
+  },
 };
 
 // Seed goal items from the participant's assigned library (KRA/KPI tree) + prefill dataset.
