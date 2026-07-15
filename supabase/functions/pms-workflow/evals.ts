@@ -192,6 +192,11 @@ export const evalHandlers: Record<string, Handler> = {
         .select('kpi_rating_mode, target_level').eq('id', assign.group_id).eq('organization_id', orgId).maybeSingle();
       group = g;
     }
+    // Cycle-wide Targets-step default (set in the wizard, persisted in the snapshot) — the
+    // middle fallback goal.context uses; without it the two screens can disagree on target level.
+    const { data: snapRow } = await ctx.admin.from('cycle_config_snapshots')
+      .select('snapshot').eq('cycle_id', cycleId).eq('organization_id', orgId).maybeSingle();
+    const snap = (snapRow?.snapshot ?? {}) as { targets?: { targetLevelMode?: string } };
 
     const octx = await scoringContext(ctx, orgId, cycleId, employeeId);
     const { data: ratingScale, error: rsErr } = await ctx.admin.from('cycle_rating_scale_levels')
@@ -233,9 +238,9 @@ export const evalHandlers: Record<string, Handler> = {
       window: { selfEvalOpen },
       config: {
         kpiRatingMode: group?.kpi_rating_mode === 'free-text' ? 'free-text' : 'rated',
-        // Fall back to 'KPI' (same default as goal.context) so an ungrouped employee
-        // sees a consistent targetLevelMode across the goals and self-eval screens.
-        targetLevelMode: group?.target_level ? group.target_level.toUpperCase() : 'KPI',
+        // Match goal.context's full fallback chain: group override → cycle-wide snapshot
+        // default → 'KPI' — so the goals and self-eval screens always agree on target level.
+        targetLevelMode: (group?.target_level ? group.target_level.toUpperCase() : null) ?? snap?.targets?.targetLevelMode ?? 'KPI',
         ratingLevel: octx.ratingLevel,   // authoritative KRA-vs-KPI scoring tier (from ratingLevelFor)
         ratingScale: ratingScale ?? [],
         autoRatingBands: octx.bands,

@@ -499,7 +499,11 @@ export default function EmployeeSelfEval() {
   }
   if (!ctx?.cycle) return <div style={{ padding: 20, fontSize: 13.5, color: '#64748B' }}>No active appraisal cycle yet.</div>;
 
-  if (!ctx.available && !ctx.evaluation) {
+  // Show the reason banner whenever self-eval isn't available AND the employee hasn't
+  // already submitted — this also covers a draft that LOST availability mid-flight (e.g.
+  // HR reopened the goal plan), which otherwise fell through to a broken empty form with
+  // Save/Submit still enabled. A submitted evaluation (readOnly) still renders below.
+  if (!ctx.available && !readOnly) {
     return (
       <div style={{ padding: 20 }}>
         <div style={{ fontSize: 17, fontWeight: 800, color: '#0F172A', marginBottom: 10 }}>{ctx.cycle.name}</div>
@@ -602,8 +606,8 @@ export default function EmployeeSelfEval() {
 
       {editable && (
         <div style={{ display: 'flex', gap: 10, marginTop: 8 }}>
-          <button type="button" className="btn" disabled={busy || !ctx.window?.selfEvalOpen} onClick={save}>Save</button>
-          <button type="button" className="btn btn-primary" disabled={busy || !ctx.window?.selfEvalOpen} onClick={submit}>Submit</button>
+          <button type="button" className="btn" disabled={busy || !ctx.available || !ctx.window?.selfEvalOpen} onClick={save}>Save</button>
+          <button type="button" className="btn btn-primary" disabled={busy || !ctx.available || !ctx.window?.selfEvalOpen} onClick={submit}>Submit</button>
         </div>
       )}
     </div>
