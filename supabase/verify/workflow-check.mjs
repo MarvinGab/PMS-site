@@ -427,6 +427,11 @@ export const evalFixture = await setupEvalCycle();
   const hrCtx = await callWorkflow(tokens.hr, 'eval.context', { orgId: evalFixture.orgId, cycleId: evalFixture.cycleId, employeeId: evalFixture.emp.EMP002 });
   check('HR can fetch eval.context for an explicit employeeId', hrCtx.status === 200 && hrCtx.body.data.available === true);
 
+  // HR bypasses ONLY the window, NOT the goals-approved gate: targeting an employee whose
+  // plan is not approved (EMP001, draft) must still be available:false/GOALS_NOT_APPROVED.
+  const hrUnapproved = await callWorkflow(tokens.hr, 'eval.context', { orgId: evalFixture.orgId, cycleId: evalFixture.cycleId, employeeId: evalFixture.emp.EMP001 });
+  check('HR does NOT bypass the goals-approved gate (available:false for an unapproved employee)', hrUnapproved.status === 200 && hrUnapproved.body.data.available === false && hrUnapproved.body.data.reason === 'GOALS_NOT_APPROVED');
+
   // Non-owner, non-HR callers always see their OWN context (employeeId param is ignored
   // for them, mirroring goal.context) — so this exercises available:false via each's own
   // unapproved/missing plan rather than a 403 on someone else's data.

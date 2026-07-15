@@ -135,13 +135,17 @@ export const evalHandlers: Record<string, Handler> = {
     const employeeId = requested && (await isHrOrSuper(ctx, orgId)) ? requested : callerEmployeeId(ctx, orgId);
     const stage = 'self';
 
-    const emptyConfig = { kpiRatingMode: null, targetLevelMode: null, ratingScale: [] as unknown[], autoRatingBands: [] as unknown[], competency: { enabled: false, weight: null as number | null } };
+    const emptyConfig = { kpiRatingMode: null, targetLevelMode: null, ratingLevel: null, ratingScale: [] as unknown[], autoRatingBands: [] as unknown[], competency: { enabled: false, weight: null as number | null } };
 
     // The org's current evaluable cycle (self-evaluation only ever runs while the cycle
     // is active or, at the tail end, still under review — mirrors loadEvaluableCycle's
     // allowed statuses so an already-submitted self stage stays viewable).
+    // order+limit(1) so an org that has BOTH an active cycle (next period) and a
+    // review cycle (prior period, post-revoke) can't make .maybeSingle() error → 500;
+    // newest-first prefers the current active cycle.
     const { data: cycle, error: cErr } = await ctx.admin.from('appraisal_cycles')
-      .select('id, name, status').eq('organization_id', orgId).in('status', ['active', 'review']).maybeSingle();
+      .select('id, name, status').eq('organization_id', orgId).in('status', ['active', 'review'])
+      .order('created_at', { ascending: false }).limit(1).maybeSingle();
     if (cErr) { console.error('eval.context cycle', cErr); throw new ApiError('DB_ERROR', 'Database error', 500); }
     if (!cycle) {
       return { cycle: null, stage, available: false, reason: 'NO_PLAN', window: { selfEvalOpen: false }, config: emptyConfig, items: [], competencies: [], evaluation: null };
@@ -229,7 +233,10 @@ export const evalHandlers: Record<string, Handler> = {
       window: { selfEvalOpen },
       config: {
         kpiRatingMode: group?.kpi_rating_mode === 'free-text' ? 'free-text' : 'rated',
-        targetLevelMode: group?.target_level ? group.target_level.toUpperCase() : null,
+        // Fall back to 'KPI' (same default as goal.context) so an ungrouped employee
+        // sees a consistent targetLevelMode across the goals and self-eval screens.
+        targetLevelMode: group?.target_level ? group.target_level.toUpperCase() : 'KPI',
+        ratingLevel: octx.ratingLevel,   // authoritative KRA-vs-KPI scoring tier (from ratingLevelFor)
         ratingScale: ratingScale ?? [],
         autoRatingBands: octx.bands,
         competency: { enabled: octx.cfg.enabled, weight: octx.cfg.competency_weight },
