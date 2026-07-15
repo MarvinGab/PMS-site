@@ -29,6 +29,7 @@ import ManagerEvalPage, { PublishedManagerRatingView, HeroScoreTiles } from './M
 import HRReviewPage from './HRReviewPage';
 import EmployeeGoals from './EmployeeGoals';
 import ManagerGoalReview from './ManagerGoalReview';
+import EmployeeSelfEval from './EmployeeSelfEval';
 
 const EMP_SESSION_KEY = 'zarohr_emp_session';
 const WIZARD_STATE_KEY = 'zarohr_pms_wizard_state_v1';
@@ -7055,23 +7056,11 @@ export default function EmployeePage() {
       rightPanel = <HeroScoreTiles orgKey={session?.orgKey} empCode={employee?.['Employee Code']} config={config} />;
     } else if (section === 'goals' && canSetOwnGoals) {
       if (currentPhase === 'self-evaluation') {
-        const pct = selfEvalPct;
-        const tone = '#FFFFFF';
-        const fill = accentFill;
-        rightPanel = (
-          <div style={panelBoxStyle}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'center', marginBottom: 6 }}>
-              <div style={{ minWidth: 0 }}>
-                <div style={{ fontSize: 13, fontWeight: 800, color: '#fff' }}>Self-rating progress</div>
-                <div style={{ fontSize: 11.5, color: 'rgba(255,255,255,0.72)', marginTop: 2 }}>{totalRated} of {totalRatable} rated</div>
-              </div>
-              <div style={{ fontSize: 20, fontWeight: 800, lineHeight: 1, color: tone, textShadow: '0 2px 14px rgba(15,23,42,0.22)' }}>{pct}%</div>
-            </div>
-            <div style={{ height: 5, background: 'rgba(255,255,255,0.24)', borderRadius: 999, overflow: 'hidden', boxShadow: 'inset 0 1px 3px rgba(15,23,42,0.22)' }}>
-              <div style={{ height: '100%', width: `${pct}%`, background: fill, borderRadius: 999, transition: 'width .25s ease', boxShadow: `0 0 18px ${tone}` }} />
-            </div>
-          </div>
-        );
+        // Self-eval is now <EmployeeSelfEval/> (Plan 5c), backend-backed with its own
+        // progress. The old "Self-rating progress" hero read the now-frozen workflow
+        // blob (selfEvalPct), so it would show a stale count next to the live screen —
+        // suppress it until the blob is fully retired.
+        rightPanel = null;
       } else {
         // Goal-setting phase: the goal editor is now <EmployeeGoals/> (Plan 5b),
         // which reads/writes only the pms-workflow backend and shows its own live
@@ -7639,7 +7628,7 @@ export default function EmployeePage() {
           {/* ── Section content ── */}
           {activeSection === 'goals' && (
             currentPhase === 'goal-setting' ? <EmployeeGoals />
-              : currentPhase === 'self-evaluation' ? renderSelfEvaluation()
+              : currentPhase === 'self-evaluation' ? <EmployeeSelfEval />
               : <EmptyState title={`${PHASES[phaseIndex]?.label || 'Current phase'} in progress`} subtitle="This page will unlock the relevant workflow for the active appraisal phase." />
           )}
           {activeSection === 'deleted-goals' && renderDeletedGoals()}
@@ -7649,9 +7638,7 @@ export default function EmployeePage() {
           {activeSection === 'notifications' && renderNotifications()}
           {activeSection === 'profile' && renderProfile()}
           {activeSection === 'score' && renderScore()}
-          {activeSection === 'self-eval' && (
-            <SelfEvalPage embedded overrideEmpCode={session?.empCode || ''} overrideOrgKey={session?.orgKey || ''} />
-          )}
+          {activeSection === 'self-eval' && <EmployeeSelfEval />}
           {activeSection === 'manager-eval' && (
             <ManagerEvalPage embedded overrideMgrCode={session?.empCode || ''} overrideOrgKey={session?.orgKey || ''} />
           )}

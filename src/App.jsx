@@ -17,6 +17,7 @@ const EMP_CREDENTIALS_KEY = 'zarohr_emp_credentials';
 const PMSWizard = lazy(() => import('./PMSWizard'));
 const HRCycleDashboard = lazy(() => import('./pages/HRCycleDashboard'));
 const SelfEvalPage = lazy(() => import('./pages/SelfEvalPage'));
+const EmployeeSelfEval = lazy(() => import('./pages/EmployeeSelfEval'));
 const ManagerEvalPage = lazy(() => import('./pages/ManagerEvalPage'));
 const HRReviewPage = lazy(() => import('./pages/HRReviewPage'));
 
@@ -368,7 +369,7 @@ function Router() {
   // Public routes (no auth needed)
   if (route === 'login') return withSessionModal(<LoginPage />);
   if (route === 'set-password') return withSessionModal(<SetPasswordPage />);
-  if (route === 'self-eval') return withSessionModal(<Suspense fallback={<BootScreen />}><SelfEvalPage /></Suspense>);
+  if (route === 'self-eval') return withSessionModal(<Suspense fallback={<BootScreen />}><EmployeeSelfEval /></Suspense>);
   if (route === 'manager-eval') return withSessionModal(<Suspense fallback={<BootScreen />}><ManagerEvalPage /></Suspense>);
 
   // Truly signed out (no Supabase session at all) → login.
