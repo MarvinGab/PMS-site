@@ -297,7 +297,9 @@ export async function setupCloseoutCycle() {
     check('review-queue lists EMP002 as a direct report', !!eve);
     check('review-queue reflects the submitted plan status', eve?.planStatus === 'submitted');
     check('review-queue carries a numeric planVersion', typeof eve?.planVersion === 'number');
-    check('review-queue kraCount is a number', typeof eve?.kraCount === 'number');
+    // Exact value (not just typeof): EMP002's saved tree above has 2 KRAs, so a broken
+    // KRA-count join (silently falling back to 0) would fail this, unlike a typeof check.
+    check('review-queue kraCount reflects the 2 saved KRAs', eve?.kraCount === 2);
 
     // Eve (EMP002) manages no one — must get an empty list, not Mary's (EMP001) or anyone else's data.
     const empRq = await callWorkflow(tokens.employee, 'goal.review-queue', { orgId: fixture.orgId });
