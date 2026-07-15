@@ -212,32 +212,36 @@ export default function ManagerGoalReview() {
   const [showSendBack, setShowSendBack] = useState(false);
   const [note, setNote] = useState('');
 
-  const loadQueue = useCallback(async () => {
-    setStatus('loading'); setError('');
+  // background=true → a post-action refetch: keep the current view mounted (no
+  // full-screen 'loading' flip) so approving/sending-back doesn't blank the UI.
+  const loadQueue = useCallback(async (background = false) => {
+    if (!background) { setStatus('loading'); setError(''); }
     try {
       const data = await callWorkflow('goal.review-queue', { orgId });
       setQueue(data);
       setStatus('ready');
       return data;
     } catch (e) {
-      setError(e instanceof PmsError ? e.message : 'Could not load your review queue.');
-      setStatus('error');
+      const msg = e instanceof PmsError ? e.message : 'Could not load your review queue.';
+      if (background) { setActionError(msg); }        // keep the current queue visible
+      else { setError(msg); setStatus('error'); }
       return null;
     }
   }, [orgId]);
 
   useEffect(() => { if (orgId) loadQueue(); }, [orgId, loadQueue]);
 
-  const loadDetail = useCallback(async (employeeId, cycleId) => {
+  const loadDetail = useCallback(async (employeeId, cycleId, background = false) => {
     if (!employeeId || !cycleId) return;
-    setDetailStatus('loading'); setDetailError('');
+    if (!background) { setDetailStatus('loading'); setDetailError(''); }
     try {
       const data = await callWorkflow('goal.get-plan', { orgId, cycleId, employeeId });
       setDetail(data);
       setDetailStatus('ready');
     } catch (e) {
-      setDetailError(e instanceof PmsError ? e.message : "Could not load this report's goals.");
-      setDetailStatus('error');
+      const msg = e instanceof PmsError ? e.message : "Could not load this report's goals.";
+      if (background) { setActionError(msg); }        // keep the current detail visible
+      else { setDetailError(msg); setDetailStatus('error'); }
     }
   }, [orgId]);
 
@@ -255,8 +259,10 @@ export default function ManagerGoalReview() {
   );
 
   async function refreshAfterAction() {
-    const fresh = await loadQueue();
-    if (selectedId && fresh?.cycle?.id) await loadDetail(selectedId, fresh.cycle.id);
+    // Background refetch: the list + detail update in place without the screen
+    // (and the just-set approve/send-back banner) flashing through 'loading'.
+    const fresh = await loadQueue(true);
+    if (selectedId && fresh?.cycle?.id) await loadDetail(selectedId, fresh.cycle.id, true);
   }
 
   async function handleActionError(e) {
@@ -312,7 +318,7 @@ export default function ManagerGoalReview() {
     return (
       <div style={{ padding: 20 }}>
         <div className="login-error" style={{ marginBottom: 12 }}>{error}</div>
-        <button type="button" className="btn" onClick={loadQueue}>Retry</button>
+        <button type="button" className="btn" onClick={() => loadQueue()}>Retry</button>
       </div>
     );
   }
