@@ -4,16 +4,11 @@
 // publish.publish / publish.revoke via callPms; calibration.adjust via callWorkflow). No
 // org-blob, no browser-persisted cache, no legacy data-layer module.
 //
-// NOTE on `cycleId`: the deployed `publish.review-list` handler (supabase/functions/pms-admin/
-// publishing.ts) requires an explicit `cycleId` — unlike `goal.review-queue`/`eval.context`,
-// it does NOT resolve "the org's current review-status cycle" server-side (confirmed live via
-// admin-check.mjs's `publish.review-list` assertions, which always pass `cycleId: pcycle.id`).
-// There is no deployed read that lets this screen discover that id on its own (no cycle-list/
-// current-cycle-for-HR action exists), and adding one is outside this task's file scope
-// (`src/pages/HRPublishReview.jsx` only — no backend changes/deploys here). So this component
-// takes `cycleId` as a prop: whichever screen hosts it (Task 3's routing / a cycle picker)
-// already knows which cycle it's drilling into, and passes the id down. Every write action
-// below then sources its own cycleId from the loaded `data.cycle.id`, matching the contract.
+// NOTE on `cycleId`: the prop is OPTIONAL. Without it, `publish.review-list` auto-resolves
+// the org's reviewable cycle server-side (review > published > active, newest first) — same
+// pattern as `goal.review-queue`/`eval.context` — so the standalone route needs no cycle
+// picker. A host that IS drilling into a specific cycle may still pass the id down. Every
+// write action below sources its own cycleId from the loaded `data.cycle.id`.
 //
 // The status-pill / accent / background-refetch grammar mirrors ManagerGoalReview.jsx and
 // EmployeeSelfEval.jsx: post-action refetches pass `background=true` so a save/publish/revoke
@@ -201,7 +196,7 @@ function ParticipantRow({
 
 // ---- Main component ---------------------------------------------------------------------
 
-export default function HRPublishReview({ cycleId }) {
+export default function HRPublishReview({ cycleId = null }) {
   const { orgId, role } = useApp();
   const canView = !!orgId && (role === 'hr_admin' || role === 'super_admin');
 
@@ -228,10 +223,14 @@ export default function HRPublishReview({ cycleId }) {
   // place) instead of flipping the whole screen back to 'loading' — used for post-action
   // refetches and pagination alike, per the ManagerGoalReview/EmployeeSelfEval pattern.
   const load = useCallback(async (offsetVal, background = false) => {
-    if (!orgId || !cycleId) return null;
+    if (!orgId) return null;
     if (!background) { setStatus('loading'); setError(''); } else { setListBusy(true); }
     try {
-      const result = await callPms('publish.review-list', { orgId, cycleId, limit: PAGE_SIZE, offset: offsetVal });
+      // cycleId is optional: without it the backend auto-resolves the org's reviewable
+      // cycle (review > published > active) — all follow-up calls use data.cycle.id.
+      const result = await callPms('publish.review-list', {
+        orgId, ...(cycleId ? { cycleId } : {}), limit: PAGE_SIZE, offset: offsetVal,
+      });
       setData(result);
       setOffset(offsetVal);
       if (!background) setStatus('ready');
@@ -245,7 +244,7 @@ export default function HRPublishReview({ cycleId }) {
     }
   }, [orgId, cycleId]);
 
-  useEffect(() => { if (canView && cycleId) load(0); }, [canView, cycleId, load]);
+  useEffect(() => { if (canView) load(0); }, [canView, load]);
 
   async function refreshAfterAction() {
     await load(offset, true);
@@ -366,9 +365,6 @@ export default function HRPublishReview({ cycleId }) {
 
   if (!canView) {
     return <div style={{ padding: 20, fontSize: 13.5, color: '#64748B' }}>You don't have access to this screen.</div>;
-  }
-  if (!cycleId) {
-    return <div style={{ padding: 20, fontSize: 13.5, color: '#64748B' }}>No cycle in review yet.</div>;
   }
   if (status === 'loading') {
     return <div style={{ padding: 20, fontSize: 13.5, color: '#64748B' }}>Loading the review…</div>;

@@ -1,5 +1,5 @@
 import { ApiError, Handler, HandlerCtx } from '../_shared/kernel.ts';
-import { optBool, optInt, optString, reqString, reqUuid } from '../_shared/validate.ts';
+import { optBool, optInt, optString, optUuid, reqString, reqUuid } from '../_shared/validate.ts';
 import { BellBand, computeBellCurve } from '../_shared/bellcurve.ts';
 
 async function finalScores(ctx: HandlerCtx, orgId: string, cycleId: string): Promise<{ scores: number[]; missing: number }> {
@@ -49,16 +49,37 @@ export const publishingHandlers: Record<string, Handler> = {
   'publish.review-list': async (payload, ctx) => {
     const orgId = reqUuid(payload.orgId, 'orgId');
     ctx.requireOrgRole(orgId, ['hr_admin']);
-    const cycleId = reqUuid(payload.cycleId, 'cycleId');
+    const requestedCycleId = optUuid(payload.cycleId, 'cycleId');
     const limitReq = optInt(payload.limit, 'limit');
     const offsetReq = optInt(payload.offset, 'offset');
     const limit = Math.min(Math.max(limitReq ?? 200, 1), 500);
     const offset = Math.max(offsetReq ?? 0, 0);
 
-    const { data: cycle, error: cErr } = await ctx.admin.from('appraisal_cycles')
-      .select('id, name, status').eq('id', cycleId).eq('organization_id', orgId).maybeSingle();
-    if (cErr) { console.error('review-list cycle', cErr); throw new ApiError('DB_ERROR', 'Database error', 500); }
-    if (!cycle) throw new ApiError('NOT_FOUND', 'Cycle not found', 404);
+    let cycle: { id: string; name: string; status: string } | null = null;
+    if (requestedCycleId) {
+      const { data, error: cErr } = await ctx.admin.from('appraisal_cycles')
+        .select('id, name, status').eq('id', requestedCycleId).eq('organization_id', orgId).maybeSingle();
+      if (cErr) { console.error('review-list cycle', cErr); throw new ApiError('DB_ERROR', 'Database error', 500); }
+      if (!data) throw new ApiError('NOT_FOUND', 'Cycle not found', 404);
+      cycle = data;
+    } else {
+      // Auto-resolve the org's reviewable cycle (so the UI needs no separate discovery
+      // read): prefer 'review' (awaiting publish) over 'published' (revocable) over
+      // 'active' (finals in progress); newest first within each. A list + client-side
+      // pick avoids the ambiguous-.maybeSingle() 500 when statuses coexist.
+      const { data, error: cErr } = await ctx.admin.from('appraisal_cycles')
+        .select('id, name, status').eq('organization_id', orgId)
+        .in('status', ['review', 'published', 'active'])
+        .order('created_at', { ascending: false });
+      if (cErr) { console.error('review-list cycle resolve', cErr); throw new ApiError('DB_ERROR', 'Database error', 500); }
+      const pref: Record<string, number> = { review: 0, published: 1, active: 2 };
+      cycle = (data ?? []).slice().sort((a, b) => (pref[a.status] ?? 9) - (pref[b.status] ?? 9))[0] ?? null;
+      if (!cycle) {
+        // No reviewable cycle at all — graceful empty shape (mirrors eval.context's no-cycle return).
+        return { cycle: null, publication: { live: false, publishedAt: null, reason: null }, bell: { rows: [], withinTolerance: true }, finalsMissing: 0, total: 0, participants: [] };
+      }
+    }
+    const cycleId = cycle.id;
 
     // Page of active participants (cycle_participants is the paginated resource; count
     // 'exact' returns the full match count for `total` regardless of the range applied).

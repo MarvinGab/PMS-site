@@ -595,6 +595,11 @@ let goodRun;
   const pagedReview = await callAdmin(superT, 'publish.review-list', { orgId: gamma.id, cycleId: pcycle.id, limit: 2, offset: 0 });
   check('review-list paginates (limit=2 of total=3)', pagedReview.status === 200 && pagedReview.body.data.participants.length === 2 && pagedReview.body.data.total === 3);
 
+  // No cycleId → the handler auto-resolves the org's reviewable cycle (gamma's only cycle,
+  // currently in review) so the UI needs no separate cycle-discovery read.
+  const autoReview = await callAdmin(superT, 'publish.review-list', { orgId: gamma.id });
+  check('review-list auto-resolves the review cycle when cycleId is omitted', autoReview.status === 200 && autoReview.body.data.cycle?.id === pcycle.id);
+
   const empReview = await callAdmin(empT, 'publish.review-list', { orgId: gamma.id, cycleId: pcycle.id });
   check('employee cannot call review-list', empReview.status === 403);
 
