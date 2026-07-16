@@ -30,6 +30,7 @@ import HRReviewPage from './HRReviewPage';
 import EmployeeGoals from './EmployeeGoals';
 import ManagerGoalReview from './ManagerGoalReview';
 import EmployeeSelfEval from './EmployeeSelfEval';
+import { useApp } from '../AppContext';
 
 const EMP_SESSION_KEY = 'zarohr_emp_session';
 const WIZARD_STATE_KEY = 'zarohr_pms_wizard_state_v1';
@@ -2199,7 +2200,22 @@ function BackToAdminButton({ onClick }) {
 }
 
 export default function EmployeePage() {
-  const session = useMemo(loadSession, []);
+  // Shell-bridge (2026-07-16): the app shell now derives identity/phase/manager-status from
+  // the pms backend (workflow.bootstrap via useApp) so a clean Supabase-Auth login into a
+  // seeded org can reach the migrated screens. The legacy localStorage session / blob roster
+  // remain as a fallback for the old impersonation flow until Plan 6 retires them.
+  const app = useApp();
+  const session = useMemo(() => {
+    const local = loadSession();
+    if (local?.empCode) return local;
+    if (app.employeeCode) {
+      return {
+        orgKey: app.orgKey || '', empCode: app.employeeCode, name: app.employeeName || '',
+        userName: app.employeeName || '', managerCode: app.managerCode || '', designation: app.designation || '',
+      };
+    }
+    return local;
+  }, [app.employeeCode, app.orgKey, app.employeeName, app.managerCode, app.designation]);
   const [config, setConfig] = useState(() => loadConfig());
   const [appData, setAppData] = useState(() => {
     const data = readAppDataSync() || {};
@@ -2215,9 +2231,10 @@ export default function EmployeePage() {
     };
   });
   const currentPhase = useMemo(() => {
+    if (app.currentPhase) return app.currentPhase;   // backend bootstrap (calendar-derived) is source of truth
     const org = (appData?.organizationsData || []).find((item) => item.key === (session?.orgKey || ''));
     return org?.currentPhase || 'goal-setting';
-  }, [appData, session]);
+  }, [app.currentPhase, appData, session]);
   // Calendar-driven sub-phase — source of truth for which rating page is open.
   // Distinct from `currentPhase` (DB flag, legacy) so we can roll forward
   // without breaking the existing goal-plan UI.
@@ -2226,11 +2243,12 @@ export default function EmployeePage() {
     return getCurrentSubPhase(org);
   }, [appData, session]);
   const isManagerForSomeone = useMemo(() => {
+    if (app.isManager) return true;   // backend bootstrap: caller has ≥1 direct report
     if (!session?.empCode) return false;
     const code = String(session.empCode).trim().toUpperCase();
     const employees = config?.employeeUploadData?.employees || [];
     return employees.some((e) => String(e['Reporting Manager Code'] || '').trim().toUpperCase() === code);
-  }, [config, session]);
+  }, [app.isManager, config, session]);
   const hodReports = useMemo(() => {
     if (!session?.empCode) return [];
     const code = String(session.empCode).trim().toUpperCase();
@@ -2761,10 +2779,14 @@ export default function EmployeePage() {
   }, [session, config, configHydrated, workflowHydrated, employee, employeeCodeKey, currentPhase, managerCode, employeeGroup, !!workflow?.submissions?.[employeeCodeKey]]);
 
   useEffect(() => {
-    if (!session) {
+    // Bounce to login ONLY when genuinely signed out. A signed-in user whose backend
+    // bootstrap (workflow.bootstrap) hasn't resolved yet has `session` null transiently —
+    // bouncing them would eject an authenticated employee (or loop with LoginPage). Gate on
+    // the resolved Supabase auth state, not the derived session.
+    if (app.authReady && !app.userId) {
       window.location.hash = '#login';
     }
-  }, [session]);
+  }, [app.authReady, app.userId]);
 
   // Live messaging: reload messages from storage when another tab writes
   useEffect(() => {
@@ -2934,6 +2956,10 @@ export default function EmployeePage() {
   }, [activeSection]);
   const employees = config?.employeeUploadData?.employees || [];
   const directReports = employees.filter((item) => normalizeCode(item['Reporting Manager Code']) === employeeCodeKey);
+  // Bridge: on a clean backend login the blob roster is empty, so fall back to the
+  // bootstrap direct-report count to gate the Team tab / navigation. The Team content
+  // itself is <ManagerGoalReview/>, which fetches its own scoped reports.
+  const directReportsCount = directReports.length > 0 ? directReports.length : (app.directReportsCount || 0);
   const pendingApprovals = Object.values(workflow?.submissions || {}).filter(
     (submission) => normalizeCode(submission.managerCode) === employeeCodeKey && submission.status === 'pending-manager'
   );
@@ -2959,7 +2985,9 @@ export default function EmployeePage() {
   const goalSelfAccess = (() => {
     if (isExternalManager) return { allowed: false, reason: 'no-employee' };
     if (!managerCode) return { allowed: false, reason: 'no-rm' };
-    const rmExists = employees.some((e) => normalizeCode(e['Employee Code']) === normalizeCode(managerCode));
+    // A managerCode from the backend bootstrap comes from a real reporting_relationships row,
+    // so the RM provably exists even when the (transitional) blob roster is empty.
+    const rmExists = !!app.managerCode || employees.some((e) => normalizeCode(e['Employee Code']) === normalizeCode(managerCode));
     if (!rmExists) return { allowed: false, reason: 'rm-missing' };
     return { allowed: true, reason: 'ok' };
   })();
@@ -2970,19 +2998,19 @@ export default function EmployeePage() {
   useEffect(() => {
     if (!configHydrated) return;
     if (activeSection === 'goals' && !canSetOwnGoals) {
-      setActiveSection(directReports.length > 0 ? 'team' : (hodReports.length > 0 ? 'hod-calibration' : 'messages'));
+      setActiveSection(directReportsCount > 0 ? 'team' : (hodReports.length > 0 ? 'hod-calibration' : 'messages'));
     }
-    if (activeSection === 'team' && directReports.length === 0 && canSetOwnGoals) {
+    if (activeSection === 'team' && directReportsCount === 0 && canSetOwnGoals) {
       setActiveSection('goals');
     }
-    if (activeSection === 'team' && directReports.length === 0 && !canSetOwnGoals) {
+    if (activeSection === 'team' && directReportsCount === 0 && !canSetOwnGoals) {
       setActiveSection(hodReports.length > 0 ? 'hod-calibration' : 'messages');
     }
     if (activeSection === 'score' && !scorePublished) {
-      setActiveSection(canSetOwnGoals ? 'goals' : (directReports.length > 0 ? 'team' : 'messages'));
+      setActiveSection(canSetOwnGoals ? 'goals' : (directReportsCount > 0 ? 'team' : 'messages'));
     }
     if (activeSection === 'hod-calibration' && hodReports.length === 0) {
-      setActiveSection(canSetOwnGoals ? 'goals' : (directReports.length > 0 ? 'team' : 'messages'));
+      setActiveSection(canSetOwnGoals ? 'goals' : (directReportsCount > 0 ? 'team' : 'messages'));
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeSection, canSetOwnGoals, configHydrated, directReports.length, hodReports.length, scorePublished]);
@@ -4144,7 +4172,7 @@ export default function EmployeePage() {
   const nav = currentPhase === 'goal-setting'
     ? [
         { id: 'goals', label: 'My Goals' },
-        ...(directReports.length > 0 ? [{ id: 'team', label: `My Team (${directReports.length})` }] : []),
+        ...(directReportsCount > 0 ? [{ id: 'team', label: `My Team (${directReportsCount})` }] : []),
         ...(directReports.length > 0 ? [{ id: 'approvals', label: `Approvals (${pendingApprovals.length})` }] : []),
         ...(directReports.length > 0 ? [{ id: 'send-mail', label: 'Send Mail' }] : []),
         { id: 'messages', label: unreadMsgCount > 0 ? `Messages (${unreadMsgCount})` : 'Messages' },

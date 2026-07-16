@@ -305,7 +305,7 @@ function NoMembershipScreen({ onSignOut }) {
 }
 
 function Router() {
-  const { role, orgKey, orgs, authReady, setOrgs, userName, userId, signOut } = useApp();
+  const { role, orgKey, orgs, launched, authReady, setOrgs, userName, userId, signOut } = useApp();
   const [route, setRoute] = useState(getRoute);
   const [sessionModalOpen, setSessionModalOpen] = useState(false);
 
@@ -393,15 +393,21 @@ function Router() {
   // HR admin
   if (role === 'hr_admin') {
     if (route === 'hr-review') {
-      // HR final review + calibration + bell-curve + publish/revoke now runs on the new
-      // backend-driven screen (Plan 5d-core), auto-resolving the org's reviewable cycle.
-      // The old blob HRReviewPage stays for the embedded HOD-calibration flow (EmployeePage
-      // 'hod-calibration' section) — a separate deferred cutover.
+      // HR final review + calibration + bell-curve + publish/revoke on the new backend-driven
+      // screen (Plan 5d-core), auto-resolving the org's reviewable cycle.
+      // SMOKE-ONLY ENTRY: this direct #hr-review route is the only backend-navigable way to
+      // reach HRPublishReview until the HRCycleDashboard nav is bridged in Plan 5e (its "HR
+      // Review" tab already renders HRPublishReview, but the dashboard shell is still
+      // blob-coupled). The old blob HRReviewPage stays for the embedded HOD-calibration flow.
       return withSessionModal(<Suspense fallback={<BootScreen />}><HRPublishReview /></Suspense>);
     }
     const org = orgs.find((o) => o.key === orgKey);
     const orgName = org?.name || 'Assigned Organization';
-    if (org?.launched) {
+    // `launched` from the backend bootstrap (workflow.bootstrap) is the source of truth —
+    // the blob `org?.launched` remains a fallback for un-migrated blob orgs. NOTE: reaching
+    // HRCycleDashboard is intentional, but that dashboard is still blob-coupled (Plan 5e);
+    // for the HR publish smoke, use the #hr-review route above.
+    if (launched || org?.launched) {
       return withSessionModal(<HRCycleDashboard />);
     }
 
