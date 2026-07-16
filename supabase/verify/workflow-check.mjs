@@ -41,6 +41,44 @@ for (const [role, email] of Object.entries(USERS)) {
   check('workflow.whoami resolves the employee membership', eve.status === 200 && Array.isArray(eve.body.data.memberships));
 }
 
+// --- workflow.bootstrap: shell identity/org/cycle-phase/reports read (Plan 5b Task 1) ---
+// Runs against the seed-foundation baseline, before setupActiveCycle below mutates the
+// org's working cycle: one draft cycle ("FY26 Test Cycle") whose goal_creation window is
+// in the past (Apr 2026) and self_evaluation window is in the future (Feb 2027) — so no
+// window is open, and status "draft" doesn't map to a phase either: currentPhase is null.
+{
+  const noTok = await callWorkflow(null, 'workflow.bootstrap', {});
+  check('bootstrap rejects missing token', noTok.status === 401);
+
+  const mary = await callWorkflow(tokens.manager, 'workflow.bootstrap', {});
+  check('bootstrap org.key is acme-test (EMP001)', mary.status === 200 && mary.body.data.org?.key === 'acme-test');
+  check('bootstrap resolves EMP001 as the employee', mary.body.data.employee?.code === 'EMP001');
+  check('bootstrap reports EMP001 as a manager with >=1 direct report (manages EMP002)', mary.body.data.isManager === true && mary.body.data.directReportsCount >= 1);
+  check('bootstrap resolves EMP001\'s own manager code (EMP004, roster-only)', mary.body.data.employee?.managerCode === 'EMP004');
+  check('bootstrap currentPhase is null against the seed draft cycle (no window open, status draft)', mary.body.data.currentPhase === null);
+
+  const eve = await callWorkflow(tokens.employee, 'workflow.bootstrap', {});
+  check('bootstrap resolves EMP002 as the employee', eve.status === 200 && eve.body.data.employee?.code === 'EMP002');
+  check('bootstrap reports EMP002 as not a manager', eve.body.data.isManager === false && eve.body.data.directReportsCount === 0);
+  check('bootstrap resolves EMP002\'s manager code (EMP001)', eve.body.data.employee?.managerCode === 'EMP001');
+
+  const harry = await callWorkflow(tokens.hod, 'workflow.bootstrap', {});
+  check('bootstrap reports EMP003 (Harry) as HOD of >=1 employee, not a manager', harry.status === 200 && harry.body.data.isManager === false && harry.body.data.hodReportsCount >= 1);
+
+  const hr = await callWorkflow(tokens.hr, 'workflow.bootstrap', {});
+  check('bootstrap returns employee:null for HR (no employee row)', hr.status === 200 && hr.body.data.employee === null);
+  check('bootstrap org.launched is a boolean', typeof hr.body.data.org?.launched === 'boolean');
+
+  const superRes = await callWorkflow(tokens.superadmin, 'workflow.bootstrap', {});
+  check('bootstrap for a pure super-admin (no org membership) is refused (NO_ORG_MEMBERSHIP)', superRes.status === 403 && superRes.body.error.code === 'NO_ORG_MEMBERSHIP');
+
+  const PHASES = ['goal-setting', 'self-evaluation', 'manager-rating', 'hr-review'];
+  for (const r of [mary, eve, harry, hr]) {
+    check('bootstrap currentPhase is a valid phase id or null', r.body.data.currentPhase === null || PHASES.includes(r.body.data.currentPhase));
+    check('bootstrap cycle is a well-shaped object or null', r.body.data.cycle === null || (typeof r.body.data.cycle.id === 'string' && typeof r.body.data.cycle.status === 'string'));
+  }
+}
+
 // Build a self-contained ACTIVE cycle for acme with a participant (EMP002/Eve),
 // an assigned library (1 KRA + 1 KPI) and a prefill row. Idempotent (delete-first).
 export async function setupActiveCycle() {
