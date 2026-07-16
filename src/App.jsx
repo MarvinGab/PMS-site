@@ -20,6 +20,7 @@ const SelfEvalPage = lazy(() => import('./pages/SelfEvalPage'));
 const EmployeeSelfEval = lazy(() => import('./pages/EmployeeSelfEval'));
 const ManagerEvalPage = lazy(() => import('./pages/ManagerEvalPage'));
 const HRReviewPage = lazy(() => import('./pages/HRReviewPage'));
+const HRPublishReview = lazy(() => import('./pages/HRPublishReview'));
 
 class ErrorBoundary extends Component {
   constructor(props) {
@@ -392,7 +393,11 @@ function Router() {
   // HR admin
   if (role === 'hr_admin') {
     if (route === 'hr-review') {
-      return withSessionModal(<Suspense fallback={<BootScreen />}><HRReviewPage /></Suspense>);
+      // HR final review + calibration + bell-curve + publish/revoke now runs on the new
+      // backend-driven screen (Plan 5d-core), auto-resolving the org's reviewable cycle.
+      // The old blob HRReviewPage stays for the embedded HOD-calibration flow (EmployeePage
+      // 'hod-calibration' section) — a separate deferred cutover.
+      return withSessionModal(<Suspense fallback={<BootScreen />}><HRPublishReview /></Suspense>);
     }
     const org = orgs.find((o) => o.key === orgKey);
     const orgName = org?.name || 'Assigned Organization';
