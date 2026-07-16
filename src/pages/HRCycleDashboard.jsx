@@ -3,7 +3,7 @@ import { useApp } from '../AppContext';
 import { LaunchOverview, OrgChartPanel, StepScale, StepAutoRating, StepCompetencies, StepBellCurve, StepGoalLibraries, StepGoalLibrariesFlat, StepPrefillData, StepPrefillDataFlat, getScaleSnapshot, getBellCurveSnapshot } from '../PMSWizard';
 import PhaseSettingsEditor from '../components/PhaseSettingsEditor';
 import { readCycleWindows, defaultWindowsForFiscalYear, resolveOrgFiscalRange, getActiveSubPhases, SUB_PHASE } from '../backend/cyclePhase';
-import HRReviewPage from './HRReviewPage';
+import HRPublishReview from './HRPublishReview';
 import zaroLogo from '../../images/final zaro logo.png';
 import { downloadEmployeeTemplate, parseEmployeeXlsx, employeeTemplateMeta } from '../templateUtils';
 import { BRAND_PALETTES, resolveBrandPalette, deriveCustomPalette, buildHeroGradient, buildSwatchGradient, buildHeroBackground, resolveHero, fillAccent, CARD_ACCENT_MODES, CARD_PREVIEW_TINTS, normalizeCardsMode, cardStripeWidth } from '../brandPalettes';
@@ -8148,7 +8148,7 @@ export default function HRCycleDashboard() {
           )}
           {activeModule === 'comms'      && <ModuleComms     employees={empsForModules} groups={groups} org={org} config={config} onUpdate={handleEmpUpdate} onConfigPatch={handleConfigPatch} orgKey={orgKey} onNavigate={setActiveModule} />}
           {activeModule === 'stage'      && <ModuleStageControl  employees={empsForModules} onUpdate={handleEmpUpdate} orgKey={orgKey} />}
-          {activeModule === 'hr-review'  && !isScopedHR && <HRReviewPage embedded />}
+          {activeModule === 'hr-review'  && !isScopedHR && <HRPublishReview />}
           {activeModule === 'mgr-change' && <ModuleMgrChange     employees={empsForModules} config={config} onUpdate={handleEmpUpdate} orgKey={orgKey} />}
           {activeModule === 'grp-transfer' && <ModuleGrpTransfer employees={empsForModules} groups={groups} goalLibraries={config?.goalLibraries || []} onUpdate={handleEmpUpdate} orgKey={orgKey} />}
           {activeModule === 'roster'     && <ModuleRoster employees={empsForModules} config={config} onUpdate={handleEmpUpdate} orgKey={orgKey} initialIntent={rosterIntent} onIntentConsumed={() => setRosterIntent(null)} />}
