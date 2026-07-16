@@ -584,6 +584,20 @@ let goodRun;
   const bell = await callAdmin(superT, 'publish.bell-check', { orgId: gamma.id, cycleId: pcycle.id });
   check('bell-check reports out of tolerance (both at 5)', bell.status === 200 && bell.body.data.withinTolerance === false);
 
+  // --- publish.review-list: scoped HR read (cycle + bell + publication + participants) ---
+  const review = await callAdmin(superT, 'publish.review-list', { orgId: gamma.id, cycleId: pcycle.id });
+  check('review-list returns the cycle + all 3 active participants', review.status === 200 && review.body.data.cycle.id === pcycle.id && review.body.data.participants.length === 3);
+  check('review-list participant rows carry employeeName + finalStatus', review.body.data.participants.every((p) => typeof p.employeeName === 'string' && ['submitted', 'draft', 'missing'].includes(p.finalStatus)));
+  check('review-list bell object mirrors bell-check (out of tolerance)', review.body.data.bell.withinTolerance === false && Array.isArray(review.body.data.bell.rows));
+  check('review-list finalsMissing/total are numeric (all 3 finals submitted)', review.body.data.finalsMissing === 0 && review.body.data.total === 3);
+  check('review-list publication.live is false before publish', review.body.data.publication.live === false && review.body.data.publication.publishedAt === null);
+
+  const pagedReview = await callAdmin(superT, 'publish.review-list', { orgId: gamma.id, cycleId: pcycle.id, limit: 2, offset: 0 });
+  check('review-list paginates (limit=2 of total=3)', pagedReview.status === 200 && pagedReview.body.data.participants.length === 2 && pagedReview.body.data.total === 3);
+
+  const empReview = await callAdmin(empT, 'publish.review-list', { orgId: gamma.id, cycleId: pcycle.id });
+  check('employee cannot call review-list', empReview.status === 403);
+
   const blocked = await callAdmin(superT, 'publish.publish', { orgId: gamma.id, cycleId: pcycle.id });
   check('publish blocked by bell-curve violation', blocked.status === 409 && blocked.body.error.code === 'BELL_CURVE_VIOLATION');
 
@@ -598,6 +612,9 @@ let goodRun;
 
   const forced = await callAdmin(superT, 'publish.publish', { orgId: gamma.id, cycleId: pcycle.id, force: true, reason: 'Exec sign-off' });
   check('publish succeeds with force + reason', forced.status === 200 && forced.body.data.cycle.status === 'published');
+
+  const reviewAfterPublish = await callAdmin(superT, 'publish.review-list', { orgId: gamma.id, cycleId: pcycle.id });
+  check('review-list reflects the live publication after publish', reviewAfterPublish.body.data.publication.live === true && reviewAfterPublish.body.data.publication.publishedAt !== null);
 
   const { data: pubJob } = await admin.from('background_jobs').select('job_type, status').eq('cycle_id', pcycle.id).eq('job_type', 'publish_notification');
   check('publish enqueues a publish_notification background job', (pubJob ?? []).length === 1 && pubJob[0].status === 'queued');

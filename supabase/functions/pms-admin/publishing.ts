@@ -1,5 +1,5 @@
 import { ApiError, Handler, HandlerCtx } from '../_shared/kernel.ts';
-import { optBool, optString, reqString, reqUuid } from '../_shared/validate.ts';
+import { optBool, optInt, optString, reqString, reqUuid } from '../_shared/validate.ts';
 import { BellBand, computeBellCurve } from '../_shared/bellcurve.ts';
 
 async function finalScores(ctx: HandlerCtx, orgId: string, cycleId: string): Promise<{ scores: number[]; missing: number }> {
@@ -40,6 +40,79 @@ export const publishingHandlers: Record<string, Handler> = {
     const { scores } = await finalScores(ctx, orgId, cycleId);
     const { points, bands } = await bellContext(ctx, orgId, cycleId);
     return computeBellCurve(scores, points, bands);
+  },
+
+  // Scoped HR read for the review-and-publish screen: the cycle, the live publication (if
+  // any), the bell-curve summary over ALL active participants' submitted hr_final scores,
+  // finals-missing/total counts, and a paginated page of active participants with their
+  // per-employee hr_final status/score. Read-only.
+  'publish.review-list': async (payload, ctx) => {
+    const orgId = reqUuid(payload.orgId, 'orgId');
+    ctx.requireOrgRole(orgId, ['hr_admin']);
+    const cycleId = reqUuid(payload.cycleId, 'cycleId');
+    const limitReq = optInt(payload.limit, 'limit');
+    const offsetReq = optInt(payload.offset, 'offset');
+    const limit = Math.min(Math.max(limitReq ?? 200, 1), 500);
+    const offset = Math.max(offsetReq ?? 0, 0);
+
+    const { data: cycle, error: cErr } = await ctx.admin.from('appraisal_cycles')
+      .select('id, name, status').eq('id', cycleId).eq('organization_id', orgId).maybeSingle();
+    if (cErr) { console.error('review-list cycle', cErr); throw new ApiError('DB_ERROR', 'Database error', 500); }
+    if (!cycle) throw new ApiError('NOT_FOUND', 'Cycle not found', 404);
+
+    // Page of active participants (cycle_participants is the paginated resource; count
+    // 'exact' returns the full match count for `total` regardless of the range applied).
+    const { data: pagedParts, error: ppErr, count: total } = await ctx.admin.from('cycle_participants')
+      .select('id, employee_id', { count: 'exact' })
+      .eq('cycle_id', cycleId).eq('organization_id', orgId).eq('status', 'active')
+      .order('created_at', { ascending: true }).order('id', { ascending: true })
+      .range(offset, offset + limit - 1);
+    if (ppErr) { console.error('review-list participants', ppErr); throw new ApiError('DB_ERROR', 'Database error', 500); }
+
+    const employeeIds = (pagedParts ?? []).map((p) => p.employee_id as string);
+    let empById = new Map<string, { full_name: string; employee_code: string }>();
+    let evalByEmp = new Map<string, { id: string; overall_score: number | null; status: string; version: number }>();
+    if (employeeIds.length > 0) {
+      const { data: emps, error: eErr } = await ctx.admin.from('employees')
+        .select('id, full_name, employee_code').eq('organization_id', orgId).in('id', employeeIds);
+      if (eErr) { console.error('review-list employees', eErr); throw new ApiError('DB_ERROR', 'Database error', 500); }
+      empById = new Map((emps ?? []).map((e) => [e.id as string, e as { full_name: string; employee_code: string }]));
+
+      const { data: evals, error: evErr } = await ctx.admin.from('evaluations')
+        .select('id, employee_id, overall_score, status, version')
+        .eq('cycle_id', cycleId).eq('organization_id', orgId).eq('stage', 'hr_final').in('employee_id', employeeIds);
+      if (evErr) { console.error('review-list evals', evErr); throw new ApiError('DB_ERROR', 'Database error', 500); }
+      evalByEmp = new Map((evals ?? []).map((e) => [e.employee_id as string, e as { id: string; overall_score: number | null; status: string; version: number }]));
+    }
+
+    const participants = (pagedParts ?? []).map((p) => {
+      const emp = empById.get(p.employee_id as string);
+      const ev = evalByEmp.get(p.employee_id as string);
+      const finalStatus: 'submitted' | 'draft' | 'missing' = !ev ? 'missing' : (ev.status === 'submitted' ? 'submitted' : 'draft');
+      return {
+        employeeId: p.employee_id as string,
+        employeeName: emp?.full_name ?? null,
+        employeeCode: emp?.employee_code ?? null,
+        finalStatus,
+        finalScore: ev?.overall_score != null ? Number(ev.overall_score) : null,
+        evalId: ev?.id ?? null,
+        evalVersion: ev?.version ?? null,
+      };
+    });
+
+    const { scores, missing } = await finalScores(ctx, orgId, cycleId);
+    const { points, bands } = await bellContext(ctx, orgId, cycleId);
+    const bell = computeBellCurve(scores, points, bands);
+    const pub = await livePublication(ctx, orgId, cycleId);
+
+    return {
+      cycle: { id: cycle.id, name: cycle.name, status: cycle.status },
+      publication: { live: !!pub, publishedAt: pub?.published_at ?? null, reason: pub?.reason ?? null },
+      bell,
+      finalsMissing: missing,
+      total: total ?? 0,
+      participants,
+    };
   },
 
   'publish.publish': async (payload, ctx) => {
