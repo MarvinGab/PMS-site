@@ -9,7 +9,7 @@ import {
   migrateOrganizationState,
 } from './backend/stateStore';
 import { supabase } from './backend/supabaseClient';
-import { callPms } from './backend/pmsClient';
+import { callPms, callWorkflow } from './backend/pmsClient';
 import { deriveIdentity } from './backend/identity';
 
 export const APP_DATA_KEY       = 'zarohr_app_data_v1';
@@ -20,6 +20,24 @@ const DEFAULT_ORGS = [];
 const DEFAULT_PENDING_ACTIONS = [];
 const DEFAULT_FEED_DATA = [];
 const DEFAULT_DASHBOARD_FLAGS = { licenseOverageOrgKey: null, hasCriticalIssue: false };
+
+// Defaults for the workflow.bootstrap-derived fields (Plan 5b shell rewire). Bootstrap is a
+// best-effort scoped read on top of whoami/deriveIdentity: it 403s (NO_ORG_MEMBERSHIP) for a
+// pure super-admin with no org membership, and can fail for other reasons (network, etc). Any
+// failure just leaves these at their defaults — it must never crash the app or block authReady.
+const DEFAULT_BOOTSTRAP = {
+  orgKey: null,
+  orgName: null,
+  launched: false,
+  employeeCode: null,
+  employeeName: null,
+  managerCode: null,
+  designation: null,
+  currentPhase: null,
+  isManager: false,
+  directReportsCount: 0,
+  hodReportsCount: 0,
+};
 
 function isLegacySeededAppData(data) {
   const orgKeys = Array.isArray(data?.organizationsData)
@@ -63,10 +81,35 @@ export function AppProvider({ children }) {
   const [orgId, setOrgId] = useState(null);
   const [employeeId, setEmployeeId] = useState(null);
   const [memberships, setMemberships] = useState([]);
+  const [bootstrap, setBootstrap] = useState(DEFAULT_BOOTSTRAP);
 
   const applyIdentity = useCallback((session) => {
     setUserId(session?.user?.id || null);
     setUserEmail(session?.user?.email || '');
+  }, []);
+
+  // Best-effort scoped read (workflow.bootstrap). Never throws out of this fn: a pure
+  // super-admin with no org membership 403s (NO_ORG_MEMBERSHIP) and that — like any other
+  // failure — just resets the fields to their defaults instead of surfacing an error.
+  const refreshBootstrap = useCallback(async () => {
+    try {
+      const result = await callWorkflow('workflow.bootstrap', {});
+      setBootstrap({
+        orgKey: result?.org?.key ?? null,
+        orgName: result?.org?.name ?? null,
+        launched: result?.org?.launched ?? false,
+        employeeCode: result?.employee?.code ?? null,
+        employeeName: result?.employee?.name ?? null,
+        managerCode: result?.employee?.managerCode ?? null,
+        designation: result?.employee?.designation ?? null,
+        currentPhase: result?.currentPhase ?? null,
+        isManager: result?.isManager ?? false,
+        directReportsCount: result?.directReportsCount ?? 0,
+        hodReportsCount: result?.hodReportsCount ?? 0,
+      });
+    } catch {
+      setBootstrap(DEFAULT_BOOTSTRAP);
+    }
   }, []);
 
   const refreshIdentity = useCallback(async () => {
@@ -77,7 +120,10 @@ export function AppProvider({ children }) {
     } catch {
       setRole(null); setOrgId(null); setEmployeeId(null); setMemberships([]);
     }
-  }, []);
+    // Bootstrap is independent of whether whoami succeeded — it has its own auth check and
+    // its own graceful failure path — so it's always attempted, never allowed to block this fn.
+    await refreshBootstrap();
+  }, [refreshBootstrap]);
 
   useEffect(() => {
     if (!supabase) { setAuthReady(true); return; }
@@ -85,12 +131,12 @@ export function AppProvider({ children }) {
     supabase.auth.getSession().then(async ({ data }) => {
       if (!active) return;
       applyIdentity(data.session);
-      if (data.session) await refreshIdentity();
+      if (data.session) await refreshIdentity(); else setBootstrap(DEFAULT_BOOTSTRAP);
       setAuthReady(true);
     });
     const { data: sub } = supabase.auth.onAuthStateChange(async (_event, session) => {
       applyIdentity(session);
-      if (session) await refreshIdentity(); else { setRole(null); setOrgId(null); setEmployeeId(null); setMemberships([]); }
+      if (session) await refreshIdentity(); else { setRole(null); setOrgId(null); setEmployeeId(null); setMemberships([]); setBootstrap(DEFAULT_BOOTSTRAP); }
     });
     return () => { active = false; sub?.subscription?.unsubscribe?.(); };
   }, [applyIdentity, refreshIdentity]);
@@ -98,6 +144,7 @@ export function AppProvider({ children }) {
   const signOut = useCallback(async () => {
     try { await supabase?.auth.signOut(); } finally {
       setRole(null); setOrgId(null); setEmployeeId(null); setMemberships([]); setUserId(null); setUserEmail('');
+      setBootstrap(DEFAULT_BOOTSTRAP);
     }
   }, []);
 
@@ -230,6 +277,21 @@ export function AppProvider({ children }) {
     // TODO(5b-5e): un-migrated screens still call `logout()` from context —
     // alias it to the new Supabase signOut until each screen is cut over.
     logout: signOut,
+    // workflow.bootstrap-derived fields (Plan 5b shell rewire, Task 2). Best-effort: null/
+    // false/0 until loaded, and left at those defaults if bootstrap fails for any reason
+    // (including a pure super-admin's NO_ORG_MEMBERSHIP 403). See refreshBootstrap above.
+    orgKey: bootstrap.orgKey,
+    orgName: bootstrap.orgName,
+    launched: bootstrap.launched,
+    employeeCode: bootstrap.employeeCode,
+    employeeName: bootstrap.employeeName,
+    managerCode: bootstrap.managerCode,
+    designation: bootstrap.designation,
+    currentPhase: bootstrap.currentPhase,
+    isManager: bootstrap.isManager,
+    directReportsCount: bootstrap.directReportsCount,
+    hodReportsCount: bootstrap.hodReportsCount,
+    refreshBootstrap,
     orgs, setOrgs: updateOrgs,
     pendingActions, setPendingActions: updatePendingActions,
     feedData, setFeedData: updateFeed,
