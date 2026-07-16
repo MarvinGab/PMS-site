@@ -2899,10 +2899,11 @@ export default function EmployeePage() {
   const rawDesignation = session.designation || employee?.Designation || employee?.[config?.goalSegmentAttr] || '';
   // For managers who aren't uploaded in PMS, the Test Credentials module tags them as "Manager (not in PMS)"
   // for HR's own clarity — but we should never surface that phrasing in the logged-in user's own UI.
-  const employeeDesignation = !employee ? 'Manager' : rawDesignation;
-  // "External manager" = logged-in user is referenced as someone's manager but isn't themselves uploaded.
-  // They have no PMS goal plan of their own — the dashboard should skip all goal UI for them.
-  const isExternalManager = !employee;
+  const employeeDesignation = (!employee && !app.employeeCode) ? 'Manager' : (rawDesignation || app.designation || '');
+  // "External manager" = logged-in user is referenced as someone's manager but isn't themselves
+  // an employee in this cycle. On a clean backend login the blob `employee` record is absent, so
+  // ALSO consult the bootstrap identity (`app.employeeCode`) before treating them as external.
+  const isExternalManager = !employee && !app.employeeCode;
   const mySubmission = workflow?.submissions?.[employeeCodeKey] || null;
   const selfEvaluationSaved = mySubmission?.selfEvaluationStatus === 'submitted' || !!mySubmission?.selfEvaluationSubmittedAt;
   // Active goals exclude anything currently sitting in the Deleted Goals
@@ -7248,11 +7249,11 @@ export default function EmployeePage() {
       });
     }
   }
-	  if (directReports.length > 0) {
+	  if (directReportsCount > 0) {
 	    tabs.push({
 	      id: 'team',
 	      label: 'My Team Goals',
-	      count: directReports.length,
+	      count: directReportsCount,
 	    });
 	    // Team Goal Evaluation — visible once at least one direct report has submitted self-eval.
 	    if (myInManagerEvalPhase) {
