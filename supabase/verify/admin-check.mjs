@@ -64,6 +64,27 @@ const { data: gamma } = await admin.from('organizations').select().eq('key', GAM
   check('employee cannot call org actions', empTry.status === 403);
 }
 
+// --- org.list (super-admin directory read) ---
+{
+  const denied = await callAdmin(hrT, 'org.list', {});
+  check('org.list denied for non-super-admin (HR)', denied.status === 403 && denied.body.error.code === 'FORBIDDEN');
+  const empDenied = await callAdmin(empT, 'org.list', {});
+  check('org.list denied for employee', empDenied.status === 403 && empDenied.body.error.code === 'FORBIDDEN');
+
+  const listed = await callAdmin(superT, 'org.list', {});
+  check('org.list succeeds for super admin', listed.status === 200 && Array.isArray(listed.body.data.organizations));
+  const orgs = listed.body.data.organizations;
+  check('org.list includes the acme-test and beta-test seed orgs', orgs.some((o) => o.key === 'acme-test') && orgs.some((o) => o.key === 'beta-test'));
+  check('org.list rows carry string key/name + boolean launched + numeric cycleCount', orgs.every((o) =>
+    typeof o.key === 'string' && typeof o.name === 'string' && typeof o.launched === 'boolean' && typeof o.cycleCount === 'number'));
+
+  // gamma-test was just created above and has no cycles yet — a fully deterministic zero-state row.
+  const gammaRow = orgs.find((o) => o.key === GAMMA_KEY);
+  check('org.list shows freshly-created gamma-test with a zero-cycle summary', !!gammaRow &&
+    gammaRow.cycleCount === 0 && gammaRow.launched === false &&
+    gammaRow.activeCycleStatus === null && gammaRow.participantCount === 0);
+}
+
 // --- cycle.create-draft ---
 let cycle;
 {
@@ -617,6 +638,15 @@ let goodRun;
 
   const forced = await callAdmin(superT, 'publish.publish', { orgId: gamma.id, cycleId: pcycle.id, force: true, reason: 'Exec sign-off' });
   check('publish succeeds with force + reason', forced.status === 200 && forced.body.data.cycle.status === 'published');
+
+  // At this point gamma's only non-archived cycle is pcycle ("Publish Cycle"), now
+  // 'published' with 3 active participants (PUB1/PUB2/PUB3) — a fully deterministic
+  // check of org.list's launched/activeCycleStatus/cycleCount/participantCount derivation.
+  const afterPublishList = await callAdmin(superT, 'org.list', {});
+  const gammaAfterPublish = afterPublishList.body.data.organizations.find((o) => o.key === GAMMA_KEY);
+  check('org.list reflects gamma as launched+published with 1 cycle and 3 participants', !!gammaAfterPublish &&
+    gammaAfterPublish.launched === true && gammaAfterPublish.activeCycleStatus === 'published' &&
+    gammaAfterPublish.cycleCount === 1 && gammaAfterPublish.participantCount === 3);
 
   const reviewAfterPublish = await callAdmin(superT, 'publish.review-list', { orgId: gamma.id, cycleId: pcycle.id });
   check('review-list reflects the live publication after publish', reviewAfterPublish.body.data.publication.live === true && reviewAfterPublish.body.data.publication.publishedAt !== null);
