@@ -1,7 +1,7 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect } from 'react';
 import AdminShell from '../components/AdminShell';
 import { useApp } from '../AppContext';
-import { saveOrganizationRecord } from '../backend/stateStore';
+import { callPms, PmsError } from '../backend/pmsClient';
 import { buildWorkspaceUrl } from '../orgUtils';
 import PhaseSettingsEditor from '../components/PhaseSettingsEditor';
 import { defaultWindowsForFiscalYear, validateCycleWindows } from '../backend/cyclePhase';
@@ -16,6 +16,48 @@ const STEPS = ['Workspace Setup', 'Cycle Calendar', 'Admin Access'];
 function resolveFiscalRange() {
   const year = new Date().getUTCFullYear();
   return { startsOn: `${year}-04-01`, endsOn: `${year + 1}-03-31` };
+}
+
+// Maps the wizard's nested phase-window shape (goalSetting/evaluation + their
+// subPhases — see backend/cyclePhase.js) onto the flat WINDOW_KEYS the backend's
+// `cycle.set-windows` understands (supabase/functions/pms-admin/cycles.ts). The
+// calendar step here only collects these four sub-phases; the remaining backend
+// window keys (hod_review, hr_calibration, publishing_prep, acknowledgement) have
+// no UI in this wizard yet and are simply left unset — HR configures them later
+// from the cycle setup screens. Windows the admin never dated are dropped rather
+// than sent as empty/invalid ranges.
+const WINDOW_KEY_MAP = [
+  ['goal_creation', (w) => w?.goalSetting?.subPhases?.goalCreation],
+  ['manager_approval', (w) => w?.goalSetting?.subPhases?.managerApproval],
+  ['self_evaluation', (w) => w?.evaluation?.subPhases?.selfEvaluation],
+  ['manager_evaluation', (w) => w?.evaluation?.subPhases?.managerEvaluation],
+];
+
+function buildWindowsPayload(windows) {
+  if (!windows) return [];
+  const out = [];
+  for (const [key, getWindow] of WINDOW_KEY_MAP) {
+    const win = getWindow(windows);
+    const startsOn = win?.startsOn;
+    const endsOn = win?.endsOn;
+    if (!startsOn || !endsOn) continue;
+    if (endsOn < startsOn) continue; // already enforced by validateCycleWindows; defensive only
+    out.push({ key, startsOn, endsOn });
+  }
+  return out;
+}
+
+// Best-effort fiscal-year label derived from the calendar the admin actually set
+// (falls back to the wizard's seed range if they never touched it). Only used to
+// give the auto-created first cycle a readable name/period label — HR can rename
+// it later from the cycle setup screens.
+function buildPeriodLabel(windows) {
+  const fallback = resolveFiscalRange();
+  const startsOn = windows?.goalSetting?.startsOn || fallback.startsOn;
+  const endsOn = windows?.evaluation?.endsOn || fallback.endsOn;
+  const startYear = String(startsOn).slice(0, 4);
+  const endYear = String(endsOn).slice(0, 4);
+  return startYear === endYear ? `FY ${startYear}` : `FY ${startYear}-${endYear.slice(-2)}`;
 }
 
 function buildEditSnapshot(form, modules) {
@@ -53,18 +95,6 @@ function isEmail(v) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(v || '').trim());
 }
 
-function generateTempPassword() {
-  // 6-digit numeric OTP, cryptographically random. Recipients change it on
-  // first login (isTemp flow), so optimise for typability over entropy.
-  const arr = new Uint32Array(1);
-  if (typeof window !== 'undefined' && window.crypto?.getRandomValues) {
-    window.crypto.getRandomValues(arr);
-  } else {
-    arr[0] = Math.floor(Math.random() * 0xffffffff);
-  }
-  return String(arr[0] % 1000000).padStart(6, '0');
-}
-
 function genCodeFromName(name) {
   const stop = new Set(['pvt','ltd','limited','inc','llc','plc','private','company','co','technologies','technology','solutions','services','global','group']);
   const words = String(name || '').toLowerCase().replace(/[^a-z0-9\s]/g,' ').split(/\s+/).filter(Boolean).filter(w => !stop.has(w));
@@ -84,15 +114,19 @@ const DRAFT_KEY = 'zarohr_create_org_draft';
 
 function readDraft() {
   try { return JSON.parse(window.sessionStorage.getItem(DRAFT_KEY) || 'null'); }
-  catch (_) { return null; }
+  catch { return null; }
 }
 
 function clearDraft() {
-  try { window.sessionStorage.removeItem(DRAFT_KEY); } catch (_) {}
+  try { window.sessionStorage.removeItem(DRAFT_KEY); } catch { /* best effort */ }
 }
 
 export default function CreateOrgPage() {
-  const { orgs, applyAppData } = useApp();
+  // `orgs` is the legacy local blob (kept alive for other still-unmigrated
+  // pages) — used here ONLY as a best-effort source for the client-side
+  // duplicate-code/slug hints below. The authoritative check happens on the
+  // backend (`org.create` returns `ORG_KEY_TAKEN` if the key is really taken).
+  const { orgs } = useApp();
 
   const editKey = getHashParam('key');
   const isEdit  = Boolean(editKey);
@@ -108,8 +142,13 @@ export default function CreateOrgPage() {
   const [codeManual, setCodeManual]   = useState(() => _d?.codeManual ?? isEdit);
   const [feedback, setFeedback]       = useState('');
   const [saving, setSaving]           = useState(false);
-  // Additional admins added inline at org creation. The first admin is the
-  // primary HR admin (saved on the org); these go into org.hrTeam[] as Co-Admins.
+  // Set once `org.create` succeeds, so a retry after a downstream failure
+  // (e.g. cycle.set-windows) doesn't try to re-create the same org (which
+  // would just 409 ORG_KEY_TAKEN) — it navigates to the directory instead.
+  const [createdOrgId, setCreatedOrgId] = useState(null);
+  // Additional admins added inline at org creation (Step 2, "Co-Admins"). UI-only
+  // for now: creating/inviting HR-admin users (including these) is a later
+  // sub-slice (5e-4) — see the HR Administrator step below for the deferral note.
   const [additionalAdmins, setAdditionalAdmins] = useState(() =>
     Array.isArray(existingOrg?.hrTeam) ? existingOrg.hrTeam.filter((m) => m.type === 'co-admin' && !m.isInPMS).map((m) => ({
       id: m.id || `co_${Date.now()}`, name: m.name || '', email: m.email || '', password: m.password || '',
@@ -124,7 +163,7 @@ export default function CreateOrgPage() {
     if (isEdit) return;
     try {
       window.sessionStorage.setItem(DRAFT_KEY, JSON.stringify({ step, form, slugManual, codeManual }));
-    } catch (_) {}
+    } catch { /* best effort */ }
   }, [step, form, slugManual, codeManual, isEdit]);
 
   function initForm(org) {
@@ -261,63 +300,71 @@ export default function CreateOrgPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [step]);
 
-  function buildOrg() {
-    const orgName = (form.organization_name || '').trim() || 'New Organization';
-    const requestedOrgCode = normalizeCode(form.organization_code || genCodeFromName(orgName) || 'org');
-    const tenantKey = existingOrg ? normalizeCode(existingOrg.key || existingOrg.orgCode || '') : requestedOrgCode;
-    const orgCode = existingOrg ? normalizeCode(existingOrg.orgCode || existingOrg.key || '') : requestedOrgCode;
-    const slugRaw = (form.workspace_slug || tenantKey).toLowerCase().replace(/[^a-z0-9-]/g,'').replace(/-+/g,'-').replace(/^-|-$/g,'') || `org-${Date.now().toString().slice(-4)}`;
-    const industry = existingOrg?.industry || 'Other';
-    const logoText = (orgName[0] || 'N').toUpperCase();
-    const hrAdminName  = (form.hr_admin_name || '').trim();
-    const hrAdminEmail = (form.hr_admin_email || '').trim().toLowerCase();
-    const temporaryPassword = form.temporary_password || generateTempPassword();
-    const snapshot = { ...form, workspace_slug: slugRaw };
-
-    return {
-      ...(existingOrg || {}),
-      key: tenantKey,
-      orgCode,
-      name: orgName,
-      domain: 'pms.zarohr.com',
-      industry,
-      industryBadgeClass: existingOrg?.industryBadgeClass || 'badge-gray',
-      employees: existingOrg ? existingOrg.employees : 0,
-      setupPct: existingOrg ? existingOrg.setupPct : 5,
-      setupStatus: existingOrg ? existingOrg.setupStatus : 'in_progress',
-      setupReopened: existingOrg ? !!existingOrg.setupReopened : false,
-      setupReopenedAt: existingOrg ? existingOrg.setupReopenedAt || null : null,
-      setupReopenedBy: existingOrg ? existingOrg.setupReopenedBy || null : null,
-      setupColor: existingOrg ? existingOrg.setupColor : '#2563EB',
-      status: existingOrg ? existingOrg.status : 'Setup',
-      statusBadgeClass: existingOrg ? existingOrg.statusBadgeClass : 'badge-amber',
-      actionLabel: existingOrg ? existingOrg.actionLabel : 'Continue',
-      workspaceSlug: slugRaw,
-      cyclePhaseWindows: form.cycle_phase_windows || null,
-      // Stamp the last-edit only when the calendar actually changed; preserves
-      // an existing stamp when the user just opens edit-mode and clicks Save.
-      cyclePhaseWindowsLastEditedAt:
-        JSON.stringify(form.cycle_phase_windows || null) !== JSON.stringify(existingOrg?.cyclePhaseWindows || null)
-          ? new Date().toISOString()
-          : (existingOrg?.cyclePhaseWindowsLastEditedAt || null),
-      cyclePhaseWindowsLastEditedBy:
-        JSON.stringify(form.cycle_phase_windows || null) !== JSON.stringify(existingOrg?.cyclePhaseWindows || null)
-          ? 'Super Admin'
-          : (existingOrg?.cyclePhaseWindowsLastEditedBy || null),
-      selectedModules: [...modules],
-      setupFormSnapshot: snapshot,
-      hrAdminName,
-      hrAdminEmail,
-      temporaryPassword,
-      logoText,
-      logoBg: existingOrg ? existingOrg.logoBg : 'linear-gradient(135deg,#3B82F6,#2563EB)',
-    };
-  }
-
   function handleBack() {
     setFeedback('');
     if (step > 0) { setStep(s => s - 1); return; }
     if (!isEdit) clearDraft();
+    window.location.hash = '#organizations';
+  }
+
+  // Creates the org on the backend, then its first (draft) cycle, then the cycle's
+  // phase windows if the admin set any on the Calendar step. Branding is skipped
+  // entirely — this wizard's Workspace step collects no logo/brand-color/brand-name
+  // fields, so there's nothing to send `org.set-branding`. HR-admin invite is
+  // deferred (see the comment above the HR Administrator step below) — no backend
+  // call is made for it here.
+  async function submitCreate() {
+    const orgName = (form.organization_name || '').trim() || 'New Organization';
+    // The Org Code field is explicitly the backend tenant key (see its `f-hint`
+    // copy and the fact it's locked in edit mode "because this is the backend
+    // tenant key"). Workspace Slug remains a UI-only cosmetic field for now —
+    // the backend has no separate slug column.
+    const key = normalizeCode(form.organization_code || genCodeFromName(orgName) || 'org');
+    // No framework picker exists in this wizard yet — every org created here
+    // starts on the generic custom framework; HR can change it later from the
+    // cycle setup screens.
+    const frameworkId = 'custom';
+    const windows = buildWindowsPayload(form.cycle_phase_windows);
+    const periodLabel = buildPeriodLabel(form.cycle_phase_windows);
+    const cycleName = `${orgName} ${periodLabel}`.trim();
+
+    let organization;
+    try {
+      ({ organization } = await callPms('org.create', { key, name: orgName }));
+    } catch (err) {
+      setSaving(false);
+      if (err instanceof PmsError && err.code === 'ORG_KEY_TAKEN') {
+        setStep(0);
+        setFeedback('That workspace key is already taken. Choose a different Org Code.');
+      } else {
+        setFeedback(err instanceof PmsError ? err.message : 'Failed to create organization. Please try again.');
+      }
+      return;
+    }
+
+    // The org now exists on the backend. Clear the draft and remember its id so a
+    // retry after a downstream failure below doesn't try to re-create it (that
+    // would just 409 ORG_KEY_TAKEN since the key is now taken by this very org).
+    clearDraft();
+    setCreatedOrgId(organization.id);
+
+    try {
+      const { cycle } = await callPms('cycle.create-draft', {
+        orgId: organization.id, name: cycleName, periodLabel, frameworkId,
+      });
+      if (windows.length) {
+        await callPms('cycle.set-windows', {
+          orgId: organization.id, cycleId: cycle.id, cycleVersion: cycle.version, windows,
+        });
+      }
+    } catch (err) {
+      setSaving(false);
+      const msg = err instanceof PmsError ? err.message : 'Something went wrong.';
+      setFeedback(`Organization created, but the cycle calendar couldn't be saved: ${msg}. You can set it up later. Click "Continue to Organizations" to go to the directory.`);
+      return;
+    }
+
+    setSaving(false);
     window.location.hash = '#organizations';
   }
 
@@ -331,56 +378,29 @@ export default function CreateOrgPage() {
       return;
     }
 
-    if (isEdit && !isDirty) {
+    if (isEdit) {
+      if (!isDirty) {
+        window.location.hash = '#organizations';
+        return;
+      }
+      // Editing an existing organization isn't wired to the live backend yet —
+      // this task (Plan 5e-1 Task 3) only covers the CREATE path. `existingOrg`
+      // still comes from the legacy local blob, not a real backend org/cycle id,
+      // so there's nothing safe to write here. Say so plainly instead of
+      // silently no-opping or calling the retired blob path.
+      setFeedback("Editing organizations isn't connected to the live system yet. This is coming in a later update — create new organizations from the directory instead.");
+      return;
+    }
+
+    if (createdOrgId) {
+      // A previous attempt already created the org on the backend, but a later
+      // step failed. Nothing left to retry from here — go see it in the directory.
       window.location.hash = '#organizations';
       return;
     }
 
     setSaving(true);
-    setTimeout(async () => {
-      const nextOrg = buildOrg();
-
-      // Merge additional admins as Co-Admins on org.hrTeam, preserving any
-      // pre-existing entries (e.g. PMS-employee co-admins from edit mode).
-      const existingHrTeam = Array.isArray(nextOrg.hrTeam) ? nextOrg.hrTeam : [];
-      const additionalEntries = additionalAdmins
-        .filter((a) => String(a.email || '').trim() && String(a.name || '').trim())
-        .map((a) => ({
-          id: a.id || `co_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
-          type: 'co-admin',
-          name: a.name.trim(),
-          email: a.email.trim().toLowerCase(),
-          empCode: null,
-          isInPMS: false,
-          password: a.password || generateTempPassword(),
-          isTemp: true,
-        }));
-      // Drop any inline-co-admins (non-PMS) we previously stored, so re-edits replace cleanly.
-      const preserved = existingHrTeam.filter((m) => !(m.type === 'co-admin' && !m.isInPMS));
-      nextOrg.hrTeam = [...preserved, ...additionalEntries];
-
-      const persisted = await saveOrganizationRecord(nextOrg);
-      if (!persisted.ok) {
-        setSaving(false);
-        setFeedback(persisted.error || 'Failed to save organization in backend.');
-        return;
-      }
-
-      if (existingOrg) {
-        applyAppData((current) => ({
-          orgs: current.orgs.map((o) => (o.key === editKey ? nextOrg : o)),
-          feedData: current.feedData,
-          pendingActions: current.pendingActions,
-          dashboardFlags: current.dashboardFlags,
-        }));
-      } else {
-        applyAppData((current) => ({ orgs: [nextOrg, ...current.orgs] }));
-      }
-
-      clearDraft();
-      setSaving(false);
-      window.location.hash = '#organizations';
-    }, 900);
+    void submitCreate();
   }
 
   const step0Valid = validateStep0(false);
@@ -391,15 +411,12 @@ export default function CreateOrgPage() {
     || (step === 1 && !calendarValid)
     || (step === 2 && !adminValid)
     || saving
-  ) && !(isEdit && !isDirty && step === STEPS.length - 1);
+  ) && !(isEdit && !isDirty && step === STEPS.length - 1) && !(createdOrgId && step === STEPS.length - 1);
 
   const codeCheck = validateCode(form.organization_code || '');
   const slugCheck = validateSlug(form.workspace_slug || '');
 
   const title = isEdit ? 'Edit Organization' : 'Create Organization';
-  const subtitle = isEdit
-    ? 'Update workspace settings and admin access.'
-    : 'Create the PMS workspace and send admin access.';
 
   return (
     <AdminShell title={title} page="organizations">
@@ -436,7 +453,6 @@ export default function CreateOrgPage() {
                 form={form}
                 onNameInput={handleNameInput}
                 onCodeInput={handleCodeInput}
-                setField={setField}
                 codeCheck={codeCheck}
                 onSlugInput={handleSlugInput}
                 slugCheck={slugCheck}
@@ -466,7 +482,7 @@ export default function CreateOrgPage() {
               {saving
                 ? 'Saving…'
                 : step === STEPS.length - 1
-                  ? (isEdit ? (isDirty ? 'Save Changes' : 'Done') : 'Create Organization')
+                  ? (isEdit ? (isDirty ? 'Save Changes' : 'Done') : (createdOrgId ? 'Continue to Organizations' : 'Create Organization'))
                   : (isEdit ? 'Next' : 'Continue')}
             </button>
           </div>
@@ -476,7 +492,7 @@ export default function CreateOrgPage() {
   );
 }
 
-function StepWorkspace({ isEdit, form, onNameInput, onCodeInput, setField, codeCheck, onSlugInput, slugCheck }) {
+function StepWorkspace({ isEdit, form, onNameInput, onCodeInput, codeCheck, onSlugInput, slugCheck }) {
   return (
     <div>
       <div className="ws-card">
@@ -561,6 +577,13 @@ function StepCalendar({ form, setField, isEdit = false }) {
   );
 }
 
+// "Admin Access" step — collects the HR admin's name/email (and optional inline
+// Co-Admins), but does NOT create or invite any of these users yet. Creating/
+// inviting HR-admin accounts is a later sub-slice (Plan 5e-4); the org is created
+// without an invite. The "send the invite from Communications when ready" copy
+// below stays as the interim signpost — nothing here calls a backend action, and
+// none of `hr_admin_name`/`hr_admin_email`/`additionalAdmins` is sent anywhere by
+// `submitCreate` above.
 function Step2({ form, setField, additionalAdmins, setAdditionalAdmins }) {
   function addAdmin() {
     setAdditionalAdmins((prev) => [...prev, { id: `co_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`, name: '', email: '', password: '' }]);
