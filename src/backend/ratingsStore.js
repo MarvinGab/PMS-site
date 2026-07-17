@@ -22,7 +22,6 @@
 import { shouldUseSupabase } from './config';
 import { supabase } from './supabaseClient';
 import { readAuthSessionSync, readEmployeeSessionSync } from './stateStore';
-import { isSessionTimeoutMessage, notifySessionTimeout } from './sessionTimeout';
 
 const KEY_PREFIX = 'zarohr_ratings_v1';
 const DEFAULT_RATINGS_STATE = { ratings: {}, auditLog: [], publishedAt: null };
@@ -36,6 +35,10 @@ function readServerSessionToken() {
   const authSession = readAuthSessionSync();
   const employeeSession = readEmployeeSessionSync();
   return authSession?.serverSessionToken || employeeSession?.serverSessionToken || '';
+}
+
+function missingLegacySessionResult(error = 'Legacy server session is not available.') {
+  return { ok: false, error };
 }
 
 function normCode(value) {
@@ -461,13 +464,21 @@ export async function submitEmployeeStageAndPersist(orgKey, empCode, stage, valu
   const { allowFallback = false, optimistic = true } = options || {};
   const { next, stamped } = buildSubmittedRatingsState(orgKey, empCode, stage, value, actor);
   if (shouldUseSupabase && supabase) {
+    const serverSessionToken = readServerSessionToken();
+    if (!serverSessionToken) {
+      if (allowFallback) {
+        const fallbackOk = await writeRatingsAndPersist(orgKey, next);
+        if (fallbackOk) return { ok: true, stamped, fallback: true };
+      }
+      return { ...missingLegacySessionResult(), stamped };
+    }
     if (optimistic && allowFallback) writeJson(key(orgKey), next);
     const persistServer = async () => {
       try {
         const { data, error } = await supabase.functions.invoke('pms-actions', {
           body: {
             action: 'submit-rating',
-            serverSessionToken: readServerSessionToken(),
+            serverSessionToken,
             orgKey,
             empCode,
             stage,
@@ -476,10 +487,9 @@ export async function submitEmployeeStageAndPersist(orgKey, empCode, stage, valu
           },
         });
         if (error) throw error;
-	        if (!data?.ok) {
-	          if (isSessionTimeoutMessage(data?.error)) notifySessionTimeout(data?.error);
-	          throw new Error(data?.error || 'Could not submit rating.');
-	        }
+        if (!data?.ok) {
+          throw new Error(data?.error || 'Could not submit rating.');
+        }
         const serverStamped = data.stage || stamped;
         const serverNext = {
           ...next,
@@ -502,10 +512,9 @@ export async function submitEmployeeStageAndPersist(orgKey, empCode, stage, valu
         } catch {
           // Keep the original client error when the function response is not JSON.
         }
-	        if (!allowFallback) {
-	          if (isSessionTimeoutMessage(errorMessage)) notifySessionTimeout(errorMessage);
-	          return { ok: false, error: errorMessage, stamped };
-	        }
+        if (!allowFallback) {
+          return { ok: false, error: errorMessage, stamped };
+        }
         const fallbackOk = await writeRatingsAndPersist(orgKey, next);
         if (fallbackOk) return { ok: true, stamped, fallback: true };
         const failedAt = new Date().toISOString();
@@ -530,10 +539,9 @@ export async function submitEmployeeStageAndPersist(orgKey, empCode, stage, valu
             { ts: failedAt, action: `submit-${stage}-sync-failed`, actor, empCode, reason: errorMessage },
           ],
         };
-	        writeJson(key(orgKey), failedNext);
-	        if (isSessionTimeoutMessage(errorMessage)) notifySessionTimeout(errorMessage);
-	        return { ok: false, error: errorMessage, stamped };
-	      }
+        writeJson(key(orgKey), failedNext);
+        return { ok: false, error: errorMessage, stamped };
+      }
     };
     if (!optimistic || !allowFallback) return persistServer();
     void persistServer();
@@ -547,13 +555,21 @@ export async function clearEmployeeStageAndPersist(orgKey, empCode, stage, actor
   const { allowFallback = false, optimistic = true } = options || {};
   const { next, cleared } = buildClearedRatingsState(orgKey, empCode, stage, actor);
   if (shouldUseSupabase && supabase) {
+    const serverSessionToken = readServerSessionToken();
+    if (!serverSessionToken) {
+      if (allowFallback) {
+        const fallbackOk = await writeRatingsAndPersist(orgKey, next);
+        if (fallbackOk) return { ok: true, stage: cleared, fallback: true };
+      }
+      return { ...missingLegacySessionResult(), stage: cleared };
+    }
     if (optimistic && allowFallback) writeJson(key(orgKey), next);
     const persistServer = async () => {
       try {
         const { data, error } = await supabase.functions.invoke('pms-actions', {
           body: {
             action: 'clear-rating',
-            serverSessionToken: readServerSessionToken(),
+            serverSessionToken,
             orgKey,
             empCode,
             stage,
@@ -858,12 +874,20 @@ function withTimeout(promise, ms, label = 'request') {
 
 async function runRatingsAction(action, body = {}) {
   if (!shouldUseSupabase || !supabase) return { ok: false, error: 'Supabase backend is not configured.' };
+  const serverSessionToken = readServerSessionToken();
+  if (!serverSessionToken) {
+    // Supabase Auth cutover: migrated screens no longer have the legacy app
+    // serverSessionToken. These old ratings actions are transitional blob paths;
+    // failing them must not open the global "session timed out" modal for a
+    // valid Supabase-authenticated user.
+    return { ok: false, error: 'Legacy server session is not available.' };
+  }
   try {
     const { data, error } = await withTimeout(supabase.functions.invoke('pms-actions', {
       body: {
         ...body,
         action,
-        serverSessionToken: readServerSessionToken(),
+        serverSessionToken,
       },
     }), 8000, `pms-actions:${action}`);
     if (error) throw error;
@@ -879,11 +903,9 @@ async function runRatingsAction(action, body = {}) {
     } catch {
       // Keep the original client error when response body is unavailable.
     }
-    // A 401 always means the session is gone, even if the body text couldn't be
-    // read — always raise the sign-in prompt in that case.
-    if (status === 401 || isSessionTimeoutMessage(errorMessage)) {
-      notifySessionTimeout(status === 401 && !isSessionTimeoutMessage(errorMessage) ? 'Sign in again to continue.' : errorMessage);
-    }
+    // Legacy `pms-actions` no longer owns browser authentication. During the
+    // Supabase Auth cutover a 401 here must not open the global sign-in modal;
+    // migrated screens use pms-admin/pms-workflow with bearer tokens instead.
     return { ok: false, error: errorMessage };
   }
 }

@@ -188,7 +188,7 @@ function RatingRow({
         )}
         <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
           <span style={{ fontSize: 11, fontWeight: 700, color: '#64748B', textTransform: 'uppercase', letterSpacing: '.05em' }}>
-            {achievementMode ? 'Override rating' : 'Rating'}
+            {achievementMode ? 'Manual rating (optional)' : 'Rating'}
           </span>
           <RatingScaleSelect
             value={edit?.score ?? ''}
@@ -533,9 +533,9 @@ export default function EmployeeSelfEval() {
     <div style={{ padding: 20 }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12, marginBottom: 16, flexWrap: 'wrap' }}>
         <div>
-          <div style={{ fontSize: 17, fontWeight: 800, color: '#0F172A' }}>{ctx.cycle.name}</div>
+          <div style={{ fontSize: 17, fontWeight: 800, color: '#0F172A' }}>My Goal Evaluation</div>
           <div style={{ fontSize: 12.5, color: '#64748B', marginTop: 2 }}>
-            {ctx.window?.selfEvalOpen ? 'Self-evaluation window is open' : 'Self-evaluation window is closed'}
+            {ctx.cycle.name} · {ctx.window?.selfEvalOpen ? 'Self-evaluation window is open' : 'Self-evaluation window is closed'}
           </div>
         </div>
         <span style={{ fontSize: 12, fontWeight: 700, color: '#334155', background: '#F1F5F9', border: '1px solid #E2E8F0', padding: '5px 12px', borderRadius: 999 }}>

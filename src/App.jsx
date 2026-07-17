@@ -141,6 +141,11 @@ function BootScreen() {
   );
 }
 
+function clearBrowserState() {
+  try { localStorage.clear(); } catch { /* ignore */ }
+  try { sessionStorage.clear(); } catch { /* ignore */ }
+}
+
 function SessionTimeoutModal({ onCancel, onSignIn }) {
   useEffect(() => {
     const onKeyDown = (event) => {
@@ -316,7 +321,29 @@ function Router() {
   }, []);
 
   useEffect(() => {
-    const show = () => setSessionModalOpen(true);
+    if (route !== 'reset') return;
+    clearBrowserState();
+    Promise.resolve(supabase?.auth?.signOut?.())
+      .catch(() => {})
+      .finally(() => {
+        window.location.replace(`${window.location.origin}/#login`);
+        window.location.reload();
+      });
+  }, [route]);
+
+  useEffect(() => {
+    const show = async () => {
+      // During the server-first cutover, some old blob-era modules can still emit
+      // "serverSessionToken expired" even when the user has a valid Supabase Auth
+      // session. Do not interrupt the real session for those transitional calls.
+      try {
+        const { data } = await supabase?.auth?.getSession?.() || {};
+        if (data?.session?.access_token) return;
+      } catch {
+        // If the Supabase check itself fails, fall through to the modal.
+      }
+      setSessionModalOpen(true);
+    };
     window.addEventListener(SESSION_TIMEOUT_EVENT, show);
     return () => window.removeEventListener(SESSION_TIMEOUT_EVENT, show);
   }, []);
@@ -363,7 +390,7 @@ function Router() {
     </>
   );
 
-  if (!authReady) {
+  if (route === 'reset' || !authReady) {
     return withSessionModal(<BootScreen />);
   }
 

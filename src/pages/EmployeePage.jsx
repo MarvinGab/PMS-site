@@ -2891,12 +2891,8 @@ export default function EmployeePage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [reviewConfirm]);
 
-  if (!session) {
-    return null;
-  }
-
-  const employeeName = session.name || session.userName || employee?.['Employee Name'] || `Employee ${session.empCode}`;
-  const rawDesignation = session.designation || employee?.Designation || employee?.[config?.goalSegmentAttr] || '';
+  const employeeName = session?.name || session?.userName || employee?.['Employee Name'] || (session?.empCode ? `Employee ${session.empCode}` : 'Employee');
+  const rawDesignation = session?.designation || employee?.Designation || employee?.[config?.goalSegmentAttr] || '';
   // For managers who aren't uploaded in PMS, the Test Credentials module tags them as "Manager (not in PMS)"
   // for HR's own clarity — but we should never surface that phrasing in the logged-in user's own UI.
   const employeeDesignation = (!employee && !app.employeeCode) ? 'Manager' : (rawDesignation || app.designation || '');
@@ -3051,6 +3047,11 @@ export default function EmployeePage() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [configHydrated, scorePublished, myInSelfEvalPhase, activeSection]);
+
+  if (!session) {
+    return null;
+  }
+
   const canEditGoalPlan = canSetOwnGoals && currentPhase === 'goal-setting' && mySubmission && !['pending-manager', 'approved'].includes(mySubmission.status);
   const canAddKra = canEditGoalPlan && (
     effectiveConfig?.goalCreationMode === 'employee-self' ||
@@ -7656,9 +7657,7 @@ export default function EmployeePage() {
 
           {/* ── Section content ── */}
           {activeSection === 'goals' && (
-            currentPhase === 'goal-setting' ? <EmployeeGoals />
-              : currentPhase === 'self-evaluation' ? <EmployeeSelfEval />
-              : <EmptyState title={`${PHASES[phaseIndex]?.label || 'Current phase'} in progress`} subtitle="This page will unlock the relevant workflow for the active appraisal phase." />
+            <EmployeeGoals />
           )}
           {activeSection === 'deleted-goals' && renderDeletedGoals()}
           {activeSection === 'team' && <ManagerGoalReview />}

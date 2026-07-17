@@ -1,7 +1,6 @@
 import { shouldUseSupabase, getBackendDiagnostics } from './config';
 import { supabase } from './supabaseClient';
 import { hashPasswordValue } from './passwordCrypto';
-import { isSessionTimeoutMessage, notifySessionTimeout } from './sessionTimeout';
 
 const APP_DATA_KEY = 'zarohr_app_data_v1';
 const WIZARD_STATE_KEY = 'zarohr_pms_wizard_state_v1';
@@ -1430,12 +1429,19 @@ async function runWorkflowAction(action, body = {}) {
   if (!shouldUseSupabase || !supabase) {
     return { ok: false, error: 'PMS actions backend is not configured.' };
   }
+  const serverSessionToken = readServerSessionToken();
+  if (!serverSessionToken) {
+    // Supabase Auth cutover: migrated screens no longer have the legacy
+    // serverSessionToken. Keep these old workflow actions quiet instead of
+    // opening the global "session timed out" modal for a valid Supabase user.
+    return { ok: false, error: 'Legacy server session is not available.' };
+  }
   try {
     const { data, error } = await supabase.functions.invoke('pms-actions', {
       body: {
         ...body,
         action,
-        serverSessionToken: readServerSessionToken(),
+        serverSessionToken,
       },
     });
     if (error) throw error;
@@ -1453,7 +1459,9 @@ async function runWorkflowAction(action, body = {}) {
       // Keep the original client error when the function response is not JSON.
 	    }
 	    warnOnce(`workflow-action:${action}`, error);
-	    if (isSessionTimeoutMessage(errorMessage)) notifySessionTimeout(errorMessage);
+	    // Legacy pms-actions no longer owns the browser session after the
+	    // Supabase Auth cutover. Keep this failure local to the old workflow
+	    // caller instead of interrupting valid Supabase-authenticated users.
 	    return { ok: false, error: errorMessage };
 	  }
 	}

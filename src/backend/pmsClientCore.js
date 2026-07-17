@@ -8,20 +8,32 @@ export class PmsError extends Error {
   }
 }
 
-// POST {action,...payload} to ${baseUrl}/functions/v1/${fnName} with a bearer token.
+const DEFAULT_TIMEOUT_MS = 12000;
+
+// POST {action, payload} to ${baseUrl}/functions/v1/${fnName} with a bearer token.
 // Resolve to `data` on {ok:true}; throw PmsError otherwise. fetchImpl defaults to global fetch.
-export async function postAction({ baseUrl, fnName, action, payload = {}, token, fetchImpl }) {
+export async function postAction({ baseUrl, fnName, action, payload = {}, token, fetchImpl, timeoutMs = DEFAULT_TIMEOUT_MS }) {
   if (!token) throw new PmsError('NO_SESSION', 'You are signed out. Please sign in again.', 401);
   const doFetch = fetchImpl || fetch;
+  const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+  const timeout = controller && timeoutMs > 0
+    ? setTimeout(() => controller.abort(), timeoutMs)
+    : null;
   let res;
   try {
     res = await doFetch(`${baseUrl}/functions/v1/${fnName}`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action, ...payload }),
+      body: JSON.stringify({ action, payload }),
+      ...(controller ? { signal: controller.signal } : {}),
     });
   } catch (e) {
+    if (e?.name === 'AbortError') {
+      throw new PmsError('TIMEOUT', 'Request timed out. Please retry.', 0);
+    }
     throw new PmsError('NETWORK', e?.message || 'Network error', 0);
+  } finally {
+    if (timeout) clearTimeout(timeout);
   }
   let body = null;
   try { body = await res.json(); } catch { /* non-JSON */ }

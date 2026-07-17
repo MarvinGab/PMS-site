@@ -6,6 +6,16 @@ function fakeFetch(status, body) {
   return async () => ({ status, ok: status >= 200 && status < 300, json: async () => body, text: async () => JSON.stringify(body) });
 }
 
+test('posts action with nested payload contract', async () => {
+  let sent = null;
+  const fetchImpl = async (_url, opts) => {
+    sent = JSON.parse(opts.body);
+    return { status: 200, ok: true, json: async () => ({ ok: true, data: { ok: 1 } }) };
+  };
+  await postAction({ baseUrl: 'http://x', fnName: 'pms-admin', action: 'thing.do', payload: { orgId: 'org-1' }, token: 't', fetchImpl });
+  assert.deepEqual(sent, { action: 'thing.do', payload: { orgId: 'org-1' } });
+});
+
 test('returns data on ok:true', async () => {
   const data = await postAction({ baseUrl: 'http://x', fnName: 'pms-admin', action: 'a', payload: {}, token: 't', fetchImpl: fakeFetch(200, { ok: true, data: { hi: 1 } }) });
   assert.deepEqual(data, { hi: 1 });
