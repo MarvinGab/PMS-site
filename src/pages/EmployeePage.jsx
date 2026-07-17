@@ -2344,7 +2344,12 @@ export default function EmployeePage() {
       unsubscribeRatings();
     };
   }, [session?.orgKey]);
-  const myInSelfEvalPhase = mySubmissionStatus === 'approved';
+  // "My Goal Evaluation" (self-eval) tab visibility. The old blob `mySubmissionStatus` is
+  // frozen after the goals cutover, so gate on the backend's calendar-derived phase
+  // (bootstrap `currentPhase`) — the self-eval window being the active phase. EmployeeSelfEval
+  // itself then enforces goals-approved + window-open and shows a clear status message inside
+  // the tab (so the tab never opens a different workflow — it just says why it's not ready).
+  const myInSelfEvalPhase = app.currentPhase === 'self-evaluation' || mySubmissionStatus === 'approved';
   const myInManagerEvalPhase = isManagerForSomeone && reportsReadyForManagerEval > 0;
   // Persist the active tab so refresh stays on the same tab.
   const activeSectionKey = `zarohr_emp_active_section:${session?.orgKey || 'default'}:${session?.empCode || 'anon'}`;
