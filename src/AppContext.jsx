@@ -39,6 +39,14 @@ const DEFAULT_BOOTSTRAP = {
   hodReportsCount: 0,
 };
 
+function withTimeout(promise, ms, label) {
+  let timeoutId;
+  const timeout = new Promise((_, reject) => {
+    timeoutId = setTimeout(() => reject(new Error(`${label || 'Operation'} timed out`)), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timeoutId));
+}
+
 function isLegacySeededAppData(data) {
   const orgKeys = Array.isArray(data?.organizationsData)
     ? data.organizationsData.map((org) => org?.key).filter(Boolean)
@@ -128,17 +136,53 @@ export function AppProvider({ children }) {
   useEffect(() => {
     if (!supabase) { setAuthReady(true); return; }
     let active = true;
-    supabase.auth.getSession().then(async ({ data }) => {
-      if (!active) return;
-      applyIdentity(data.session);
-      if (data.session) await refreshIdentity(); else setBootstrap(DEFAULT_BOOTSTRAP);
-      setAuthReady(true);
-    });
-    const { data: sub } = supabase.auth.onAuthStateChange(async (_event, session) => {
+
+    // Belt-and-braces: the boot screen is gated on authReady, so GUARANTEE it flips — no
+    // supabase-auth hiccup (a stuck Web Lock, a hung token refresh, a corrupt stored token)
+    // may ever leave the app stranded on "Loading your workspace…".
+    const readyFallback = setTimeout(() => { if (active) setAuthReady(true); }, 6000);
+    const markReady = () => { if (active) { clearTimeout(readyFallback); setAuthReady(true); } };
+
+    const resetIdentity = () => {
+      setRole(null); setOrgId(null); setEmployeeId(null); setMemberships([]); setBootstrap(DEFAULT_BOOTSTRAP);
+    };
+
+    withTimeout(supabase.auth.getSession(), 8000, 'Supabase session')
+      .then(async ({ data }) => {
+        if (!active) return;
+        applyIdentity(data.session);
+        if (data.session) {
+          await withTimeout(refreshIdentity(), 12000, 'Identity bootstrap');
+        } else {
+          setBootstrap(DEFAULT_BOOTSTRAP);
+        }
+      })
+      .catch((error) => {
+        console.warn('[auth] initial session bootstrap failed', error);
+        if (active) { applyIdentity(null); resetIdentity(); }
+      })
+      .finally(markReady);
+
+    const { data: sub } = supabase.auth.onAuthStateChange((_event, session) => {
+      // IMPORTANT: keep this callback SYNCHRONOUS. supabase-js holds its auth lock while the
+      // callback runs; refreshIdentity()/refreshBootstrap() call getSession() internally, which
+      // would then wait on that very lock → deadlock (the app hangs on the boot screen). Defer
+      // the async work to a macrotask so the lock is released before it runs.
       applyIdentity(session);
-      if (session) await refreshIdentity(); else { setRole(null); setOrgId(null); setEmployeeId(null); setMemberships([]); setBootstrap(DEFAULT_BOOTSTRAP); }
+      setTimeout(async () => {
+        if (!active) return;
+        try {
+          if (session) await withTimeout(refreshIdentity(), 12000, 'Identity refresh');
+          else resetIdentity();
+        } catch (error) {
+          console.warn('[auth] identity refresh failed', error);
+          if (active) resetIdentity();
+        } finally {
+          markReady();
+        }
+      }, 0);
     });
-    return () => { active = false; sub?.subscription?.unsubscribe?.(); };
+    return () => { active = false; clearTimeout(readyFallback); sub?.subscription?.unsubscribe?.(); };
   }, [applyIdentity, refreshIdentity]);
 
   const signOut = useCallback(async () => {
